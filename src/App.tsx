@@ -10,7 +10,7 @@ function App() {
     setGreetMsg(await invoke("greet", { name }));
   }
   return (
-    <main className="container">
+    <main className="container min-h-screen">
       <h1>Welcome to Tauri + React</h1>
       <div className="row">
         <a href="https://vite.dev" target="_blank">
