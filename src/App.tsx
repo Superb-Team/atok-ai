@@ -33,14 +33,14 @@ function App() {
       const webview = new WebviewWindow('recording-popup', {
         url: 'recording-popup.html',
         title: 'Atok.ai Recording Studio',
-        width: 650,
-        height: 80,
+        width: 750,
+        height: 85,
         x: 100, // Will be adjusted to center via JavaScript
         y: 50, // Position in upper part of screen
-        minWidth: 600,
-        minHeight: 70,
-        maxWidth: 800,
-        maxHeight: 90,
+        minWidth: 700,
+        minHeight: 80,
+        maxWidth: 900,
+        maxHeight: 100,
         center: false, // We'll position it manually
         resizable: false,
         decorations: false,
