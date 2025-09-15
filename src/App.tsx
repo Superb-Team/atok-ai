@@ -1,8 +1,6 @@
+import FloatingActionMenu from "@/components/ui/floating-action-menu";
 import { invoke } from "@tauri-apps/api/core";
-import { CheckSquare, Eye, FileText, Home, LogOut, Moon, Puzzle, Sun } from "lucide-react";
-import { useState } from "react";
 import "./App.css";
-import AIChatInterface from "./searchAI/page";
 
 function App() {
   const [greetMsg, setGreetMsg] = useState("");
@@ -20,9 +18,42 @@ function App() {
     document.documentElement.classList.toggle('dark');
   };
 
-  const handleOpenPopup = () => {
-    console.log("Open pop-up view clicked");
-    // TODO: Implement popup functionality
+  const handleOpenPopup = async () => {
+    console.log("Opening recording popup window...");
+    try {
+      // Check if WebviewWindow is available
+      console.log("WebviewWindow available:", !!WebviewWindow);
+
+      const webview = new WebviewWindow('recording-popup', {
+        url: 'recording-popup.html',
+        title: 'Atok.ai Recording Studio',
+        width: 800,
+        height: 80,
+        minWidth: 600,
+        minHeight: 60,
+        maxHeight: 100,
+        center: true,
+        resizable: false,
+        decorations: false,
+        alwaysOnTop: true,
+        skipTaskbar: false,
+        transparent: true,
+        shadow: true,
+      });
+
+      console.log("WebviewWindow created:", webview);
+
+      // Listen for window events
+      webview.once('tauri://created', () => {
+        console.log('Recording popup window created');
+      });
+
+      webview.once('tauri://error', (e) => {
+        console.error('Error creating recording popup window:', e);
+      });
+    } catch (error) {
+      console.error('Failed to create recording popup window:', error);
+    }
   };
 
   const handleCreateNote = () => {
