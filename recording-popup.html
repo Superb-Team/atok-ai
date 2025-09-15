@@ -5,8 +5,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Atok.ai Recording Studio</title>
     <script type="module" crossorigin src="/src/recording-popup-main.tsx"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html, body {
+        background: transparent !important;
+        overflow: hidden;
+        height: 100vh;
+        width: 100vw;
+      }
+      #recording-popup-root {
+        background: transparent !important;
+        height: 100vh;
+        width: 100vw;
+      }
+    </style>
   </head>
-  <body>
+  <body style="background: transparent !important;">
     <div id="recording-popup-root"></div>
   </body>
 </html>
