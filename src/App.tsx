@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Sidebar, SidebarBody, SidebarLink } from "@/components/ui/sidebar";
-import { Home, Puzzle, CheckSquare, LogOut, Moon, Sun, Eye, FileText } from "lucide-react";
+import { Home, Puzzle, CheckSquare, LogOut, Moon, Sun, Eye, FileText, Search } from "lucide-react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
@@ -35,16 +35,19 @@ function App() {
         title: 'Atok.ai Recording Studio',
         width: 800,
         height: 80,
+        x: 100, // Will be adjusted to center via JavaScript
+        y: 100, // Position in upper part of screen
         minWidth: 600,
-        minHeight: 60,
+        minHeight: 70,
+        maxWidth: 1000,
         maxHeight: 100,
-        center: true,
+        center: false, // We'll position it manually
         resizable: false,
         decorations: false,
         alwaysOnTop: true,
-        skipTaskbar: false,
+        skipTaskbar: true,
         transparent: true,
-        shadow: true,
+        shadow: false,
       });
 
       console.log("WebviewWindow created:", webview);
@@ -73,6 +76,13 @@ function App() {
       href: "#",
       icon: (
         <Home className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
+      ),
+    },
+    {
+      label: "AI Search",
+      href: "#",
+      icon: (
+        <Search className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
     },
     {

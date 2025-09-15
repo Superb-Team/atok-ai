@@ -1,28 +1,58 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Pause, Settings, Maximize2, Star } from 'lucide-react';
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { Button } from './ui/button';
+import { Mic, Settings, Maximize, Star } from 'lucide-react';
+
+declare global {
+  interface CSSStyleDeclaration {
+    webkitAppRegion?: string;
+  }
+}
 
 const RecordingPopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const [time, setTime] = useState(0);
+  const [time, setTime] = useState({ hours: 0, minutes: 0, seconds: 0 });
+  const [isDarkMode, setIsDarkMode] = useState(true);
 
+  // Timer logic
   useEffect(() => {
     let interval: NodeJS.Timeout;
+    
     if (isRecording && !isPaused) {
       interval = setInterval(() => {
-        setTime(prevTime => prevTime + 1);
+        setTime(prevTime => {
+          const newSeconds = prevTime.seconds + 1;
+          const newMinutes = prevTime.minutes + Math.floor(newSeconds / 60);
+          const newHours = prevTime.hours + Math.floor(newMinutes / 60);
+          
+          return {
+            hours: newHours,
+            minutes: newMinutes % 60,
+            seconds: newSeconds % 60,
+          };
+        });
       }, 1000);
     }
+    
     return () => clearInterval(interval);
   }, [isRecording, isPaused]);
 
-  const formatTime = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const remainingSeconds = seconds % 60;
-    return `${hours.toString().padStart(2, '0')} : ${minutes.toString().padStart(2, '0')} : ${remainingSeconds.toString().padStart(2, '0')}`;
-  };
+  // Check for theme from parent window or system
+  useEffect(() => {
+    const checkTheme = () => {
+      const isDark = document.documentElement.classList.contains('dark') || 
+                     window.matchMedia('(prefers-color-scheme: dark)').matches;
+      setIsDarkMode(isDark);
+    };
+    
+    checkTheme();
+    
+    // Listen for theme changes
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    mediaQuery.addEventListener('change', checkTheme);
+    
+    return () => mediaQuery.removeEventListener('change', checkTheme);
+  }, []);
 
   const handleRecord = () => {
     if (!isRecording) {
@@ -33,101 +63,130 @@ const RecordingPopupApp: React.FC = () => {
     }
   };
 
-  const handleSettings = () => {
-    console.log('Settings clicked');
-  };
-
-  const handleFullscreen = () => {
-    console.log('Fullscreen clicked');
-  };
-
-  const handleStar = () => {
-    console.log('Star clicked');
-  };
-
-  const handleFinish = async () => {
+  const handleStop = () => {
     setIsRecording(false);
     setIsPaused(false);
-    setTime(0);
-    
-    // Close the popup window
-    try {
-      const webview = WebviewWindow.getCurrent();
-      await webview.close();
-    } catch (error) {
-      console.error('Error closing window:', error);
-    }
+    setTime({ hours: 0, minutes: 0, seconds: 0 });
   };
 
+  const formatTime = (value: number) => value.toString().padStart(2, '0');
+
   return (
-    <div className="w-full h-full flex items-center justify-center bg-transparent">
-      <div className="bg-black/90 backdrop-blur-sm rounded-full px-6 py-3 flex items-center gap-4 shadow-2xl border border-gray-700/50">
-        {/* Record Button */}
-        <button
-          onClick={handleRecord}
-          className={`px-4 py-2 rounded-full font-medium text-sm transition-all ${
-            isRecording
-              ? isPaused
-                ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
-                : 'bg-red-600 hover:bg-red-700 text-white'
-              : 'bg-red-600 hover:bg-red-700 text-white'
-          }`}
-        >
-          {isRecording ? (isPaused ? 'RESUME' : 'RECORDING') : 'RECORD'}
-        </button>
-
-        {/* Pause Button (only show when recording) */}
-        {isRecording && (
-          <button
-            onClick={() => setIsPaused(!isPaused)}
-            className="w-8 h-8 flex items-center justify-center bg-gray-700 hover:bg-gray-600 rounded-full transition-colors"
+    <div 
+      className={`w-full h-full flex items-center justify-center ${isDarkMode ? 'dark' : ''}`}
+      style={{
+        background: 'transparent',
+      }}
+    >
+      {/* Main recording bar - wider and more horizontal */}
+      <div 
+        className="flex items-center justify-between px-4 py-2 rounded-full shadow-2xl border backdrop-blur-md drag-region"
+        style={{
+          background: isDarkMode 
+            ? 'rgba(17, 17, 17, 0.95)' 
+            : 'rgba(255, 255, 255, 0.95)',
+          border: isDarkMode 
+            ? '1px solid rgba(255, 255, 255, 0.1)' 
+            : '1px solid rgba(0, 0, 0, 0.1)',
+          minWidth: '600px',
+          height: '50px',
+        }}
+      >
+        {/* Left section - Record button */}
+        <div className="flex items-center gap-3 no-drag">
+          <Button
+            onClick={handleRecord}
+            size="sm"
+            className={`rounded-full px-4 py-2 font-medium transition-all ${
+              isRecording
+                ? isPaused
+                  ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                  : 'bg-red-600 hover:bg-red-700 text-white'
+                : 'bg-red-500 hover:bg-red-600 text-white'
+            }`}
           >
-            {isPaused ? (
-              <Play className="w-4 h-4 text-white" />
+            {isRecording ? (isPaused ? 'RESUME' : 'PAUSE') : 'RECORD'}
+          </Button>
+
+          {/* Pause/Play icon */}
+          <Button
+            onClick={handleRecord}
+            size="sm"
+            variant="ghost"
+            className={`w-8 h-8 rounded-full p-0 ${
+              isDarkMode 
+                ? 'hover:bg-white/10 text-white' 
+                : 'hover:bg-black/10 text-black'
+            }`}
+          >
+            {isRecording && !isPaused ? (
+              <div className="w-3 h-3 bg-current rounded-sm flex gap-0.5">
+                <div className="w-1 h-full bg-current"></div>
+                <div className="w-1 h-full bg-current"></div>
+              </div>
             ) : (
-              <Pause className="w-4 h-4 text-white" />
+              <Mic className="w-4 h-4" />
             )}
-          </button>
-        )}
-
-        {/* Settings Button */}
-        <button
-          onClick={handleSettings}
-          className="w-8 h-8 flex items-center justify-center bg-gray-700 hover:bg-gray-600 rounded-full transition-colors"
-        >
-          <Settings className="w-4 h-4 text-white" />
-        </button>
-
-        {/* Timer Display */}
-        <div className="bg-gray-800 px-4 py-2 rounded-full">
-          <span className="text-white font-mono text-sm">
-            {formatTime(time)}
-          </span>
+          </Button>
         </div>
 
-        {/* Fullscreen Button */}
-        <button
-          onClick={handleFullscreen}
-          className="w-8 h-8 flex items-center justify-center bg-gray-700 hover:bg-gray-600 rounded-full transition-colors"
+        {/* Center section - Timer */}
+        <div 
+          className={`px-4 py-1 rounded-full font-mono text-sm font-medium ${
+            isDarkMode 
+              ? 'bg-black/30 text-white' 
+              : 'bg-white/50 text-black'
+          }`}
         >
-          <Maximize2 className="w-4 h-4 text-white" />
-        </button>
+          {formatTime(time.hours)}:{formatTime(time.minutes)}:{formatTime(time.seconds)}
+        </div>
 
-        {/* Star Button */}
-        <button
-          onClick={handleStar}
-          className="w-8 h-8 flex items-center justify-center bg-gray-700 hover:bg-gray-600 rounded-full transition-colors"
-        >
-          <Star className="w-4 h-4 text-white" />
-        </button>
+        {/* Right section - Controls */}
+        <div className="flex items-center gap-2 no-drag">
+          <Button
+            size="sm"
+            variant="ghost"
+            className={`w-8 h-8 rounded-full p-0 ${
+              isDarkMode 
+                ? 'hover:bg-white/10 text-white' 
+                : 'hover:bg-black/10 text-black'
+            }`}
+          >
+            <Settings className="w-4 h-4" />
+          </Button>
 
-        {/* Finish Button */}
-        <button
-          onClick={handleFinish}
-          className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-full font-medium text-sm transition-colors"
-        >
-          FINISH
-        </button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className={`w-8 h-8 rounded-full p-0 ${
+              isDarkMode 
+                ? 'hover:bg-white/10 text-white' 
+                : 'hover:bg-black/10 text-black'
+            }`}
+          >
+            <Maximize className="w-4 h-4" />
+          </Button>
+
+          <Button
+            size="sm"
+            variant="ghost"
+            className={`w-8 h-8 rounded-full p-0 ${
+              isDarkMode 
+                ? 'hover:bg-white/10 text-white' 
+                : 'hover:bg-black/10 text-black'
+            }`}
+          >
+            <Star className="w-4 h-4" />
+          </Button>
+
+          <Button
+            onClick={handleStop}
+            size="sm"
+            className="rounded-full px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-medium"
+          >
+            FINISH
+          </Button>
+        </div>
       </div>
     </div>
   );
