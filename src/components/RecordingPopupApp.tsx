@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, Window } from '@tauri-apps/api/window';
 import { Play, Pause, Square, Settings, Sparkles, Maximize2, RotateCw } from 'lucide-react';
 
 const RecordingPopupApp: React.FC = () => {
@@ -7,6 +7,7 @@ const RecordingPopupApp: React.FC = () => {
   const [isPaused, setIsPaused] = useState(false);
   const [time, setTime] = useState(0);
   const [isDarkMode, setIsDarkMode] = useState(false);
+  const [appWindow, setAppWindow] = useState<Window | null>(null);
 
   // Format time as MM:SS:MS
   const formatTime = (seconds: number) => {
@@ -15,6 +16,20 @@ const RecordingPopupApp: React.FC = () => {
     const ms = Math.floor((seconds % 1) * 100);
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}:${ms.toString().padStart(2, '0')}`;
   };
+
+  // Get window reference in useEffect (Tauri 2.0 best practice)
+  useEffect(() => {
+    async function fetchWindow() {
+      try {
+        const window = getCurrentWindow();
+        setAppWindow(window);
+        console.log('✅ Window reference stored successfully');
+      } catch (error) {
+        console.error('❌ Error getting window reference:', error);
+      }
+    }
+    fetchWindow();
+  }, []);
 
   // Timer effect
   useEffect(() => {
@@ -59,12 +74,29 @@ const RecordingPopupApp: React.FC = () => {
     setTime(0);
   };
 
-  const handleFinish = async () => {
-    try {
-      const window = getCurrentWindow();
-      await window.close();
-    } catch (error) {
-      console.error('Failed to close window:', error);
+  const handleFinish = () => {
+    console.log('🔴 FINISH BUTTON CLICKED - Starting close process');
+    
+    if (appWindow) {
+      console.log('✅ Using stored window reference to close...');
+      appWindow.close().then(() => {
+        console.log('✅ Window close promise resolved');
+      }).catch((error) => {
+        console.error('❌ Window close promise rejected:', error);
+      });
+    } else {
+      console.log('⚠️ No stored window reference, trying getCurrentWindow...');
+      try {
+        const currentWindow = getCurrentWindow();
+        console.log('✅ Got current window, calling close...');
+        currentWindow.close().then(() => {
+          console.log('✅ Window close promise resolved');
+        }).catch((error) => {
+          console.error('❌ Window close promise rejected:', error);
+        });
+      } catch (error) {
+        console.error('❌ Error getting current window:', error);
+      }
     }
   };
 
@@ -216,7 +248,19 @@ const RecordingPopupApp: React.FC = () => {
           </button>
 
           <button
-            onClick={handleFinish}
+            onClick={(e) => {
+              console.log('🟡 FINISH button onClick fired!', e.type);
+              e.preventDefault();
+              e.stopPropagation();
+              handleFinish();
+            }}
+            onMouseDown={(e) => {
+              console.log('🟡 FINISH button onMouseDown fired!');
+              e.preventDefault();
+            }}
+            onPointerDown={() => {
+              console.log('🟡 FINISH button onPointerDown fired!');
+            }}
             className={`
               px-4 py-2 rounded-full font-medium text-sm no-drag
               transition-all duration-200 hover:scale-105 active:scale-95
@@ -225,6 +269,10 @@ const RecordingPopupApp: React.FC = () => {
                 : 'bg-red-500 hover:bg-red-600 text-white'
               }
             `}
+            style={{ 
+              pointerEvents: 'auto',
+              cursor: 'pointer'
+            }}
           >
             FINISH
           </button>
