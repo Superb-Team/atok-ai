@@ -8,7 +8,9 @@
     "opener:default",
     "core:webview:default",
     "core:webview:allow-create-webview-window",
+    "core:webview:allow-webview-close",
     "core:window:default",
-    "core:window:allow-create"
+    "core:window:allow-create",
+    "core:window:allow-close"
   ]
 }
