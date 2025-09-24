@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
-import { Play, Pause, Square, Settings, Sparkles, Maximize2, RotateCw } from 'lucide-react';
+import { Pause, Square, Settings, Sparkles, Maximize2 } from 'lucide-react';
 
 const RecordingPopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
@@ -61,9 +61,11 @@ const RecordingPopupApp: React.FC = () => {
       setIsRecording(true);
       setIsPaused(false);
       setTime(0);
-    } else if (isPaused) {
-      setIsPaused(false);
-    } else {
+    }
+  };
+
+  const handlePause = () => {
+    if (isRecording && !isPaused) {
       setIsPaused(true);
     }
   };
@@ -73,6 +75,7 @@ const RecordingPopupApp: React.FC = () => {
     setIsPaused(false);
     setTime(0);
   };
+
 
   const handleFinish = () => {
     console.log('🔴 FINISH BUTTON CLICKED - Starting close process');
@@ -115,11 +118,6 @@ const RecordingPopupApp: React.FC = () => {
     // TODO: Implement maximize functionality
   };
 
-  const handleRotate = () => {
-    console.log('Rotate view clicked');
-    // TODO: Implement rotate functionality
-  };
-
   return (
     <div 
       className="w-full h-full flex items-center justify-center drag-region"
@@ -127,53 +125,78 @@ const RecordingPopupApp: React.FC = () => {
     >
       <div 
         className={`
-          flex items-center justify-between px-6 py-3 rounded-full
+          flex items-center justify-between px-8 py-4 rounded-full
           backdrop-blur-md border shadow-xl
           ${isDarkMode 
             ? 'bg-black/80 border-gray-700 text-white' 
             : 'bg-white/90 border-gray-200 text-gray-900'
           }
           transition-all duration-300 ease-in-out
-          w-[720px] h-16
+          w-[720px] h-15 mx-4
         `}
       >
         {/* Left Section - Record/Pause Button */}
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-2 ml-2">
           <button
             onClick={handleRecord}
             className={`
-              flex items-center space-x-2 px-4 py-2 rounded-full font-medium text-sm no-drag
+              px-1.5 py-1 rounded font-medium text-xs no-drag ml-1
               transition-all duration-200 hover:scale-105 active:scale-95
-              ${isRecording && !isPaused
-                ? (isDarkMode ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-red-500 hover:bg-red-600 text-white')
-                : (isDarkMode ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-200 hover:bg-gray-300 text-gray-800')
+              ${!isRecording
+                ? (isDarkMode ? 'text-green-400 hover:text-green-300' : 'text-green-600 hover:text-green-500')
+                : (isDarkMode ? 'text-gray-400' : 'text-gray-500')
               }
             `}
+            style={{ borderRadius: '4px', background: 'transparent' }}
+            disabled={isRecording}
           >
-            {isRecording && !isPaused ? (
-              <>
-                <Pause className="w-3.5 h-3.5" />
-                <span>PAUSE</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-3.5 h-3.5" />
-                <span>RECORD</span>
-              </>
-            )}
+            RECORD
           </button>
 
+          {isRecording && !isPaused && (
+            <button
+              onClick={handlePause}
+              className={`
+                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+                ${isDarkMode
+                  ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                  : 'bg-yellow-500 hover:bg-yellow-600 text-white'
+                }
+              `}
+              title="Pause"
+            >
+              <Pause className="w-3 h-3" />
+            </button>
+          )}
+
+          {isRecording && (
+            <button
+              onClick={handleStop}
+              className={`
+                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+                ${isDarkMode
+                  ? 'bg-red-600 hover:bg-red-700 text-white'
+                  : 'bg-red-500 hover:bg-red-600 text-white'
+                }
+              `}
+              title="Stop"
+            >
+              <Square className="w-3 h-3" />
+            </button>
+          )}
+
           <button
-            onClick={handleStop}
+            onClick={handleSettings}
             className={`
-              p-2 rounded-lg transition-all duration-200 hover:scale-105 active:scale-95 no-drag
-              ${isDarkMode 
-                ? 'bg-gray-700 hover:bg-gray-600 text-white' 
+              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+              ${isDarkMode
+                ? 'bg-gray-700 hover:bg-gray-600 text-white'
                 : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
               }
             `}
+            title="Settings"
           >
-            <Square className="w-3.5 h-3.5" />
+            <Settings className="w-3 h-3" />
           </button>
         </div>
 
@@ -190,61 +213,33 @@ const RecordingPopupApp: React.FC = () => {
         </div>
 
         {/* Right Section - Action Buttons */}
-        <div className="flex items-center space-x-2">
-          <button
-            onClick={handleSettings}
-            className={`
-              p-2 rounded-lg transition-all duration-200 hover:scale-105 active:scale-95 no-drag
-              ${isDarkMode 
-                ? 'bg-gray-700 hover:bg-gray-600 text-white' 
-                : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
-              }
-            `}
-            title="Settings"
-          >
-            <Settings className="w-3.5 h-3.5" />
-          </button>
-
-          <button
-            onClick={handleSparkles}
-            className={`
-              p-2 rounded-lg transition-all duration-200 hover:scale-105 active:scale-95 no-drag
-              ${isDarkMode 
-                ? 'bg-purple-700 hover:bg-purple-600 text-white' 
-                : 'bg-purple-200 hover:bg-purple-300 text-purple-700'
-              }
-            `}
-            title="AI Enhancement"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-          </button>
-
+        <div className="flex items-center space-x-2 mr-2">
           <button
             onClick={handleMaximize}
             className={`
-              p-2 rounded-lg transition-all duration-200 hover:scale-105 active:scale-95 no-drag
-              ${isDarkMode 
-                ? 'bg-gray-700 hover:bg-gray-600 text-white' 
+              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+              ${isDarkMode
+                ? 'bg-gray-700 hover:bg-gray-600 text-white'
                 : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
               }
             `}
             title="Maximize"
           >
-            <Maximize2 className="w-3.5 h-3.5" />
+            <Maximize2 className="w-3 h-3" />
           </button>
 
           <button
-            onClick={handleRotate}
+            onClick={handleSparkles}
             className={`
-              p-2 rounded-lg transition-all duration-200 hover:scale-105 active:scale-95 no-drag
-              ${isDarkMode 
-                ? 'bg-gray-700 hover:bg-gray-600 text-white' 
-                : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
+              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+              ${isDarkMode
+                ? 'bg-purple-700 hover:bg-purple-600 text-white'
+                : 'bg-purple-200 hover:bg-purple-300 text-purple-700'
               }
             `}
-            title="Rotate View"
+            title="AI Enhancement"
           >
-            <RotateCw className="w-3.5 h-3.5" />
+            <Sparkles className="w-3 h-3" />
           </button>
 
           <button
@@ -262,16 +257,18 @@ const RecordingPopupApp: React.FC = () => {
               console.log('🟡 FINISH button onPointerDown fired!');
             }}
             className={`
-              px-4 py-2 rounded-full font-medium text-sm no-drag
+              px-1.5 py-1 font-medium text-xs no-drag mr-1
               transition-all duration-200 hover:scale-105 active:scale-95
-              ${isDarkMode 
-                ? 'bg-red-600 hover:bg-red-700 text-white' 
-                : 'bg-red-500 hover:bg-red-600 text-white'
+              ${isDarkMode
+                ? 'text-red-400 hover:text-red-300'
+                : 'text-red-600 hover:text-red-500'
               }
             `}
-            style={{ 
+            style={{
               pointerEvents: 'auto',
-              cursor: 'pointer'
+              cursor: 'pointer',
+              borderRadius: '4px',
+              background: 'transparent'
             }}
           >
             FINISH
