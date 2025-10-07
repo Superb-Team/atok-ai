@@ -4,8 +4,7 @@ import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { motion } from "framer-motion";
-import { CheckSquare, Eye, FileText, Home, LogOut, Moon, Puzzle, Sun } from "lucide-react";
-import { useState } from "react";
+import { CheckSquare, Eye, FileText, Home, LogOut, Moon, Puzzle, Search, Sun } from "lucide-react";
 import "./App.css";
 
 function App() {
@@ -13,6 +12,7 @@ function App() {
   const [name, setName] = useState("");
   const [open, setOpen] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+  const [currentPage, setCurrentPage] = useState("home");
 
   async function greet() {
     // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -48,6 +48,7 @@ function App() {
         skipTaskbar: true,
         transparent: true,
         shadow: false,
+        dragDropEnabled: false, // Important: disable drag-drop to enable window dragging
       });
 
       console.log("WebviewWindow created:", webview);
@@ -77,6 +78,7 @@ function App() {
       icon: (
         <Home className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
+      onClick: () => setCurrentPage("home"),
     },
     {
       label: "AI Search",
@@ -84,6 +86,7 @@ function App() {
       icon: (
         <Search className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
+      onClick: () => setCurrentPage("search"),
     },
     {
       label: "Extensions",
@@ -91,6 +94,7 @@ function App() {
       icon: (
         <Puzzle className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
+      onClick: () => setCurrentPage("extensions"),
     },
     {
       label: "Tasks",
@@ -98,6 +102,15 @@ function App() {
       icon: (
         <CheckSquare className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
+      onClick: () => setCurrentPage("tasks"),
+    },
+    {
+      label: "Knowledge Management",
+      href: "#",
+      icon: (
+        <Brain className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
+      ),
+      onClick: () => setCurrentPage("memory"),
     },
   ];
 
@@ -111,6 +124,13 @@ function App() {
         <Moon className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
       onClick: toggleDarkMode,
+    },
+    {
+      label: "Settings",
+      href: "#",
+      icon: (
+        <Settings className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
+      ),
     },
     {
       label: "Logout",
@@ -144,7 +164,11 @@ function App() {
             {open ? <Logo /> : <LogoIcon />}
             <div className="mt-8 flex flex-col gap-2">
               {links.map((link, idx) => (
-                <SidebarLink key={idx} link={link} />
+                <SidebarLink
+                  key={idx}
+                  link={link}
+                  onClick={link.onClick}
+                />
               ))}
             </div>
           </div>
