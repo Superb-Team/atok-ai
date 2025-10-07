@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
 import { Pause, Square, Settings, Sparkles, Maximize2 } from 'lucide-react';
 
@@ -8,6 +8,7 @@ const RecordingPopupApp: React.FC = () => {
   const [time, setTime] = useState(0);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
+  const dragAreaRef = useRef<HTMLDivElement>(null);
 
   // Format time as MM:SS:MS
   const formatTime = (seconds: number) => {
@@ -30,6 +31,36 @@ const RecordingPopupApp: React.FC = () => {
     }
     fetchWindow();
   }, []);
+
+  // Setup drag functionality using JavaScript API
+  useEffect(() => {
+    if (!appWindow || !dragAreaRef.current) return;
+
+    const dragArea = dragAreaRef.current;
+
+    const handleMouseDown = async (e: MouseEvent) => {
+      // Ignore if clicking on interactive elements
+      const target = e.target as HTMLElement;
+      if (target.closest('button') || target.closest('input')) {
+        return;
+      }
+
+      console.log('🎯 Mouse down on drag area, starting drag...');
+      
+      try {
+        await appWindow.startDragging();
+        console.log('✅ Drag started successfully');
+      } catch (error) {
+        console.error('❌ Error starting drag:', error);
+      }
+    };
+
+    dragArea.addEventListener('mousedown', handleMouseDown);
+
+    return () => {
+      dragArea.removeEventListener('mousedown', handleMouseDown);
+    };
+  }, [appWindow]);
 
   // Timer effect
   useEffect(() => {
@@ -120,10 +151,12 @@ const RecordingPopupApp: React.FC = () => {
 
   return (
     <div 
-      className="w-full h-full flex items-center justify-center drag-region"
+      className="w-full h-full flex items-center justify-center"
       style={{ background: 'transparent' }}
     >
       <div 
+        ref={dragAreaRef}
+        data-tauri-drag-region
         className={`
           flex items-center justify-between px-8 py-4 rounded-full
           backdrop-blur-md border shadow-xl
@@ -134,6 +167,12 @@ const RecordingPopupApp: React.FC = () => {
           transition-all duration-300 ease-in-out
           w-[720px] h-15 mx-4
         `}
+        style={{ 
+          cursor: 'move',
+          WebkitAppRegion: 'drag',
+          // @ts-ignore
+          appRegion: 'drag'
+        }}
       >
         {/* Left Section - Record/Pause Button */}
         <div className="flex items-center space-x-2 ml-2">
@@ -147,7 +186,13 @@ const RecordingPopupApp: React.FC = () => {
                 : (isDarkMode ? 'text-gray-400' : 'text-gray-500')
               }
             `}
-            style={{ borderRadius: '4px', background: 'transparent' }}
+            style={{ 
+              borderRadius: '4px', 
+              background: 'transparent',
+              // @ts-ignore
+              WebkitAppRegion: 'no-drag',
+              appRegion: 'no-drag'
+            }}
             disabled={isRecording}
           >
             RECORD
