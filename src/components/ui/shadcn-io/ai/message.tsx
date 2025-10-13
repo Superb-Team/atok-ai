@@ -7,6 +7,9 @@ import { cn } from '@/lib/utils';
 import type { UIMessage } from 'ai';
 import type { ComponentProps, HTMLAttributes } from 'react';
 
+// ====================================================================
+// 1. Corrected Message Component for Positioning
+// ====================================================================
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage['role'];
 };
@@ -14,8 +17,11 @@ export type MessageProps = HTMLAttributes<HTMLDivElement> & {
 export const Message = ({ className, from, ...props }: MessageProps) => (
   <div
     className={cn(
-      'group flex w-full items-end justify-end gap-2 py-4',
-      from === 'user' ? 'is-user' : 'is-assistant flex-row-reverse justify-end',
+      // Base flex container styles
+      'group flex w-full items-end gap-2 py-4',
+      // Position the entire block: right for user, left for assistant
+      from === 'user' ? 'is-user justify-end' : 'is-assistant justify-start',
+      // Set a max-width for the children
       '[&>div]:max-w-[80%]',
       className
     )}
@@ -23,6 +29,9 @@ export const Message = ({ className, from, ...props }: MessageProps) => (
   />
 );
 
+// ====================================================================
+// 2. Corrected MessageContent for the Bubble Shape
+// ====================================================================
 export type MessageContentProps = HTMLAttributes<HTMLDivElement>;
 
 export const MessageContent = ({
@@ -32,17 +41,30 @@ export const MessageContent = ({
 }: MessageContentProps) => (
   <div
     className={cn(
-      'flex flex-col gap-2 overflow-hidden rounded-lg px-4 py-3 text-foreground text-sm',
+      // Base layout, padding, and text styles
+      'flex flex-col gap-2 overflow-hidden px-4 py-3 text-sm text-foreground',
+      // Base shape for all bubbles - reduced border radius from 'rounded-lg' to 'rounded-md'
+      'rounded-md',
+      // Conditional colors
       'group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground',
       'group-[.is-assistant]:bg-secondary group-[.is-assistant]:text-foreground',
+      // *** THE KEY FIX FOR THE BUBBLE "TAIL" ***
+      // For the user, make the top-right corner sharp
+      'group-[.is-user]:rounded-tr-none',
+      // For the assistant, make the top-left corner sharp
+      'group-[.is-assistant]:rounded-tl-none',
       className
     )}
     {...props}
   >
-    <div className="is-user:dark">{children}</div>
+    {/* This inner div is not strictly necessary but kept from original code */}
+    <div>{children}</div>
   </div>
 );
 
+// ====================================================================
+// 3. MessageAvatar Component (No changes needed)
+// ====================================================================
 export type MessageAvatarProps = ComponentProps<typeof Avatar> & {
   src: string;
   name?: string;
@@ -55,7 +77,12 @@ export const MessageAvatar = ({
   ...props
 }: MessageAvatarProps) => (
   <Avatar
-    className={cn('size-8 ring ring-1 ring-border', className)}
+    className={cn(
+      'size-8 shrink-0 ring-1 ring-border',
+      // Avatar user di kanan, assistant di kiri
+      'group-[.is-user]:order-last',
+      className
+    )}
     {...props}
   >
     <AvatarImage alt="" className="mt-0 mb-0" src={src} />

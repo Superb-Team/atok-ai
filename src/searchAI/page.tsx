@@ -1,6 +1,5 @@
 "use client";
 
-import React, { useState } from "react";
 import {
   Conversation,
   ConversationContent,
@@ -8,33 +7,26 @@ import {
 } from "@/components/ui/shadcn-io/ai/conversation";
 import {
   Message,
-  MessageContent,
   MessageAvatar,
+  MessageContent,
 } from "@/components/ui/shadcn-io/ai/message";
 import {
   PromptInput,
+  PromptInputModelSelect,
+  PromptInputModelSelectContent,
+  PromptInputModelSelectItem,
+  PromptInputModelSelectTrigger,
+  PromptInputModelSelectValue,
+  PromptInputSubmit,
   PromptInputTextarea,
   PromptInputToolbar,
   PromptInputTools,
-  PromptInputButton,
-  PromptInputSubmit,
-  PromptInputModelSelect,
-  PromptInputModelSelectTrigger,
-  PromptInputModelSelectContent,
-  PromptInputModelSelectItem,
-  PromptInputModelSelectValue,
 } from "@/components/ui/shadcn-io/ai/prompt-input";
-import { Mic, Paperclip, Bot, User } from "lucide-react";
-
-// Mock data untuk demonstrasi
-const models = [
-  { id: "gpt-4o", name: "GPT-4o" },
-  { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet" },
-  { id: "gemini-pro", name: "Gemini Pro" },
-];
+import React, { useState } from "react";
 
 // Mock status untuk demonstrasi
 type ChatStatus = "ready" | "submitted" | "streaming" | "error";
+type ChatMode = "chat" | "agent";
 
 // Mock messages untuk demo
 const initialMessages = [
@@ -57,7 +49,7 @@ const initialMessages = [
 
 export default function AIChatInterface() {
   const [input, setInput] = useState("");
-  const [selectedModel, setSelectedModel] = useState(models[0].id);
+  const [chatMode, setChatMode] = useState<ChatMode>("chat");
   const [messages, setMessages] = useState(initialMessages);
   const [status, setStatus] = useState<ChatStatus>("ready");
 
@@ -72,7 +64,7 @@ export default function AIChatInterface() {
     ];
 
     const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-    return `${randomResponse}\n\nRegarding "${userMessage}" - this is a simulated response. When you integrate with a real AI backend, this will be replaced with actual AI responses from the selected model (${models.find(m => m.id === selectedModel)?.name}).`;
+    return `${randomResponse}\n\nRegarding "${userMessage}" - this is a simulated response in ${chatMode} mode.`;
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -121,22 +113,9 @@ export default function AIChatInterface() {
 
   return (
     <div className="flex flex-col h-screen max-w-4xl mx-auto bg-background">
-      {/* Header */}
-      <div className="border-b p-4 bg-card">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <Bot className="h-6 w-6 text-primary" />
-            <div>
-              <h1 className="text-lg font-semibold">AI Chat Assistant</h1>
-              <p className="text-sm text-muted-foreground">
-                Ready to help with your questions
-              </p>
-            </div>
-          </div>
-          <div className="text-sm text-muted-foreground">
-            Model: {models.find(m => m.id === selectedModel)?.name}
-          </div>
-        </div>
+      {/* Header - Clean version */}
+      <div className="border-b p-2 bg-card">
+        {/* Empty header for clean look */}
       </div>
 
       {/* Chat Container */}
@@ -185,13 +164,13 @@ export default function AIChatInterface() {
       </div>
 
       {/* Input Section */}
-      <div className="border-t p-4 bg-card">
+      <div className="p-4">
         <PromptInput onSubmit={handleSubmit} className="max-w-none">
           <PromptInputTextarea
             value={input}
             onChange={(e) => setInput(e.currentTarget.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Type your message here... (Press Shift+Enter for new line)"
+            placeholder="Type here what you gonna do with your notes..."
             minHeight={48}
             maxHeight={200}
             className="resize-none"
@@ -199,39 +178,14 @@ export default function AIChatInterface() {
 
           <PromptInputToolbar>
             <PromptInputTools>
-              {/* Attachment Button */}
-              <PromptInputButton
-                variant="ghost"
-                size="sm"
-                title="Attach file"
-              >
-                <Paperclip size={16} />
-              </PromptInputButton>
-
-              {/* Voice Input Button */}
-              <PromptInputButton
-                variant="ghost"
-                size="sm"
-                title="Voice input"
-              >
-                <Mic size={16} />
-                <span className="hidden sm:inline ml-1">Voice</span>
-              </PromptInputButton>
-
-              {/* Model Selection */}
-              <PromptInputModelSelect
-                value={selectedModel}
-                onValueChange={setSelectedModel}
-              >
-                <PromptInputModelSelectTrigger className="w-[180px]">
+              {/* Chat/Agent Select Dropdown - Clean Design */}
+              <PromptInputModelSelect value={chatMode} onValueChange={(value: ChatMode) => setChatMode(value)}>
+                <PromptInputModelSelectTrigger className="w-auto min-w-[100px]">
                   <PromptInputModelSelectValue />
                 </PromptInputModelSelectTrigger>
                 <PromptInputModelSelectContent>
-                  {models.map((model) => (
-                    <PromptInputModelSelectItem key={model.id} value={model.id}>
-                      {model.name}
-                    </PromptInputModelSelectItem>
-                  ))}
+                  <PromptInputModelSelectItem value="chat">Chat</PromptInputModelSelectItem>
+                  <PromptInputModelSelectItem value="agent">Agent</PromptInputModelSelectItem>
                 </PromptInputModelSelectContent>
               </PromptInputModelSelect>
             </PromptInputTools>
@@ -239,7 +193,8 @@ export default function AIChatInterface() {
             <PromptInputSubmit
               disabled={!input.trim() || status !== "ready"}
               status={status}
-              className="ml-2"
+              variant="ghost"
+              className="text-foreground hover:text-foreground/80 hover:bg-transparent"
             />
           </PromptInputToolbar>
         </PromptInput>
