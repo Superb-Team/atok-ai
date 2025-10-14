@@ -194,7 +194,7 @@ export default function AIChatInterface() {
               disabled={!input.trim() || status !== "ready"}
               status={status}
               variant="ghost"
-              className="text-foreground hover:text-foreground/80 hover:bg-transparent"
+              className="bg-transparent hover:bg-transparent text-foreground hover:text-foreground/80 dark:bg-transparent dark:hover:bg-transparent"
             />
           </PromptInputToolbar>
         </PromptInput>
