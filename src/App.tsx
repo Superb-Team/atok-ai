@@ -3,6 +3,7 @@ import TasksPage from "@/components/TasksPage";
 import FloatingActionMenu from "@/components/ui/floating-action-menu";
 import { Sidebar, SidebarBody, SidebarLink } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
+import AIChatInterface from "@/searchAI/page";
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { motion } from "framer-motion";
@@ -204,6 +205,8 @@ function App() {
         <TasksPage />
       ) : currentPage === "extensions" ? (
         <ExtensionsPage />
+        ) : currentPage === "search" ? (
+          <AIChatInterface />
       ) : (
         <MainContent greetMsg={greetMsg} name={name} setName={setName} greet={greet} />
       )}
