@@ -1,3 +1,25 @@
+import ExtensionsPage from "@/components/ExtensionsPage";
+import TasksPage from "@/components/TasksPage";
+import FloatingActionMenu from "@/components/ui/floating-action-menu";
+import { Sidebar, SidebarBody, SidebarLink } from "@/components/ui/sidebar";
+import { cn } from "@/lib/utils";
+import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { motion } from "framer-motion";
+import {
+  Brain,
+  CheckSquare,
+  Eye,
+  FileText,
+  Home,
+  LogOut,
+  Moon,
+  Puzzle,
+  Search,
+  Settings,
+  Sun
+} from "lucide-react";
+import { useState } from "react";
 import "./App.css";
 
 function App() {
