@@ -37,21 +37,21 @@ function App() {
         url: 'recording-popup.html',
         title: 'Atok.ai Recording Studio',
         width: 750,
-        height: 85,
-        x: 100, // Will be adjusted to center via JavaScript
-        y: 50, // Position in upper part of screen
+        height: 350,  // Increased height for permission dialogs
+        x: 100,
+        y: 50,
         minWidth: 700,
-        minHeight: 80,
+        minHeight: 300,
         maxWidth: 900,
-        maxHeight: 100,
-        center: false, // We'll position it manually
-        resizable: false,
+        maxHeight: 500,
+        center: true,  // Center the window so dialogs appear centered
+        resizable: true,  // Allow resize so user can adjust if needed
         decorations: false,
         alwaysOnTop: true,
         skipTaskbar: true,
         transparent: true,
         shadow: false,
-        dragDropEnabled: false, // Important: disable drag-drop to enable window dragging
+        dragDropEnabled: false,
       });
 
       console.log("WebviewWindow created:", webview);

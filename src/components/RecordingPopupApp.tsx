@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
-import { Pause, Square, Settings, Sparkles, Maximize2 } from 'lucide-react';
+import { Pause, Square, Settings, Sparkles, Maximize2, Play } from 'lucide-react';
 
 const RecordingPopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
@@ -9,6 +9,15 @@ const RecordingPopupApp: React.FC = () => {
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
   const dragAreaRef = useRef<HTMLDivElement>(null);
+  const [showPermissionGuide, setShowPermissionGuide] = useState(false);
+  
+  // Recording refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const desktopStreamRef = useRef<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const mergedStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   // Format time as MM:SS:MS
   const formatTime = (seconds: number) => {
@@ -16,6 +25,225 @@ const RecordingPopupApp: React.FC = () => {
     const secs = Math.floor(seconds % 60);
     const ms = Math.floor((seconds % 1) * 100);
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}:${ms.toString().padStart(2, '0')}`;
+  };
+
+  // Merge audio streams using Web Audio API
+  const mergeAudioStreams = (desktopStream: MediaStream, micStream: MediaStream): MediaStream => {
+    const context = new AudioContext();
+    audioContextRef.current = context;
+
+    const desktopSource = context.createMediaStreamSource(desktopStream);
+    const micSource = context.createMediaStreamSource(micStream);
+    const destination = context.createMediaStreamDestination();
+    
+    desktopSource.connect(destination);
+    micSource.connect(destination);
+    
+    return destination.stream;
+  };
+
+  // Start recording with better permission handling
+  const startRecordingWithGuide = async () => {
+    try {
+      console.log('🎙️ Starting audio recording...');
+      
+      let desktopStream: MediaStream | null = null;
+      let micStream: MediaStream | null = null;
+
+      // Step 1: Request desktop audio
+      try {
+        console.log('📺 Requesting screen/audio capture...');
+        
+        // Show guide first
+        const proceed = confirm('Atok AI akan meminta akses:\n\n1. Audio Desktop (pilih tab/window + centang "Share audio")\n2. Microphone\n\nLanjutkan?');
+        
+        if (!proceed) {
+          setIsRecording(false);
+          return;
+        }
+        
+        desktopStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,  // MUST be true to get audio option in Chrome
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+          } as any
+        });
+
+        // Remove video track immediately, keep only audio
+        const videoTracks = desktopStream.getVideoTracks();
+        videoTracks.forEach((track: MediaStreamTrack) => track.stop());
+        
+        const audioTracks = desktopStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          throw new Error('NO_AUDIO_TRACK');
+        }
+
+        console.log('✅ Desktop audio captured');
+      } catch (error: any) {
+        console.error('❌ Desktop audio error:', error);
+        
+        if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+          confirm('Akses ditolak.\n\nTips: Pada dialog berikutnya, centang "Share audio" dan klik "Share"');
+        } else if (error.message === 'NO_AUDIO_TRACK') {
+          confirm('Audio tidak terdeteksi!\n\nPastikan centang "Share audio" saat memilih tab/window');
+        } else {
+          confirm('Error: ' + error.message);
+        }
+        
+        setIsRecording(false);
+        return;
+      }
+      
+      // Step 2: Request microphone
+      try {
+        console.log('🎤 Requesting microphone...');
+        
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000,
+          }
+        });
+        
+        console.log('✅ Microphone captured');
+      } catch (error: any) {
+        console.error('❌ Microphone error:', error);
+        
+        if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+          confirm('Microphone ditolak.\n\nSilakan izinkan akses microphone.');
+        } else {
+          confirm('Error mic: ' + error.message);
+        }
+        
+        // Cleanup desktop stream
+        if (desktopStream) {
+          desktopStream.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+        }
+        setIsRecording(false);
+        return;
+      }
+      
+      // Store streams
+      desktopStreamRef.current = desktopStream;
+      micStreamRef.current = micStream;
+      
+      // Merge streams
+      const mergedStream = mergeAudioStreams(desktopStream, micStream);
+      mergedStreamRef.current = mergedStream;
+      
+      // Create MediaRecorder
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+      
+      const mediaRecorder = new MediaRecorder(mergedStream, {
+        mimeType,
+        audioBitsPerSecond: 128000
+      });
+      
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+      
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+          console.log('📦 Chunk:', event.data.size, 'bytes');
+        }
+      };
+      
+      mediaRecorder.onstop = async () => {
+        console.log('⏹️ Saving recording...');
+        await saveRecording();
+      };
+      
+      mediaRecorder.start(1000);
+      console.log('✅ Recording started!');
+      
+      setIsRecording(true);
+      setIsPaused(false);
+      
+    } catch (error) {
+      console.error('❌ Unexpected error:', error);
+      alert('Error: ' + error);
+      setIsRecording(false);
+    }
+  };
+
+  // Stop all streams
+  const stopAllStreams = () => {
+    if (desktopStreamRef.current) {
+      desktopStreamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+    }
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+    }
+    if (mergedStreamRef.current) {
+      mergedStreamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+    }
+  };
+
+  // Save recording
+  const saveRecording = async () => {
+    if (audioChunksRef.current.length === 0) {
+      console.log('⚠️ No data');
+      return;
+    }
+
+    try {
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const filename = `atok-recording-${timestamp}.webm`;
+      
+      // Method 1: Browser download (auto ke Downloads folder)
+      const url = URL.createObjectURL(audioBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      console.log('✅ Saved:', filename);
+      console.log('📁 Location: Downloads folder');
+      
+      // Show notification in popup
+      const savedMessage = document.createElement('div');
+      savedMessage.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: ${isDarkMode ? '#22c55e' : '#16a34a'};
+        color: white;
+        padding: 16px 24px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        z-index: 9999;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      `;
+      savedMessage.textContent = `✅ Saved: ${filename}`;
+      document.body.appendChild(savedMessage);
+      
+      setTimeout(() => {
+        document.body.removeChild(savedMessage);
+      }, 3000);
+      
+      audioChunksRef.current = [];
+      
+    } catch (error) {
+      console.error('❌ Save error:', error);
+      alert('Gagal menyimpan recording');
+    }
   };
 
   // Get window reference in useEffect (Tauri 2.0 best practice)
@@ -62,6 +290,18 @@ const RecordingPopupApp: React.FC = () => {
     };
   }, [appWindow]);
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (isRecording) {
+        stopAllStreams();
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+      }
+    };
+  }, [isRecording]);
+
   // Timer effect
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -87,30 +327,47 @@ const RecordingPopupApp: React.FC = () => {
     return () => darkModeQuery.removeEventListener('change', checkDarkMode);
   }, []);
 
-  const handleRecord = () => {
+  const handleRecord = async () => {
     if (!isRecording) {
-      setIsRecording(true);
-      setIsPaused(false);
       setTime(0);
+      await startRecordingWithGuide();
     }
   };
 
   const handlePause = () => {
-    if (isRecording && !isPaused) {
+    if (isRecording && !isPaused && mediaRecorderRef.current) {
       setIsPaused(true);
+      mediaRecorderRef.current.pause();
+      console.log('⏸️ Paused');
+    }
+  };
+
+  const handleResume = () => {
+    if (isRecording && isPaused && mediaRecorderRef.current) {
+      setIsPaused(false);
+      mediaRecorderRef.current.resume();
+      console.log('▶️ Resumed');
     }
   };
 
   const handleStop = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    stopAllStreams();
     setIsRecording(false);
     setIsPaused(false);
     setTime(0);
   };
 
-
-  const handleFinish = () => {
-    console.log('🔴 FINISH BUTTON CLICKED - Starting close process');
+  const handleFinish = async () => {
+    console.log('🔴 FINISH BUTTON CLICKED');
     
+    if (isRecording) {
+      handleStop();
+    }
+    
+    // Close window
     if (appWindow) {
       console.log('✅ Using stored window reference to close...');
       appWindow.close().then(() => {
@@ -168,10 +425,7 @@ const RecordingPopupApp: React.FC = () => {
           w-[720px] h-15 mx-4
         `}
         style={{ 
-          cursor: 'move',
-          WebkitAppRegion: 'drag',
-          // @ts-ignore
-          appRegion: 'drag'
+          cursor: 'move'
         }}
       >
         {/* Left Section - Record/Pause Button */}
@@ -197,6 +451,22 @@ const RecordingPopupApp: React.FC = () => {
           >
             RECORD
           </button>
+
+          {isRecording && isPaused && (
+            <button
+              onClick={handleResume}
+              className={`
+                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+                ${isDarkMode
+                  ? 'bg-green-600 hover:bg-green-700 text-white'
+                  : 'bg-green-500 hover:bg-green-600 text-white'
+                }
+              `}
+              title="Resume"
+            >
+              <Play className="w-3 h-3" />
+            </button>
+          )}
 
           {isRecording && !isPaused && (
             <button
