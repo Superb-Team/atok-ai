@@ -7,6 +7,8 @@
     "core:default",
     "opener:default",
     "mic-recorder:default",
+    "core:path:default",
+    "core:path:allow-resolve-directory",
     "core:webview:default",
     "core:webview:allow-create-webview-window",
     "core:webview:allow-webview-close",
