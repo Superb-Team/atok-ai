@@ -1,7 +1,10 @@
-import React, { useState } from 'react';
-import { Plus, CheckCircle2, Circle, Clock, GripVertical } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { CheckCircle2, Circle, Clock, GripVertical } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
+import { taskService } from '@/services/task.service';
+import { authService } from '@/services/auth.service';
+import type { Task as DBTask, TaskPositionUpdate } from '@/types/task.types';
 import {
   DndContext,
   DragOverlay,
@@ -13,6 +16,7 @@ import {
   DragStartEvent,
   DragOverEvent,
   DragEndEvent,
+  useDroppable,
 } from '@dnd-kit/core';
 import {
   arrayMove,
@@ -24,11 +28,12 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 
 interface Task {
-  id: string;
+  id: number;
   title: string;
   duration: string;
   completed: boolean;
   date?: string;
+  dbTask: DBTask;
 }
 
 interface Column {
@@ -43,7 +48,7 @@ interface SortableTaskProps {
   task: Task;
   index: number;
   columnId: string;
-  toggleTaskCompletion: (columnId: string, taskId: string) => void;
+  toggleTaskCompletion: (columnId: string, taskId: number) => void;
 }
 
 const SortableTask: React.FC<SortableTaskProps> = ({ task, index, columnId, toggleTaskCompletion }) => {
@@ -110,45 +115,91 @@ const SortableTask: React.FC<SortableTaskProps> = ({ task, index, columnId, togg
   );
 };
 
+// Droppable Column Component
+interface DroppableColumnProps {
+  column: Column;
+  children: React.ReactNode;
+}
+
+const DroppableColumn: React.FC<DroppableColumnProps> = ({ column, children }) => {
+  const { setNodeRef, isOver } = useDroppable({
+    id: column.id,
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`flex-1 overflow-y-auto space-y-2 md:space-y-3 mb-3 md:mb-4 pr-1 min-h-[200px] rounded-lg transition-colors ${
+        isOver ? 'bg-primary/5 border-2 border-primary/30 border-dashed' : ''
+      }`}
+    >
+      {children}
+    </div>
+  );
+};
+
 const TasksPage: React.FC = () => {
   const [columns, setColumns] = useState<Column[]>([
-    {
-      id: 'backlog',
-      title: 'Backlog',
-      color: 'gray',
-      tasks: []
-    },
-    {
-      id: 'thisweek',
-      title: 'This Week',
-      color: 'blue',
-      tasks: []
-    },
-    {
-      id: 'today',
-      title: 'Today',
-      color: 'blue',
-      tasks: [
-        { id: '1', title: 'Walk The Dog', duration: '20 Min', completed: false },
-        { id: '2', title: 'Review Code', duration: '30 Min', completed: false },
-        { id: '3', title: 'Team Meeting', duration: '45 Min', completed: false }
-      ]
-    },
-    {
-      id: 'done',
-      title: 'Done',
-      color: 'green',
-      tasks: [
-        { id: '4', title: 'Morning Exercise', duration: '20 Min', completed: true, date: 'Mon 1 Sep 2025' }
-      ]
-    }
+    { id: 'backlog', title: 'Backlog', color: 'gray', tasks: [] },
+    { id: 'this_week', title: 'This Week', color: 'blue', tasks: [] },
+    { id: 'today', title: 'Today', color: 'blue', tasks: [] },
+    { id: 'done', title: 'Done', color: 'green', tasks: [] }
   ]);
 
   const [newTaskInput, setNewTaskInput] = useState<{ [key: string]: string }>({});
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadTasks();
+  }, []);
+
+  const loadTasks = async () => {
+    try {
+      const user = authService.getUser();
+      if (!user) return;
+
+      const dbTasks = await taskService.getTasks(user.id);
+      
+      // Group tasks by status
+      const tasksByStatus: { [key: string]: Task[] } = {
+        backlog: [],
+        this_week: [],
+        today: [],
+        done: []
+      };
+
+      dbTasks.forEach(dbTask => {
+        const task: Task = {
+          id: dbTask.id,
+          title: dbTask.title,
+          duration: dbTask.duration_minutes ? `${dbTask.duration_minutes} Min` : '20 Min',
+          completed: !!dbTask.completed_at,
+          date: dbTask.completed_at ? new Date(dbTask.completed_at).toLocaleDateString('en-US', { 
+            weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' 
+          }) : undefined,
+          dbTask
+        };
+        tasksByStatus[dbTask.status]?.push(task);
+      });
+
+      setColumns(prev => prev.map(col => ({
+        ...col,
+        tasks: tasksByStatus[col.id] || []
+      })));
+    } catch (error) {
+      console.error('Failed to load tasks:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const sensors = useSensors(
-    useSensor(PointerSensor),
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     })
@@ -156,22 +207,28 @@ const TasksPage: React.FC = () => {
 
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
-    setActiveId(active.id as string);
+    setActiveId(active.id as number);
   };
 
   const handleDragOver = (event: DragOverEvent) => {
     const { active, over } = event;
     if (!over) return;
 
-    const activeId = active.id as string;
-    const overId = over.id as string;
+    const activeId = active.id as number;
+    const overId = over.id;
 
+    // Find which column the active task is in
     const activeColumn = columns.find(col => 
       col.tasks.some(task => task.id === activeId)
     );
-    const overColumn = columns.find(col => 
-      col.id === overId || col.tasks.some(task => task.id === overId)
-    );
+    
+    // Find which column we're over (either by column id or task id)
+    let overColumn = columns.find(col => col.id === overId);
+    if (!overColumn) {
+      overColumn = columns.find(col => 
+        col.tasks.some(task => task.id === overId)
+      );
+    }
 
     if (!activeColumn || !overColumn) return;
     if (activeColumn.id === overColumn.id) return;
@@ -184,9 +241,11 @@ const TasksPage: React.FC = () => {
       const overIndex = overItems.findIndex(task => task.id === overId);
 
       let newIndex: number;
-      if (overId in prev) {
+      // If dropping on column itself (empty column), add to end
+      if (overId === overColumn.id) {
         newIndex = overItems.length;
       } else {
+        // If dropping on a task, insert at that position
         const isBelowLastItem = over && overIndex === overItems.length - 1;
         const modifier = isBelowLastItem ? 1 : 0;
         newIndex = overIndex >= 0 ? overIndex + modifier : overItems.length;
@@ -212,15 +271,15 @@ const TasksPage: React.FC = () => {
     });
   };
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over) {
       setActiveId(null);
       return;
     }
 
-    const activeId = active.id as string;
-    const overId = over.id as string;
+    const activeId = active.id as number;
+    const overId = over.id;
 
     const activeColumn = columns.find(col => 
       col.tasks.some(task => task.id === activeId)
@@ -246,51 +305,107 @@ const TasksPage: React.FC = () => {
       }));
     }
 
+    // Save positions to database
+    await saveTaskPositions();
     setActiveId(null);
   };
 
-  const addTask = (columnId: string) => {
+  const saveTaskPositions = async () => {
+    try {
+      const user = authService.getUser();
+      if (!user) return;
+
+      const updates: TaskPositionUpdate[] = [];
+      columns.forEach(col => {
+        col.tasks.forEach((task, index) => {
+          updates.push({
+            id: task.id,
+            position: index,
+            status: col.id
+          });
+        });
+      });
+
+      await taskService.updateTaskPositions(user.id, updates);
+    } catch (error) {
+      console.error('Failed to save task positions:', error);
+    }
+  };
+
+  const addTask = async (columnId: string) => {
     const taskTitle = newTaskInput[columnId]?.trim();
     if (!taskTitle) return;
 
-    const newTask: Task = {
-      id: Date.now().toString(),
-      title: taskTitle,
-      duration: '20 Min',
-      completed: false
-    };
+    try {
+      const user = authService.getUser();
+      if (!user) return;
 
-    setColumns(prev => prev.map(col => 
-      col.id === columnId 
-        ? { ...col, tasks: [...col.tasks, newTask] }
-        : col
-    ));
+      const dbTask = await taskService.createTask(user.id, {
+        title: taskTitle,
+        status: columnId,
+        duration_minutes: 20
+      });
 
-    setNewTaskInput(prev => ({ ...prev, [columnId]: '' }));
+      const newTask: Task = {
+        id: dbTask.id,
+        title: dbTask.title,
+        duration: `${dbTask.duration_minutes || 20} Min`,
+        completed: false,
+        dbTask
+      };
+
+      setColumns(prev => prev.map(col => 
+        col.id === columnId 
+          ? { ...col, tasks: [...col.tasks, newTask] }
+          : col
+      ));
+
+      setNewTaskInput(prev => ({ ...prev, [columnId]: '' }));
+    } catch (error) {
+      console.error('Failed to create task:', error);
+    }
   };
 
-  const clearAllTasks = (columnId: string) => {
-    setColumns(prev => prev.map(col => 
-      col.id === columnId 
-        ? { ...col, tasks: [] }
-        : col
-    ));
+  const clearAllTasks = async (columnId: string) => {
+    try {
+      const user = authService.getUser();
+      if (!user) return;
+
+      await taskService.clearColumnTasks(user.id, columnId);
+      
+      setColumns(prev => prev.map(col => 
+        col.id === columnId 
+          ? { ...col, tasks: [] }
+          : col
+      ));
+    } catch (error) {
+      console.error('Failed to clear tasks:', error);
+    }
   };
 
-  const toggleTaskCompletion = (columnId: string, taskId: string) => {
-    setColumns(prev => prev.map(col => {
-      if (col.id === columnId) {
-        return {
-          ...col,
-          tasks: col.tasks.map(task => 
-            task.id === taskId 
-              ? { ...task, completed: !task.completed }
-              : task
-          )
-        };
-      }
-      return col;
-    }));
+  const toggleTaskCompletion = async (columnId: string, taskId: number) => {
+    try {
+      const user = authService.getUser();
+      if (!user) return;
+
+      await taskService.toggleTaskCompletion(taskId, user.id);
+      
+      setColumns(prev => prev.map(col => {
+        if (col.id === columnId) {
+          return {
+            ...col,
+            tasks: col.tasks.map(task => 
+              task.id === taskId 
+                ? { ...task, completed: !task.completed }
+                : task
+            )
+          };
+        }
+        return col;
+      }));
+    } catch (error) {
+      console.error('Failed to toggle task completion:', error);
+    }
   };
 
   const getTaskCount = (columnId: string) => {
@@ -324,11 +439,17 @@ const TasksPage: React.FC = () => {
           <h1 className="text-2xl md:text-3xl lg:text-4xl font-bold mb-4 md:mb-6 lg:mb-8 text-foreground">Tasks</h1>
           
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-5 lg:gap-6">
-            {columns.map(column => (
-              <div
-                key={column.id}
-                className="bg-card rounded-xl md:rounded-2xl p-4 md:p-5 lg:p-6 shadow-sm border border-border flex flex-col h-[500px] md:h-[550px] lg:h-[600px] hover:shadow-lg transition-shadow"
-              >
+            {loading ? (
+              <div className="col-span-full flex items-center justify-center py-16">
+                <p className="text-muted-foreground">Loading tasks...</p>
+              </div>
+            ) : (
+              columns.map(column => (
+                <div
+                  key={column.id}
+                  id={column.id}
+                  className="bg-card rounded-xl md:rounded-2xl p-4 md:p-5 lg:p-6 shadow-sm border border-border flex flex-col h-[500px] md:h-[550px] lg:h-[600px] hover:shadow-lg transition-shadow"
+                >
                 {/* Column Header */}
                 <div className="mb-3 md:mb-4">
                   <div className="flex items-center justify-between mb-2 md:mb-3">
@@ -368,21 +489,10 @@ const TasksPage: React.FC = () => {
 
                 {/* Add Task Input */}
                 <div className="mb-3 md:mb-4">
-                  <Button
-                    variant="ghost"
-                    className="w-full justify-start gap-2 h-auto py-1.5 md:py-2 px-2 md:px-3 font-medium uppercase tracking-wide text-xs hover:bg-accent/50"
-                    onClick={() => {
-                      const input = document.querySelector(`input[data-column="${column.id}"]`) as HTMLInputElement;
-                      input?.focus();
-                    }}
-                  >
-                    <Plus className="w-3 h-3 md:w-4 md:h-4" />
-                    <span className="text-xs">ADD TASK</span>
-                  </Button>
                   <input
                     type="text"
                     data-column={column.id}
-                    placeholder="Type task name..."
+                    placeholder="Type task name and press Enter..."
                     value={newTaskInput[column.id] || ''}
                     onChange={(e) => setNewTaskInput(prev => ({ ...prev, [column.id]: e.target.value }))}
                     onKeyDown={(e) => {
@@ -390,28 +500,33 @@ const TasksPage: React.FC = () => {
                         addTask(column.id);
                       }
                     }}
-                    className="w-full mt-2 px-2 md:px-3 py-1.5 md:py-2 bg-muted/30 border border-border rounded-md outline-none text-xs md:text-sm placeholder:text-muted-foreground/70 focus:border-ring focus:ring-2 focus:ring-ring/20"
+                    className="w-full px-2 md:px-3 py-1.5 md:py-2 bg-muted/30 border border-border rounded-md outline-none text-xs md:text-sm placeholder:text-muted-foreground/70 focus:border-ring focus:ring-2 focus:ring-ring/20"
                   />
                   <div className="h-px bg-border/60 mt-2 md:mt-3" />
                 </div>
 
-                {/* Droppable Tasks List with Custom Scrollbar */}
+                {/* Droppable Tasks List - Make entire area droppable */}
                 <SortableContext
                   items={column.tasks.map(task => task.id)}
                   strategy={verticalListSortingStrategy}
-                  id={column.id}
                 >
-                  <div className="flex-1 overflow-y-auto space-y-2 md:space-y-3 mb-3 md:mb-4 pr-1">
-                    {column.tasks.map((task, index) => (
-                      <SortableTask
-                        key={task.id}
-                        task={task}
-                        index={index}
-                        columnId={column.id}
-                        toggleTaskCompletion={toggleTaskCompletion}
-                      />
-                    ))}
-                  </div>
+                  <DroppableColumn column={column}>
+                    {column.tasks.length === 0 ? (
+                      <div className="flex items-center justify-center h-full text-muted-foreground text-xs">
+                        Drop tasks here or type above
+                      </div>
+                    ) : (
+                      column.tasks.map((task, index) => (
+                        <SortableTask
+                          key={task.id}
+                          task={task}
+                          index={index}
+                          columnId={column.id}
+                          toggleTaskCompletion={toggleTaskCompletion}
+                        />
+                      ))
+                    )}
+                  </DroppableColumn>
                 </SortableContext>
 
                 {/* Clear All Button */}
@@ -427,7 +542,8 @@ const TasksPage: React.FC = () => {
                   </Button>
                 )}
               </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       </div>

@@ -1,10 +1,14 @@
 import ExtensionsPage from "@/components/ExtensionsPage";
 import TasksPage from "@/components/TasksPage";
+import HomePage from "@/components/HomePage";
+import CreateNoteDialog from "@/components/CreateNoteDialog";
+import LoginPage from "@/components/auth/LoginPage";
+import SignupPage from "@/components/auth/SignupPage";
 import FloatingActionMenu from "@/components/ui/floating-action-menu";
 import { Sidebar, SidebarBody, SidebarLink } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
 import AIChatInterface from "@/searchAI/page";
-import { invoke } from "@tauri-apps/api/core";
+import { authService } from "@/services/auth.service";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { motion } from "framer-motion";
 import {
@@ -14,30 +18,54 @@ import {
   FileText,
   Home,
   LogOut,
-  Moon,
   Puzzle,
   Search,
-  Settings,
-  Sun
+  Settings
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
   const [open, setOpen] = useState(false);
-  const [darkMode, setDarkMode] = useState(false);
   const [currentPage, setCurrentPage] = useState("home");
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authView, setAuthView] = useState<"login" | "signup">("login");
+  const [loading, setLoading] = useState(true);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  useEffect(() => {
+    // Set dark mode by default
+    document.documentElement.classList.add('dark');
+    checkAuth();
+  }, []);
 
-  const toggleDarkMode = () => {
-    setDarkMode(!darkMode);
-    document.documentElement.classList.toggle('dark');
+  const checkAuth = async () => {
+    const token = authService.getToken();
+    if (token) {
+      try {
+        await authService.getCurrentUser(token);
+        setIsAuthenticated(true);
+      } catch (error) {
+        console.error("Auth check failed:", error);
+        authService.logout();
+        setIsAuthenticated(false);
+      }
+    }
+    setLoading(false);
+  };
+
+  const [createNoteOpen, setCreateNoteOpen] = useState(false);
+  const [refreshNotes, setRefreshNotes] = useState(0);
+
+  const handleLoginSuccess = async () => {
+    console.log("Login success, checking auth...");
+    setIsAuthenticated(true);
+    setCurrentPage("home");
+  };
+
+  const handleLogout = () => {
+    authService.logout();
+    setIsAuthenticated(false);
+    setCurrentPage("home");
   };
 
   const handleOpenPopup = async () => {
@@ -83,9 +111,38 @@ function App() {
   };
 
   const handleCreateNote = () => {
-    console.log("Create Note clicked");
-    // TODO: Implement note creation functionality
+    setCreateNoteOpen(true);
   };
+
+  const handleNoteCreated = () => {
+    // Trigger refresh by incrementing counter
+    setRefreshNotes(prev => prev + 1);
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-100 dark:bg-neutral-900">
+        <p className="text-neutral-600 dark:text-neutral-400">Loading...</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    if (authView === "signup") {
+      return (
+        <SignupPage
+          onSignupSuccess={handleLoginSuccess}
+          onSwitchToLogin={() => setAuthView("login")}
+        />
+      );
+    }
+    return (
+      <LoginPage
+        onLoginSuccess={handleLoginSuccess}
+        onSwitchToSignup={() => setAuthView("signup")}
+      />
+    );
+  }
 
   const links = [
     {
@@ -132,16 +189,6 @@ function App() {
 
   const bottomLinks = [
     {
-      label: darkMode ? "Light Mode" : "Dark Mode",
-      href: "#",
-      icon: darkMode ? (
-        <Sun className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ) : (
-        <Moon className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ),
-      onClick: toggleDarkMode,
-    },
-    {
       label: "Settings",
       href: "#",
       icon: (
@@ -154,6 +201,7 @@ function App() {
       icon: (
         <LogOut className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
+      onClick: handleLogout,
     },
   ];
 
@@ -205,14 +253,21 @@ function App() {
         <TasksPage />
       ) : currentPage === "extensions" ? (
         <ExtensionsPage />
-        ) : currentPage === "search" ? (
-          <AIChatInterface />
+      ) : currentPage === "search" ? (
+        <AIChatInterface />
       ) : (
-        <MainContent greetMsg={greetMsg} name={name} setName={setName} greet={greet} />
+        <HomePage key={refreshNotes} />
       )}
 
       {/* Floating Action Menu */}
       <FloatingActionMenu options={floatingMenuOptions} />
+
+      {/* Create Note Dialog */}
+      <CreateNoteDialog
+        open={createNoteOpen}
+        onOpenChange={setCreateNoteOpen}
+        onNoteCreated={handleNoteCreated}
+      />
     </div>
   );
 }
@@ -245,62 +300,5 @@ const LogoIcon = () => {
     </a>
   );
 };
-
-const MainContent = ({ greetMsg, name, setName, greet }: {
-  greetMsg: string;
-  name: string;
-  setName: (name: string) => void;
-  greet: () => void;
-}) => {
-  return (
-    <div className="flex flex-1">
-      <div className="p-8 md:p-16 rounded-tl-2xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 flex flex-col flex-1 w-full h-full overflow-y-auto">
-        {/* Main content area with plain text about Atok.ai */}
-        <div className="max-w-4xl mx-auto">
-          <div className="mb-12">
-            <h1 className="text-4xl font-bold text-neutral-800 dark:text-neutral-200 mb-6">
-              Welcome to Atok.ai
-            </h1>
-            <p className="text-xl text-neutral-600 dark:text-neutral-400 mb-8">
-              Your intelligent AI companion for productivity and creativity
-            </p>
-          </div>
-
-          <div className="space-y-8">
-            {/* Tauri demo section - keep for testing */}
-            <section className="border-t border-neutral-200 dark:border-neutral-700 pt-8">
-              <h2 className="text-2xl font-semibold text-neutral-800 dark:text-neutral-200 mb-4">
-                Tauri Integration Demo
-              </h2>
-              <p className="text-neutral-600 dark:text-neutral-400 mb-4">
-                Test the Tauri backend integration with this simple greeting function:
-              </p>
-              <div className="flex gap-2 mb-4">
-                <input
-                  id="greet-input"
-                  value={name}
-                  onChange={(e) => setName(e.currentTarget.value)}
-                  placeholder="Enter a name..."
-                  className="px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded bg-white dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200"
-                />
-                <button
-                  onClick={greet}
-                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-                >
-                  Greet
-                </button>
-              </div>
-              {greetMsg && (
-                <p className="text-lg text-neutral-700 dark:text-neutral-300 bg-green-50 dark:bg-green-900/20 p-3 rounded">
-                  {greetMsg}
-                </p>
-              )}
-            </section>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export default App;

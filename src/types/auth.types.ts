@@ -2,23 +2,16 @@
 export interface User {
   id: string;
   email: string;
-  name: string;
-  createdAt: string;
-  updatedAt?: string;
+  username: string;
+  full_name?: string;
+  avatar_url?: string;
+  is_verified: boolean;
+  is_active: boolean;
 }
 
 export interface AuthResponse {
-  success: boolean;
-  message: string;
-  data?: {
-    user: User;
-    token: string;
-  };
-  errors?: Array<{
-    msg: string;
-    param: string;
-    location: string;
-  }>;
+  token: string;
+  user: User;
 }
 
 export interface LoginCredentials {
@@ -27,16 +20,8 @@ export interface LoginCredentials {
 }
 
 export interface RegisterData {
+  username: string;
   email: string;
   password: string;
-  name: string;
-}
-
-export interface ForgotPasswordData {
-  email: string;
-}
-
-export interface ResetPasswordData {
-  token: string;
-  password: string;
+  full_name?: string;
 }

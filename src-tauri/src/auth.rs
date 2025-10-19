@@ -88,11 +88,14 @@ pub async fn register(
     request: RegisterRequest,
 ) -> Result<AuthResponse, String> {
     // Check if user exists
-    let existing = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE email = $1")
-        .bind(&request.email)
-        .fetch_one(db.0.as_ref())
-        .await
-        .map_err(|e| format!("Database query failed: {}", e))?;
+    let existing = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE email = $1 OR username = $2"
+    )
+    .bind(&request.email)
+    .bind(&request.username)
+    .fetch_one(db.0.as_ref())
+    .await
+    .map_err(|e| format!("Database query failed: {}", e))?;
     
     if existing > 0 {
         return Err(AuthError::UserAlreadyExists.to_string());
@@ -103,21 +106,19 @@ pub async fn register(
         .map_err(|e| e.to_string())?;
     
     // Create user
-    let user_id = Uuid::new_v4().to_string();
-    let now = Utc::now();
+    let user_id = format!("user_{}", Uuid::new_v4().to_string().replace("-", "")[..6].to_string());
     
     sqlx::query(
-        "INSERT INTO users (id, email, password, name, is_verified, is_active, created_at, updated_at) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+        "INSERT INTO users (id, email, username, password, full_name, is_verified, is_active) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"
     )
     .bind(&user_id)
     .bind(&request.email)
+    .bind(&request.username)
     .bind(&hashed_password)
-    .bind(&request.name)
+    .bind(&request.full_name)
     .bind(false)
     .bind(true)
-    .bind(now)
-    .bind(now)
     .execute(db.0.as_ref())
     .await
     .map_err(|e| format!("Failed to create user: {}", e))?;
@@ -131,7 +132,9 @@ pub async fn register(
         user: UserResponse {
             id: user_id,
             email: request.email,
-            name: request.name,
+            username: request.username,
+            full_name: request.full_name,
+            avatar_url: None,
             is_verified: false,
             is_active: true,
         },
@@ -143,10 +146,9 @@ pub async fn login(
     db: State<'_, Database>,
     request: LoginRequest,
 ) -> Result<AuthResponse, String> {
-    // Find user
+    // Find user by email or username
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, email, password, name, is_verified, is_active, created_at, updated_at, reset_token, reset_token_expiry 
-         FROM users WHERE email = $1"
+        "SELECT * FROM users WHERE email = $1 OR username = $1"
     )
     .bind(&request.email)
     .fetch_optional(db.0.as_ref())
@@ -160,6 +162,12 @@ pub async fn login(
         return Err(AuthError::InvalidCredentials.to_string());
     }
     
+    // Update last login
+    let _ = sqlx::query("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = $1")
+        .bind(&user.id)
+        .execute(db.0.as_ref())
+        .await;
+    
     // Generate JWT
     let token = generate_jwt(&user.id, &user.email)
         .map_err(|e| e.to_string())?;
@@ -169,7 +177,9 @@ pub async fn login(
         user: UserResponse {
             id: user.id,
             email: user.email,
-            name: user.name,
+            username: user.username,
+            full_name: user.full_name,
+            avatar_url: user.avatar_url,
             is_verified: user.is_verified,
             is_active: user.is_active,
         },
@@ -181,36 +191,10 @@ pub async fn forgot_password(
     db: State<'_, Database>,
     request: ForgotPasswordRequest,
 ) -> Result<MessageResponse, String> {
-    // Find user
-    let user_id = sqlx::query_scalar::<_, String>(
-        "SELECT id FROM users WHERE email = $1"
-    )
-    .bind(&request.email)
-    .fetch_optional(db.0.as_ref())
-    .await
-    .map_err(|e| format!("Database query failed: {}", e))?
-    .ok_or_else(|| AuthError::UserNotFound.to_string())?;
-    
-    // Generate reset token
-    let reset_token = generate_reset_token();
-    let expiry = Utc::now() + chrono::Duration::hours(1);
-    
-    // Save reset token
-    sqlx::query(
-        "UPDATE users SET reset_token = $1, reset_token_expiry = $2 WHERE id = $3"
-    )
-    .bind(&reset_token)
-    .bind(expiry)
-    .bind(&user_id)
-    .execute(db.0.as_ref())
-    .await
-    .map_err(|e| format!("Failed to save reset token: {}", e))?;
-    
-    // TODO: Send email with reset token
-    // For now, just return the token (in production, send via email)
-    
+    // Note: reset_token columns don't exist in current schema
+    // This is a placeholder for future implementation
     Ok(MessageResponse {
-        message: format!("Password reset token generated: {}", reset_token),
+        message: "Password reset feature coming soon".to_string(),
     })
 }
 
@@ -219,43 +203,10 @@ pub async fn reset_password(
     db: State<'_, Database>,
     request: ResetPasswordRequest,
 ) -> Result<MessageResponse, String> {
-    // Find user by reset token
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id, email, password, name, is_verified, is_active, created_at, updated_at, reset_token, reset_token_expiry 
-         FROM users WHERE reset_token = $1"
-    )
-    .bind(&request.token)
-    .fetch_optional(db.0.as_ref())
-    .await
-    .map_err(|e| format!("Database query failed: {}", e))?
-    .ok_or_else(|| AuthError::InvalidResetToken.to_string())?;
-    
-    // Check if token is expired
-    if let Some(expiry) = user.reset_token_expiry {
-        if Utc::now() > expiry {
-            return Err(AuthError::ResetTokenExpired.to_string());
-        }
-    } else {
-        return Err(AuthError::InvalidResetToken.to_string());
-    }
-    
-    // Hash new password
-    let new_password_hash = hash_password(&request.new_password)
-        .map_err(|e| e.to_string())?;
-    
-    // Update password and clear reset token
-    sqlx::query(
-        "UPDATE users SET password = $1, reset_token = NULL, reset_token_expiry = NULL, updated_at = $2 WHERE id = $3"
-    )
-    .bind(&new_password_hash)
-    .bind(Utc::now())
-    .bind(&user.id)
-    .execute(db.0.as_ref())
-    .await
-    .map_err(|e| format!("Failed to update password: {}", e))?;
-    
+    // Note: reset_token columns don't exist in current schema
+    // This is a placeholder for future implementation
     Ok(MessageResponse {
-        message: "Password successfully reset".to_string(),
+        message: "Password reset feature coming soon".to_string(),
     })
 }
 
@@ -277,8 +228,7 @@ pub async fn get_current_user(
     
     // Fetch user
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, email, password, name, is_verified, is_active, created_at, updated_at, reset_token, reset_token_expiry 
-         FROM users WHERE id = $1"
+        "SELECT * FROM users WHERE id = $1"
     )
     .bind(&claims.sub)
     .fetch_optional(db.0.as_ref())
@@ -292,12 +242,14 @@ pub async fn get_current_user(
         AuthError::UserNotFound.to_string()
     })?;
     
-    println!("User found: {} ({})", user.name, user.email);
+    println!("User found: {} ({})", user.username, user.email);
     
     Ok(UserResponse {
         id: user.id,
         email: user.email,
-        name: user.name,
+        username: user.username,
+        full_name: user.full_name,
+        avatar_url: user.avatar_url,
         is_verified: user.is_verified,
         is_active: user.is_active,
     })

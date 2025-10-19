@@ -87,24 +87,49 @@ const RecordingPopupApp: React.FC = () => {
     return () => darkModeQuery.removeEventListener('change', checkDarkMode);
   }, []);
 
-  const handleRecord = () => {
+  const handleRecord = async () => {
     if (!isRecording) {
-      setIsRecording(true);
-      setIsPaused(false);
-      setTime(0);
+      try {
+        const { recordingService } = await import('@/services/recording.service');
+        const outputPath = await recordingService.startRecording();
+        
+        setIsRecording(true);
+        setIsPaused(false);
+        setTime(0);
+        
+        console.log('✅ Recording started:', outputPath);
+      } catch (error) {
+        console.error('❌ Failed to start recording:', error);
+        alert(`Failed to start recording: ${error}`);
+      }
     }
   };
 
   const handlePause = () => {
     if (isRecording && !isPaused) {
       setIsPaused(true);
+      // Note: Pause functionality would need backend support
+      console.log('⏸️ Pause requested (not yet implemented in backend)');
     }
   };
 
-  const handleStop = () => {
-    setIsRecording(false);
-    setIsPaused(false);
-    setTime(0);
+  const handleStop = async () => {
+    if (isRecording) {
+      try {
+        const { recordingService } = await import('@/services/recording.service');
+        const savedPath = await recordingService.stopRecording();
+        
+        setIsRecording(false);
+        setIsPaused(false);
+        setTime(0);
+        
+        console.log('✅ Recording stopped:', savedPath);
+        alert(`Recording saved to:\n${savedPath}`);
+      } catch (error) {
+        console.error('❌ Failed to stop recording:', error);
+        alert(`Failed to stop recording: ${error}`);
+      }
+    }
   };
 
 
