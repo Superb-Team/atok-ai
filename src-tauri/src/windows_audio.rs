@@ -178,7 +178,16 @@ impl DesktopAudioRecorder {
             println!("🎬 Starting capture loop...");
 
             // Recording loop - encode to MP3 in real-time
-            while *is_recording.lock().unwrap() {
+            loop {
+                // Check if we should stop
+                {
+                    let should_stop = !*is_recording.lock().unwrap();
+                    if should_stop {
+                        println!("🛑 Stop signal received, exiting loop...");
+                        break;
+                    }
+                }
+                
                 std::thread::sleep(std::time::Duration::from_millis(5));
 
                 // Capture DESKTOP audio
@@ -383,13 +392,38 @@ impl DesktopAudioRecorder {
     pub fn stop_recording(&self) -> Result<()> {
         println!("🛑 Stopping recording...");
         
-        let mut recording = self.is_recording.lock().unwrap();
-        *recording = false;
-        drop(recording);
+        // Set flag to stop recording
+        {
+            let mut recording = self.is_recording.lock().unwrap();
+            if !*recording {
+                println!("⚠️ Recording already stopped");
+                return Ok(());
+            }
+            *recording = false;
+        }
 
+        // Give thread time to finish gracefully
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Try to join thread with timeout
         let mut thread_lock = self.recording_thread.lock().unwrap();
         if let Some(handle) = thread_lock.take() {
-            let _ = handle.join();
+            // Spawn a timeout thread to avoid blocking forever
+            let join_handle = std::thread::spawn(move || {
+                handle.join()
+            });
+            
+            // Wait max 2 seconds for thread to finish
+            for _ in 0..20 {
+                if join_handle.is_finished() {
+                    let _ = join_handle.join();
+                    println!("✅ Recording stopped gracefully");
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            
+            println!("⚠️ Recording thread took too long, continuing anyway");
         }
 
         println!("✅ Recording stopped");

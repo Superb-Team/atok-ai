@@ -133,28 +133,47 @@ const RecordingPopupApp: React.FC = () => {
   };
 
 
-  const handleFinish = () => {
+  const handleFinish = async () => {
     console.log('🔴 FINISH BUTTON CLICKED - Starting close process');
 
+    // Stop recording first if it's active
+    if (isRecording) {
+      console.log('⏹️ Stopping recording before closing...');
+      try {
+        const { recordingService } = await import('@/services/recording.service');
+        await recordingService.stopRecording();
+        console.log('✅ Recording stopped successfully');
+
+        setIsRecording(false);
+        setIsPaused(false);
+        setTime(0);
+      } catch (error) {
+        console.error('❌ Failed to stop recording:', error);
+      }
+    }
+
+    // Wait a bit for recording to fully stop
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Close window
+    console.log('🚪 Closing window...');
     if (appWindow) {
       console.log('✅ Using stored window reference to close...');
-      appWindow.close().then(() => {
-        console.log('✅ Window close promise resolved');
-      }).catch((error) => {
-        console.error('❌ Window close promise rejected:', error);
-      });
+      try {
+        await appWindow.close();
+        console.log('✅ Window closed successfully');
+      } catch (error) {
+        console.error('❌ Window close error:', error);
+      }
     } else {
       console.log('⚠️ No stored window reference, trying getCurrentWindow...');
       try {
         const currentWindow = getCurrentWindow();
         console.log('✅ Got current window, calling close...');
-        currentWindow.close().then(() => {
-          console.log('✅ Window close promise resolved');
-        }).catch((error) => {
-          console.error('❌ Window close promise rejected:', error);
-        });
+        await currentWindow.close();
+        console.log('✅ Window closed successfully');
       } catch (error) {
-        console.error('❌ Error getting current window:', error);
+        console.error('❌ Error closing window:', error);
       }
     }
   };
@@ -204,7 +223,7 @@ const RecordingPopupApp: React.FC = () => {
           <button
             onClick={handleRecord}
             className={`
-              px-1.5 py-1 rounded font-medium text-xs no-drag ml-1
+              px-1.5 py-1 rounded font-medium text-xs ml-1
               transition-all duration-200 hover:scale-105 active:scale-95
               ${!isRecording
                 ? (isDarkMode ? 'text-green-400 hover:text-green-300' : 'text-green-600 hover:text-green-500')
@@ -214,9 +233,13 @@ const RecordingPopupApp: React.FC = () => {
             style={{
               borderRadius: '4px',
               background: 'transparent',
-              // @ts-ignore
               WebkitAppRegion: 'no-drag',
-              appRegion: 'no-drag'
+              // @ts-ignore
+              appRegion: 'no-drag',
+              pointerEvents: 'auto',
+              cursor: isRecording ? 'not-allowed' : 'pointer',
+              zIndex: 9999,
+              position: 'relative'
             }}
             disabled={isRecording}
           >
@@ -227,12 +250,21 @@ const RecordingPopupApp: React.FC = () => {
             <button
               onClick={handlePause}
               className={`
-                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
                 ${isDarkMode
                   ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
                   : 'bg-yellow-500 hover:bg-yellow-600 text-white'
                 }
               `}
+              style={{
+                WebkitAppRegion: 'no-drag',
+                // @ts-ignore
+                appRegion: 'no-drag',
+                pointerEvents: 'auto',
+                cursor: 'pointer',
+                zIndex: 9999,
+                position: 'relative'
+              }}
               title="Pause"
             >
               <Pause className="w-3 h-3" />
@@ -243,12 +275,21 @@ const RecordingPopupApp: React.FC = () => {
             <button
               onClick={handleStop}
               className={`
-                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
                 ${isDarkMode
                   ? 'bg-red-600 hover:bg-red-700 text-white'
                   : 'bg-red-500 hover:bg-red-600 text-white'
                 }
               `}
+              style={{
+                WebkitAppRegion: 'no-drag',
+                // @ts-ignore
+                appRegion: 'no-drag',
+                pointerEvents: 'auto',
+                cursor: 'pointer',
+                zIndex: 9999,
+                position: 'relative'
+              }}
               title="Stop"
             >
               <Square className="w-3 h-3" />
@@ -258,12 +299,21 @@ const RecordingPopupApp: React.FC = () => {
           <button
             onClick={handleSettings}
             className={`
-              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
               ${isDarkMode
                 ? 'bg-gray-700 hover:bg-gray-600 text-white'
                 : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
               }
             `}
+            style={{
+              WebkitAppRegion: 'no-drag',
+              // @ts-ignore
+              appRegion: 'no-drag',
+              pointerEvents: 'auto',
+              cursor: 'pointer',
+              zIndex: 9999,
+              position: 'relative'
+            }}
             title="Settings"
           >
             <Settings className="w-3 h-3" />
@@ -287,12 +337,21 @@ const RecordingPopupApp: React.FC = () => {
           <button
             onClick={handleMaximize}
             className={`
-              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
               ${isDarkMode
                 ? 'bg-gray-700 hover:bg-gray-600 text-white'
                 : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
               }
             `}
+            style={{
+              WebkitAppRegion: 'no-drag',
+              // @ts-ignore
+              appRegion: 'no-drag',
+              pointerEvents: 'auto',
+              cursor: 'pointer',
+              zIndex: 9999,
+              position: 'relative'
+            }}
             title="Maximize"
           >
             <Maximize2 className="w-3 h-3" />
@@ -301,12 +360,21 @@ const RecordingPopupApp: React.FC = () => {
           <button
             onClick={handleSparkles}
             className={`
-              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95 no-drag
+              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
               ${isDarkMode
                 ? 'bg-purple-700 hover:bg-purple-600 text-white'
                 : 'bg-purple-200 hover:bg-purple-300 text-purple-700'
               }
             `}
+            style={{
+              WebkitAppRegion: 'no-drag',
+              // @ts-ignore
+              appRegion: 'no-drag',
+              pointerEvents: 'auto',
+              cursor: 'pointer',
+              zIndex: 9999,
+              position: 'relative'
+            }}
             title="AI Enhancement"
           >
             <Sparkles className="w-3 h-3" />
@@ -321,13 +389,10 @@ const RecordingPopupApp: React.FC = () => {
             }}
             onMouseDown={(e) => {
               console.log('🟡 FINISH button onMouseDown fired!');
-              e.preventDefault();
-            }}
-            onPointerDown={() => {
-              console.log('🟡 FINISH button onPointerDown fired!');
+              e.stopPropagation();
             }}
             className={`
-              px-1.5 py-1 font-medium text-xs no-drag mr-1
+              px-1.5 py-1 font-medium text-xs mr-1
               transition-all duration-200 hover:scale-105 active:scale-95
               ${isDarkMode
                 ? 'text-red-400 hover:text-red-300'
@@ -338,7 +403,12 @@ const RecordingPopupApp: React.FC = () => {
               pointerEvents: 'auto',
               cursor: 'pointer',
               borderRadius: '4px',
-              background: 'transparent'
+              background: 'transparent',
+              WebkitAppRegion: 'no-drag',
+              // @ts-ignore
+              appRegion: 'no-drag',
+              zIndex: 9999,
+              position: 'relative'
             }}
           >
             FINISH
