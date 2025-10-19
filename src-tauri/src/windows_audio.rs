@@ -167,12 +167,19 @@ impl DesktopAudioRecorder {
             let mut mp3_buffer = vec![MaybeUninit::uninit(); 8192];
             let chunk_size = 1152 * channels as usize;
             let mut sample_buffer: Vec<i16> = Vec::with_capacity(chunk_size);
+            
+            // Separate buffers for desktop and mic to handle async capture
+            let mut desktop_buffer: Vec<i16> = Vec::new();
+            let mut mic_buffer: Vec<i16> = Vec::new();
+            
+            let mut mic_sample_count = 0u64;
+            let mut desktop_sample_count = 0u64;
+
+            println!("🎬 Starting capture loop...");
 
             // Recording loop - encode to MP3 in real-time
             while *is_recording.lock().unwrap() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-
-                let mut mixed_samples: Vec<i16> = Vec::new();
+                std::thread::sleep(std::time::Duration::from_millis(5));
 
                 // Capture DESKTOP audio
                 let desktop_packet = desktop_capture.GetNextPacketSize()?;
@@ -183,28 +190,37 @@ impl DesktopAudioRecorder {
 
                     desktop_capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
 
-                    if frames > 0 && (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 {
+                    if frames > 0 {
+                        let is_silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
                         let bytes_len = (frames as usize) * (desktop_align as usize);
                         let audio_data = std::slice::from_raw_parts(data, bytes_len);
 
-                        if desktop_bits == 32 {
-                            for chunk in audio_data.chunks_exact(4) {
-                                let float_val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                                let int_val = (float_val * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                                mixed_samples.push(int_val);
+                        if !is_silent {
+                            if desktop_bits == 32 {
+                                for chunk in audio_data.chunks_exact(4) {
+                                    let float_val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                                    let int_val = (float_val * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                                    desktop_buffer.push(int_val);
+                                }
+                            } else if desktop_bits == 16 {
+                                for chunk in audio_data.chunks_exact(2) {
+                                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                                    desktop_buffer.push(sample);
+                                }
                             }
-                        } else if desktop_bits == 16 {
-                            for chunk in audio_data.chunks_exact(2) {
-                                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                                mixed_samples.push(sample);
-                            }
+                        } else {
+                            // Add silence
+                            let sample_count = (frames as usize) * (channels as usize);
+                            desktop_buffer.extend(std::iter::repeat(0i16).take(sample_count));
                         }
+                        
+                        desktop_sample_count += frames as u64;
                     }
 
                     desktop_capture.ReleaseBuffer(frames)?;
                 }
 
-                // Capture MICROPHONE audio and mix
+                // Capture MICROPHONE audio
                 let mic_packet = mic_capture.GetNextPacketSize()?;
                 if mic_packet > 0 {
                     let mut data: *mut u8 = std::ptr::null_mut();
@@ -213,45 +229,56 @@ impl DesktopAudioRecorder {
 
                     mic_capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
 
-                    if frames > 0 && (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 {
+                    if frames > 0 {
+                        let is_silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
                         let bytes_len = (frames as usize) * (mic_align as usize);
                         let audio_data = std::slice::from_raw_parts(data, bytes_len);
 
-                        let mut idx = 0;
-                        if mic_bits == 32 {
-                            for chunk in audio_data.chunks_exact(4) {
-                                let float_val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                                let mic_sample = (float_val * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                                
-                                if idx < mixed_samples.len() {
-                                    let desktop_sample = mixed_samples[idx];
-                                    mixed_samples[idx] = ((desktop_sample as i32 + mic_sample as i32) / 2) as i16;
-                                } else {
-                                    mixed_samples.push(mic_sample);
+                        if !is_silent {
+                            if mic_bits == 32 {
+                                for chunk in audio_data.chunks_exact(4) {
+                                    let float_val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                                    // Boost mic volume by 1.5x
+                                    let mic_sample = (float_val * 32767.0 * 1.5).clamp(-32768.0, 32767.0) as i16;
+                                    mic_buffer.push(mic_sample);
                                 }
-                                idx += 1;
-                            }
-                        } else if mic_bits == 16 {
-                            for chunk in audio_data.chunks_exact(2) {
-                                let mic_sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                                
-                                if idx < mixed_samples.len() {
-                                    let desktop_sample = mixed_samples[idx];
-                                    mixed_samples[idx] = ((desktop_sample as i32 + mic_sample as i32) / 2) as i16;
-                                } else {
-                                    mixed_samples.push(mic_sample);
+                            } else if mic_bits == 16 {
+                                for chunk in audio_data.chunks_exact(2) {
+                                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                                    // Boost mic volume by 1.5x
+                                    let mic_sample = ((sample as i32 * 3) / 2).clamp(-32768, 32767) as i16;
+                                    mic_buffer.push(mic_sample);
                                 }
-                                idx += 1;
                             }
+                        } else {
+                            // Add silence
+                            let sample_count = (frames as usize) * (mic_channels as usize);
+                            mic_buffer.extend(std::iter::repeat(0i16).take(sample_count));
                         }
+                        
+                        mic_sample_count += frames as u64;
                     }
 
                     mic_capture.ReleaseBuffer(frames)?;
                 }
 
-                // Add to buffer and encode when we have enough samples
-                sample_buffer.extend_from_slice(&mixed_samples);
+                // Mix desktop and mic buffers
+                let min_len = desktop_buffer.len().min(mic_buffer.len());
+                if min_len > 0 {
+                    for i in 0..min_len {
+                        let desktop_sample = desktop_buffer[i] as i32;
+                        let mic_sample = mic_buffer[i] as i32;
+                        // Mix with proper gain: 70% desktop + 80% mic (allows mic to be more prominent)
+                        let mixed = ((desktop_sample * 7 / 10) + (mic_sample * 8 / 10)).clamp(-32768, 32767) as i16;
+                        sample_buffer.push(mixed);
+                    }
+                    
+                    // Remove processed samples
+                    desktop_buffer.drain(..min_len);
+                    mic_buffer.drain(..min_len);
+                }
 
+                // Encode when we have enough samples
                 while sample_buffer.len() >= chunk_size {
                     let chunk: Vec<i16> = sample_buffer.drain(..chunk_size).collect();
                     let input = InterleavedPcm(&chunk);
@@ -275,12 +302,25 @@ impl DesktopAudioRecorder {
                     }
                 }
             }
+            
+            println!("📊 Captured - Desktop: {} samples, Mic: {} samples", desktop_sample_count, mic_sample_count);
 
             // Stop audio capture
             desktop_client.Stop()?;
             mic_client.Stop()?;
 
             println!("🎵 Finalizing MP3...");
+            
+            // Mix any remaining buffered samples
+            let min_len = desktop_buffer.len().min(mic_buffer.len());
+            if min_len > 0 {
+                for i in 0..min_len {
+                    let desktop_sample = desktop_buffer[i] as i32;
+                    let mic_sample = mic_buffer[i] as i32;
+                    let mixed = ((desktop_sample * 7 / 10) + (mic_sample * 8 / 10)).clamp(-32768, 32767) as i16;
+                    sample_buffer.push(mixed);
+                }
+            }
 
             // Encode remaining samples
             if !sample_buffer.is_empty() {
