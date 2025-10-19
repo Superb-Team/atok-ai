@@ -46,7 +46,7 @@ const RecordingPopupApp: React.FC = () => {
       }
 
       console.log('🎯 Mouse down on drag area, starting drag...');
-      
+
       try {
         await appWindow.startDragging();
         console.log('✅ Drag started successfully');
@@ -79,11 +79,11 @@ const RecordingPopupApp: React.FC = () => {
       const darkModeQuery = window.matchMedia('(prefers-color-scheme: dark)');
       setIsDarkMode(darkModeQuery.matches);
     };
-    
+
     checkDarkMode();
     const darkModeQuery = window.matchMedia('(prefers-color-scheme: dark)');
     darkModeQuery.addEventListener('change', checkDarkMode);
-    
+
     return () => darkModeQuery.removeEventListener('change', checkDarkMode);
   }, []);
 
@@ -92,11 +92,11 @@ const RecordingPopupApp: React.FC = () => {
       try {
         const { recordingService } = await import('@/services/recording.service');
         const outputPath = await recordingService.startRecording();
-        
+
         setIsRecording(true);
         setIsPaused(false);
         setTime(0);
-        
+
         console.log('✅ Recording started:', outputPath);
       } catch (error) {
         console.error('❌ Failed to start recording:', error);
@@ -118,11 +118,11 @@ const RecordingPopupApp: React.FC = () => {
       try {
         const { recordingService } = await import('@/services/recording.service');
         const savedPath = await recordingService.stopRecording();
-        
+
         setIsRecording(false);
         setIsPaused(false);
         setTime(0);
-        
+
         console.log('✅ Recording stopped:', savedPath);
         alert(`Recording saved to:\n${savedPath}`);
       } catch (error) {
@@ -135,7 +135,7 @@ const RecordingPopupApp: React.FC = () => {
 
   const handleFinish = () => {
     console.log('🔴 FINISH BUTTON CLICKED - Starting close process');
-    
+
     if (appWindow) {
       console.log('✅ Using stored window reference to close...');
       appWindow.close().then(() => {
@@ -175,24 +175,24 @@ const RecordingPopupApp: React.FC = () => {
   };
 
   return (
-    <div 
+    <div
       className="w-full h-full flex items-center justify-center"
       style={{ background: 'transparent' }}
     >
-      <div 
+      <div
         ref={dragAreaRef}
         data-tauri-drag-region
         className={`
           flex items-center justify-between px-8 py-4 rounded-full
           backdrop-blur-md border shadow-xl
-          ${isDarkMode 
-            ? 'bg-black/80 border-gray-700 text-white' 
+          ${isDarkMode
+            ? 'bg-black/80 border-gray-700 text-white'
             : 'bg-white/90 border-gray-200 text-gray-900'
           }
           transition-all duration-300 ease-in-out
           w-[720px] h-15 mx-4
         `}
-        style={{ 
+        style={{
           cursor: 'move',
           WebkitAppRegion: 'drag',
           // @ts-ignore
@@ -211,8 +211,8 @@ const RecordingPopupApp: React.FC = () => {
                 : (isDarkMode ? 'text-gray-400' : 'text-gray-500')
               }
             `}
-            style={{ 
-              borderRadius: '4px', 
+            style={{
+              borderRadius: '4px',
               background: 'transparent',
               // @ts-ignore
               WebkitAppRegion: 'no-drag',
@@ -273,8 +273,8 @@ const RecordingPopupApp: React.FC = () => {
         {/* Center Section - Timer */}
         <div className={`
           px-6 py-2 rounded-full font-mono text-lg font-semibold
-          ${isDarkMode 
-            ? 'bg-gray-800/80 text-green-400' 
+          ${isDarkMode
+            ? 'bg-gray-800/80 text-green-400'
             : 'bg-gray-100 text-gray-900'
           }
           transition-all duration-300

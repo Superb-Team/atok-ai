@@ -42,4 +42,5 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",
 ] }
+mp3lame-encoder = "0.2"
 

@@ -13,15 +13,15 @@ export class RecordingService {
       // Get Downloads folder path
       const downloads = await downloadDir();
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const outputPath = `${downloads}atok-recording-${timestamp}.wav`;
+      const outputPath = `${downloads}mixed-audio-${timestamp}.mp3`;
       
-      console.log('🎙️ Starting recording to:', outputPath);
+      console.log('🎙️ Starting MIC + DESKTOP recording to:', outputPath);
       
       // Call Tauri command to start recording
       await invoke('start_desktop_recording', { outputPath });
       
       this.currentRecordingPath = outputPath;
-      console.log('✅ Recording started successfully');
+      console.log('✅ MIC + DESKTOP recording started successfully');
       
       return outputPath;
     } catch (error) {
