@@ -79,18 +79,9 @@ export default function AIChatInterface() {
       // Start streaming
       setStatus("streaming");
 
-      // Create a temporary message for the AI response that we'll update as chunks arrive
+      // Prepare for AI response
       const aiMessageId = (Date.now() + 1).toString();
       let accumulatedContent = "";
-
-      // Add empty AI message
-      const aiMessage: ChatMessage = {
-        id: aiMessageId,
-        role: "assistant",
-        content: "",
-        timestamp: new Date(),
-      };
-      setMessages([...updatedMessages, aiMessage]);
 
       // Prepare conversation history for agent
       const conversationHistory: AgentMessage[] = updatedMessages.map(msg => ({
@@ -118,14 +109,24 @@ export default function AIChatInterface() {
           setIsUsingTool(false);
           accumulatedContent += event.content || '';
 
-          // Update the AI message with accumulated content
+          // Update the AI message
           setMessages((prev) => {
             const newMessages = [...prev];
             const lastMessage = newMessages[newMessages.length - 1];
-            if (lastMessage && lastMessage.id === aiMessageId) {
+
+            // If last message is from assistant with same ID, update it
+            if (lastMessage && lastMessage.role === 'assistant' && lastMessage.id === aiMessageId) {
               lastMessage.content = accumulatedContent;
+              return newMessages;
+            } else {
+              // Otherwise, add new message
+              return [...prev, {
+                id: aiMessageId,
+                role: "assistant",
+                content: accumulatedContent,
+                timestamp: new Date(),
+              }];
             }
-            return newMessages;
           });
         } else if (event.type === 'error') {
           throw new Error(event.content || 'Unknown error');
@@ -258,28 +259,29 @@ export default function AIChatInterface() {
                     </div>
                   ))}
 
-                  {/* Loading state */}
-                  {(status === "submitted" || status === "streaming") && (
-                    <div className="flex gap-4 justify-start">
-                      <div className="flex-shrink-0">
-                        <div className="w-10 h-10 rounded-full overflow-hidden">
-                          <img src="/logo-atok.png" alt="Atok.ai" className="w-full h-full object-cover" />
-                        </div>
-                      </div>
-                      <div className="max-w-[80%] rounded-2xl px-5 py-3 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
-                        <div className="flex items-center space-x-2">
-                          <div className="flex space-x-1">
-                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                            <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+                  {/* Loading state - hide if last message is assistant (content already showing) */}
+                  {(status === "submitted" || status === "streaming") &&
+                    !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && messages[messages.length - 1].content) && (
+                      <div className="flex gap-4 justify-start">
+                        <div className="flex-shrink-0">
+                          <div className="w-10 h-10 rounded-full overflow-hidden">
+                            <img src="/logo-atok.png" alt="Atok.ai" className="w-full h-full object-cover" />
                           </div>
-                          <span className="text-neutral-600 dark:text-neutral-400 text-sm">
-                            {isUsingTool ? "Using tools..." : status === "submitted" ? "Thinking..." : "Thinking..."}
-                          </span>
+                        </div>
+                        <div className="max-w-[80%] rounded-2xl px-5 py-3 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
+                          <div className="flex items-center space-x-3">
+                            <div className="flex space-x-1">
+                              <div className="w-2 h-2 bg-neutral-500 dark:bg-neutral-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                              <div className="w-2 h-2 bg-neutral-500 dark:bg-neutral-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                              <div className="w-2 h-2 bg-neutral-500 dark:bg-neutral-400 rounded-full animate-bounce"></div>
+                            </div>
+                            <span className="text-neutral-600 dark:text-neutral-400 text-sm font-medium">
+                              {isUsingTool ? "Using tools..." : "Thinking..."}
+                            </span>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
+                    )}
                 </div>
               </div>
             )}
