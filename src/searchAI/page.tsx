@@ -11,20 +11,30 @@ import {
   PromptInputTextarea,
   PromptInputToolbar,
 } from "@/components/ui/shadcn-io/ai/prompt-input";
-import { sendMessageStream, type ChatMessage } from "@/services/bedrock";
+import { agentService, type AgentMessage } from "@/services/agent.service";
+import { authService } from "@/services/auth.service";
+import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import { User as UserIcon } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 
 // Status untuk chat
 type ChatStatus = "ready" | "submitted" | "streaming" | "error";
 
-// Start with empty conversation - Bedrock requires conversation to start with user message
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+}
+
+// Start with empty conversation
 const initialMessages: ChatMessage[] = [];
 
 export default function AIChatInterface() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [status, setStatus] = useState<ChatStatus>("ready");
+  const [isUsingTool, setIsUsingTool] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Cleanup on unmount
@@ -40,6 +50,13 @@ export default function AIChatInterface() {
     e.preventDefault();
 
     if (!input.trim() || status !== "ready") return;
+
+    // Get user info
+    const user = authService.getUser();
+    if (!user) {
+      console.error("User not authenticated");
+      return;
+    }
 
     // Add user message
     const userMessage: ChatMessage = {
@@ -75,26 +92,47 @@ export default function AIChatInterface() {
       };
       setMessages([...updatedMessages, aiMessage]);
 
-      // Stream the response
-      for await (const chunk of sendMessageStream(updatedMessages)) {
+      // Prepare conversation history for agent
+      const conversationHistory: AgentMessage[] = updatedMessages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
+      // Stream the response from agent
+      for await (const event of agentService.streamAgent({
+        prompt: userMessage.content,
+        user_id: user.id,
+        conversation_history: conversationHistory.slice(0, -1), // Exclude current message
+      })) {
         // Check if aborted
         if (abortControllerRef.current?.signal.aborted) {
           break;
         }
 
-        // Accumulate the content
-        accumulatedContent += chunk;
+        // Handle different event types
+        if (event.type === 'tool') {
+          // Tool is being used
+          setIsUsingTool(true);
+        } else if (event.type === 'content') {
+          // Content chunk received
+          setIsUsingTool(false);
+          accumulatedContent += event.content || '';
 
-        // Update the AI message with accumulated content
-        setMessages((prev) => {
-          const newMessages = [...prev];
-          const lastMessage = newMessages[newMessages.length - 1];
-          if (lastMessage && lastMessage.id === aiMessageId) {
-            lastMessage.content = accumulatedContent;
-          }
-          return newMessages;
-        });
+          // Update the AI message with accumulated content
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            const lastMessage = newMessages[newMessages.length - 1];
+            if (lastMessage && lastMessage.id === aiMessageId) {
+              lastMessage.content = accumulatedContent;
+            }
+            return newMessages;
+          });
+        } else if (event.type === 'error') {
+          throw new Error(event.content || 'Unknown error');
+        }
       }
+
+      setIsUsingTool(false);
 
       setStatus("ready");
     } catch (error) {
@@ -107,7 +145,7 @@ export default function AIChatInterface() {
       const errorChatMessage: ChatMessage = {
         id: (Date.now() + 2).toString(),
         role: "assistant",
-        content: `⚠️ Error: ${errorMsg}\n\nPlease check your AWS credentials and try again.`,
+        content: `⚠️ Error: ${errorMsg}\n\nPlease make sure the agent API is running at http://localhost:8000`,
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorChatMessage]);
@@ -202,7 +240,11 @@ export default function AIChatInterface() {
                           }`}
                       >
                         <div className="prose prose-sm dark:prose-invert max-w-none">
-                          <p className="whitespace-pre-wrap m-0">{message.content}</p>
+                          {message.role === 'assistant' ? (
+                            <MarkdownRenderer content={message.content} />
+                          ) : (
+                            <p className="whitespace-pre-wrap m-0">{message.content}</p>
+                          )}
                         </div>
                       </div>
 
@@ -232,7 +274,7 @@ export default function AIChatInterface() {
                             <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
                           </div>
                           <span className="text-neutral-600 dark:text-neutral-400 text-sm">
-                            {status === "submitted" ? "Thinking..." : "Typing..."}
+                            {isUsingTool ? "Using tools..." : status === "submitted" ? "Thinking..." : "Thinking..."}
                           </span>
                         </div>
                       </div>

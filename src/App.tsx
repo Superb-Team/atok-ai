@@ -2,6 +2,7 @@ import ExtensionsPage from "@/components/ExtensionsPage";
 import TasksPage from "@/components/TasksPage";
 import HomePage from "@/components/HomePage";
 import NoteViewPage from "@/components/NoteViewPage";
+import SettingsPage from "@/components/SettingsPage";
 import CreateNoteDialog from "@/components/CreateNoteDialog";
 import LoginPage from "@/components/auth/LoginPage";
 import SignupPage from "@/components/auth/SignupPage";
@@ -19,8 +20,8 @@ import {
   Home,
   LogOut,
   Puzzle,
-  Search,
-  Settings
+  Settings,
+  Sparkle,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import "./App.css";
@@ -155,10 +156,10 @@ function App() {
       onClick: () => setCurrentPage("home"),
     },
     {
-      label: "AI Search",
+      label: "Agents",
       href: "#",
       icon: (
-        <Search className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
+        <Sparkle className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
       onClick: () => setCurrentPage("search"),
     },
@@ -187,6 +188,7 @@ function App() {
       icon: (
         <Settings className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
+      onClick: () => setCurrentPage("settings"),
     },
     {
       label: "Logout",
@@ -250,6 +252,8 @@ function App() {
             setRefreshNotes(prev => prev + 1);
           }}
         />
+      ) : currentPage === "settings" ? (
+        <SettingsPage />
       ) : currentPage === "tasks" ? (
         <TasksPage />
       ) : currentPage === "extensions" ? (

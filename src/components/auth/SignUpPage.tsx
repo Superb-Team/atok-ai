@@ -32,7 +32,7 @@ export default function SignupPage({ onSignupSuccess, onSwitchToLogin }: SignupP
         password: formData.password,
         full_name: formData.fullName || undefined,
       });
-      
+
       authService.saveToken(response.token);
       authService.saveUser(response.user);
       onSignupSuccess();
@@ -65,7 +65,7 @@ export default function SignupPage({ onSignupSuccess, onSwitchToLogin }: SignupP
             <img src="/logo-atok.png" alt="Atok.ai" className="w-12 h-12 rounded-xl" />
             <span className="text-3xl font-bold text-white">Atok.ai</span>
           </div>
-          
+
           <div className="mt-16">
             <h2 className="text-4xl font-bold text-white mb-4">
               Start your journey with
@@ -81,7 +81,7 @@ export default function SignupPage({ onSignupSuccess, onSwitchToLogin }: SignupP
         </div>
 
         <div className="relative z-10 text-neutral-400 text-sm">
-          © 2024 Atok.ai. All rights reserved.
+          © 2025 Atok.ai. All rights reserved.
         </div>
       </div>
 

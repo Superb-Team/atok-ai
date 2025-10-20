@@ -67,7 +67,7 @@ export default function LoginPage({ onLoginSuccess, onSwitchToSignup }: LoginPag
         </div>
 
         <div className="relative z-10 text-neutral-400 text-sm">
-          © 2024 Atok.ai. All rights reserved.
+          © 2025 Atok.ai. All rights reserved.
         </div>
       </div>
 
