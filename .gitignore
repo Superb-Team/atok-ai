@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Environment variables
+.env
+.env.local
+.env.production
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -25,3 +30,10 @@ dist-ssr
 
 /src-tauri/Cargo.lock
 /package-lock.json
+
+COMPLETE_BEGINNER_GUIDE.md
+VISUAL_SUMMARY.txt
+AGENT_INTEGRATION.md
+OPENSEARCH_INTEGRATION.md
+VOICE_RECORDING_WORKFLOW.md
+

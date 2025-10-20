@@ -1,0 +1,12 @@
+[build]
+# Limit parallel compilation to reduce memory usage
+jobs = 1
+
+[profile.dev]
+# Reduce memory usage during development builds
+codegen-units = 16
+incremental = true
+
+# Optional: Use lld linker for faster linking (requires LLVM)
+# [target.x86_64-pc-windows-msvc]
+# linker = "rust-lld"

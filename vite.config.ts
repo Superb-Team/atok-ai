@@ -1,9 +1,10 @@
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
 import path from "path";
-// @ts-expect-error process is a nodejs global
+import { defineConfig } from "vite";
+
 const host = process.env.TAURI_DEV_HOST;
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
@@ -11,6 +12,14 @@ export default defineConfig(async () => ({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        'recording-popup': path.resolve(__dirname, 'recording-popup.html')
+      }
+    }
   },
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
