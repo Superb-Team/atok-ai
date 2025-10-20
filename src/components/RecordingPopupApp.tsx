@@ -124,7 +124,9 @@ const RecordingPopupApp: React.FC = () => {
         setTime(0);
 
         console.log('✅ Recording stopped:', savedPath);
-        alert(`Recording saved to:\n${savedPath}`);
+
+        // Start processing workflow
+        await processRecording(savedPath);
       } catch (error) {
         console.error('❌ Failed to stop recording:', error);
         alert(`Failed to stop recording: ${error}`);
@@ -132,17 +134,103 @@ const RecordingPopupApp: React.FC = () => {
     }
   };
 
+  const processRecording = async (audioPath: string) => {
+    console.log('🎙️ Starting audio processing workflow...');
+    console.log('📁 Audio path:', audioPath);
+
+    try {
+      // Step 1: Read audio file using Tauri invoke
+      console.log('📖 Step 1: Reading audio file...');
+      const { invoke } = await import('@tauri-apps/api/core');
+      
+      // Read file as base64
+      const base64Data = await invoke<string>('read_audio_file', { path: audioPath });
+      console.log('✅ Audio file read, converting to blob...');
+      
+      // Convert base64 to blob
+      const binaryString = atob(base64Data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const audioBlob = new Blob([bytes], { type: 'audio/mpeg' });
+      const audioFile = new File([audioBlob], 'recording.mp3', { type: 'audio/mpeg' });
+      console.log('✅ Audio file loaded:', audioFile.size, 'bytes');
+
+      // Step 2: Transcribe and enhance
+      console.log('🤖 Step 2: Transcribing and enhancing...');
+      const { agentService } = await import('@/services/agent.service');
+
+      const enhancedText = await Promise.race([
+        agentService.transcribeAndEnhance(audioFile, 'voice recording'),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('Transcription timeout after 60s')), 60000)
+        )
+      ]);
+
+      console.log('✅ Transcription completed:', enhancedText.substring(0, 100) + '...');
+
+      // Step 3: Get user info
+      console.log('👤 Step 3: Getting user info...');
+      const { authService } = await import('@/services/auth.service');
+      const user = authService.getUser();
+
+      if (!user) {
+        throw new Error('User not authenticated');
+      }
+      console.log('✅ User:', user.id);
+
+      // Step 4: Save to notes
+      console.log('📝 Step 4: Saving to notes...');
+      const { noteService } = await import('@/services/note.service');
+      const currentDate = new Date().toISOString().split('T')[0];
+      const noteTitle = `Voice Recording - ${currentDate}`;
+
+      const newNote = {
+        title: noteTitle,
+        content: enhancedText,
+        tags: ['voice-recording', 'transcription'],
+        color: '#E0F2FE', // Light blue
+        is_favorite: false,
+      };
+
+      await noteService.createNote(user.id, newNote);
+
+      console.log('✅ Note created successfully');
+
+      // Step 5: Insert to OpenSearch RAG
+      console.log('🔍 Step 5: Inserting to RAG...');
+      await agentService.insertDocument(user.id, enhancedText, {
+        type: 'voice_recording',
+        date: currentDate,
+        source: 'audio_transcription',
+      });
+      console.log('✅ Document inserted to RAG');
+
+      // Success notification
+      console.log('🎉 Workflow completed successfully!');
+      alert(`✅ Recording processed successfully!\n\n📝 Note created: "${noteTitle}"\n🔍 Added to knowledge base for AI search`);
+
+    } catch (error) {
+      console.error('❌ Failed to process recording:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      alert(`Failed to process recording:\n${errorMessage}`);
+    }
+  };
+
 
   const handleFinish = async () => {
     console.log('🔴 FINISH BUTTON CLICKED - Starting close process');
+
+    let savedPath: string | null = null;
 
     // Stop recording first if it's active
     if (isRecording) {
       console.log('⏹️ Stopping recording before closing...');
       try {
         const { recordingService } = await import('@/services/recording.service');
-        await recordingService.stopRecording();
-        console.log('✅ Recording stopped successfully');
+        savedPath = await recordingService.stopRecording();
+        console.log('✅ Recording stopped successfully:', savedPath);
 
         setIsRecording(false);
         setIsPaused(false);
@@ -152,8 +240,19 @@ const RecordingPopupApp: React.FC = () => {
       }
     }
 
-    // Wait a bit for recording to fully stop
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Process recording if we have a saved path
+    if (savedPath) {
+      console.log('🎙️ Processing recording before closing...');
+      try {
+        await processRecording(savedPath);
+      } catch (error) {
+        console.error('❌ Failed to process recording:', error);
+        // Continue to close even if processing fails
+      }
+    }
+
+    // Wait a bit for processing to complete
+    await new Promise(resolve => setTimeout(resolve, 500));
 
     // Close window
     console.log('🚪 Closing window...');

@@ -22,6 +22,70 @@ export interface AgentStreamEvent {
 
 export const agentService = {
   /**
+   * Transcribe and enhance audio file
+   */
+  async transcribeAndEnhance(audioFile: File, context?: string): Promise<string> {
+    try {
+      const formData = new FormData();
+      formData.append('file', audioFile);
+      if (context) {
+        formData.append('context', context);
+      }
+
+      const response = await fetch(`${API_BASE_URL}/transcribe-enhance`, {
+        method: 'POST',
+        headers: {
+          'X-API-Key': API_KEY,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Transcription failed: ${errorText}`);
+      }
+
+      const data = await response.json();
+      return data.enhanced_text || data.transcript || '';
+    } catch (error) {
+      console.error('Error transcribing audio:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Insert document to OpenSearch
+   */
+  async insertDocument(userId: string, text: string, metadata?: Record<string, any>): Promise<boolean> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/opensearch/document/insert`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': API_KEY,
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          text: text,
+          metadata: metadata || {},
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Failed to insert document: ${errorText}`);
+        return false;
+      }
+
+      console.log(`Document inserted to OpenSearch for user: ${userId}`);
+      return true;
+    } catch (error) {
+      console.error('Error inserting document:', error);
+      return false;
+    }
+  },
+
+  /**
    * Check if OpenSearch collection exists for user
    */
   async checkCollection(userId: string): Promise<boolean> {

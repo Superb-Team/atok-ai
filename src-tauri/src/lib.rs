@@ -77,6 +77,25 @@ async fn is_recording() -> Result<bool, String> {
     Ok(false)
 }
 
+#[tauri::command]
+async fn read_audio_file(path: String) -> Result<String, String> {
+    use std::fs;
+    use base64::{Engine as _, engine::general_purpose};
+    
+    println!("📖 Reading audio file: {}", path);
+    
+    // Read file as bytes
+    let bytes = fs::read(&path)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    
+    println!("✅ File read: {} bytes", bytes.len());
+    
+    // Convert to base64
+    let base64_data = general_purpose::STANDARD.encode(&bytes);
+    
+    Ok(base64_data)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -129,6 +148,7 @@ pub fn run() {
             start_desktop_recording,
             stop_desktop_recording,
             is_recording,
+            read_audio_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
