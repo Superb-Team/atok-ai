@@ -22,7 +22,7 @@ const ExtensionsPage: React.FC = () => {
   const loadConnections = async () => {
     try {
       setLoading(true);
-      const user = authService.getCurrentUserData();
+      const user = authService.getUser();
       if (!user) {
         setError('User not authenticated');
         return;
@@ -49,7 +49,7 @@ const ExtensionsPage: React.FC = () => {
       setError(null);
       setSuccess(null);
 
-      const user = authService.getCurrentUserData();
+      const user = authService.getUser();
       if (!user) {
         setError('User not authenticated');
         return;
@@ -73,7 +73,7 @@ const ExtensionsPage: React.FC = () => {
     }
 
     try {
-      const user = authService.getCurrentUserData();
+      const user = authService.getUser();
       if (!user) {
         setError('User not authenticated');
         return;
@@ -101,22 +101,22 @@ const ExtensionsPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-white dark:bg-neutral-900">
+      <div className="flex-1 flex items-center justify-center bg-neutral-50 dark:bg-neutral-900">
         <Loader2 className="w-8 h-8 animate-spin text-neutral-600 dark:text-neutral-400" />
       </div>
     );
   }
 
   return (
-    <div className="flex-1 overflow-auto bg-white dark:bg-neutral-900">
+    <div className="flex-1 overflow-auto bg-neutral-50 dark:bg-neutral-900">
       <div className="max-w-4xl mx-auto p-8">
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-neutral-900 dark:text-white mb-2">
-            Extensions
+            MCP Server Authentication
           </h1>
           <p className="text-neutral-600 dark:text-neutral-400">
-            Connect external services to enhance your workflow
+            Connect external services to enhance your AI capabilities
           </p>
         </div>
 
@@ -179,7 +179,7 @@ const ExtensionsPage: React.FC = () => {
         {/* Available Services */}
         <div>
           <h2 className="text-xl font-semibold text-neutral-900 dark:text-white mb-4">
-            Available Services
+            Available MCP Servers
           </h2>
           <div className="space-y-4">
             {/* GitHub */}
@@ -190,9 +190,9 @@ const ExtensionsPage: React.FC = () => {
                     <Github className="w-6 h-6" />
                   </div>
                   <div>
-                    <CardTitle className="text-lg">GitHub</CardTitle>
+                    <CardTitle className="text-lg">GitHub MCP Server</CardTitle>
                     <CardDescription>
-                      Connect your GitHub account to access repositories and code
+                      Connect GitHub to access repositories and code through AI
                     </CardDescription>
                   </div>
                 </div>
@@ -243,8 +243,6 @@ const ExtensionsPage: React.FC = () => {
                 )}
               </CardContent>
             </Card>
-
-            {/* More services can be added here */}
           </div>
         </div>
       </div>
