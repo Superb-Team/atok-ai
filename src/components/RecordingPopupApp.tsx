@@ -142,11 +142,11 @@ const RecordingPopupApp: React.FC = () => {
       // Step 1: Read audio file using Tauri invoke
       console.log('📖 Step 1: Reading audio file...');
       const { invoke } = await import('@tauri-apps/api/core');
-      
+
       // Read file as base64
       const base64Data = await invoke<string>('read_audio_file', { path: audioPath });
       console.log('✅ Audio file read, converting to blob...');
-      
+
       // Convert base64 to blob
       const binaryString = atob(base64Data);
       const bytes = new Uint8Array(binaryString.length);
@@ -164,7 +164,7 @@ const RecordingPopupApp: React.FC = () => {
       const enhancedText = await Promise.race([
         agentService.transcribeAndEnhance(audioFile, 'voice recording'),
         new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('Transcription timeout after 60s')), 60000)
+          setTimeout(() => reject(new Error('Transcription timeout after 5 minutes')), 300000)
         )
       ]);
 
@@ -183,8 +183,14 @@ const RecordingPopupApp: React.FC = () => {
       // Step 4: Save to notes
       console.log('📝 Step 4: Saving to notes...');
       const { noteService } = await import('@/services/note.service');
-      const currentDate = new Date().toISOString().split('T')[0];
-      const noteTitle = `Voice Recording - ${currentDate}`;
+      const now = new Date();
+      const timestamp = now.toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+      const noteTitle = `Note - ${timestamp}`;
 
       const newNote = {
         title: noteTitle,
@@ -200,9 +206,11 @@ const RecordingPopupApp: React.FC = () => {
 
       // Step 5: Insert to OpenSearch RAG
       console.log('🔍 Step 5: Inserting to RAG...');
+      const currentDate = now.toISOString().split('T')[0];
       await agentService.insertDocument(user.id, enhancedText, {
         type: 'voice_recording',
         date: currentDate,
+        timestamp: now.toISOString(),
         source: 'audio_transcription',
       });
       console.log('✅ Document inserted to RAG');
