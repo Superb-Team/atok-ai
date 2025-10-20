@@ -22,6 +22,69 @@ export interface AgentStreamEvent {
 
 export const agentService = {
   /**
+   * Check if OpenSearch collection exists for user
+   */
+  async checkCollection(userId: string): Promise<boolean> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/opensearch/collection/check/${userId}`, {
+        method: 'GET',
+        headers: {
+          'X-API-Key': API_KEY,
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return data.exists || false;
+      }
+      return false;
+    } catch (error) {
+      console.error('Error checking collection:', error);
+      return false;
+    }
+  },
+
+  /**
+   * Create OpenSearch collection for user
+   */
+  async createCollection(userId: string): Promise<boolean> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/opensearch/collection/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': API_KEY,
+        },
+        body: JSON.stringify({ user_id: userId }),
+      });
+
+      if (response.ok) {
+        console.log(`OpenSearch collection created for user: ${userId}`);
+        return true;
+      } else {
+        const errorText = await response.text();
+        console.error(`Failed to create collection: ${errorText}`);
+        return false;
+      }
+    } catch (error) {
+      console.error('Error creating collection:', error);
+      return false;
+    }
+  },
+
+  /**
+   * Ensure collection exists, create if not
+   */
+  async ensureCollection(userId: string): Promise<boolean> {
+    const exists = await this.checkCollection(userId);
+    if (!exists) {
+      console.log(`Collection not found for user ${userId}, creating...`);
+      return await this.createCollection(userId);
+    }
+    return true;
+  },
+
+  /**
    * Stream agent response using Server-Sent Events (SSE)
    */
   async *streamAgent(request: AgentStreamRequest): AsyncGenerator<AgentStreamEvent, void, unknown> {

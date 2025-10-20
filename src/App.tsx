@@ -46,6 +46,16 @@ function App() {
       try {
         await authService.getCurrentUser(token);
         setIsAuthenticated(true);
+
+        // Ensure OpenSearch collection exists for user
+        const user = authService.getUser();
+        if (user) {
+          import("@/services/agent.service").then(({ agentService }) => {
+            agentService.ensureCollection(user.id).catch(err => {
+              console.error("Failed to ensure collection:", err);
+            });
+          });
+        }
       } catch (error) {
         console.error("Auth check failed:", error);
         authService.logout();
@@ -62,6 +72,17 @@ function App() {
     console.log("Login success, checking auth...");
     setIsAuthenticated(true);
     setCurrentPage("home");
+
+    // Ensure OpenSearch collection exists for user
+    const user = authService.getUser();
+    if (user) {
+      // Import agent service dynamically to avoid circular dependency
+      import("@/services/agent.service").then(({ agentService }) => {
+        agentService.ensureCollection(user.id).catch(err => {
+          console.error("Failed to ensure collection:", err);
+        });
+      });
+    }
   };
 
   const handleLogout = () => {
