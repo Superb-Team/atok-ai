@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "atok-ai",
-        "width": 800,
-        "height": 600
+        "title": "Atok.ai - AI-Powered Workspace",
+        "width": 1200,
+        "height": 800
       }
     ],
     "security": {

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde_json::Value as JsonValue;
 
 // ==================== User Models ====================
 
@@ -244,4 +245,40 @@ pub struct TaskPositionUpdate {
     pub id: i32,
     pub position: i32,
     pub status: String,
+}
+
+// ==================== MCP Auth Models ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpAuthConnection {
+    pub id: i32,
+    pub user_id: String,
+    pub provider: String,
+    pub provider_user_id: String,
+    pub provider_username: Option<String>,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<DateTime<Utc>>,
+    pub provider_data: Option<JsonValue>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateMcpAuthRequest {
+    pub provider: String,
+    pub provider_user_id: String,
+    pub provider_username: Option<String>,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<DateTime<Utc>>,
+    pub provider_data: JsonValue,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMcpAuthRequest {
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<DateTime<Utc>>,
+    pub provider_data: Option<JsonValue>,
 }

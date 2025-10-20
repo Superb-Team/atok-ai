@@ -1,237 +1,253 @@
-import React, { useState } from 'react';
-import { Search } from 'lucide-react';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-
-interface Extension {
-  id: string;
-  name: string;
-  author: string;
-  description: string;
-  image?: string;
-  configuration?: {
-    username?: boolean;
-    apiKey?: boolean;
-  };
-  videoWalkthrough?: {
-    step1?: string;
-    step2?: string;
-  };
-}
+import React, { useState, useEffect } from 'react';
+import { mcpService, McpAuthConnection } from '@/services/mcp.service';
+import { authService } from '@/services/auth.service';
+import { Github, Plug, Trash2, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const ExtensionsPage: React.FC = () => {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedExtension, setSelectedExtension] = useState<Extension | null>(null);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [connections, setConnections] = useState<McpAuthConnection[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [githubToken, setGithubToken] = useState('');
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
-  const [extensions] = useState<Extension[]>([
-    {
-      id: '1',
-      name: 'Google Calendar MCP',
-      author: '@Samsedin',
-      description: 'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.',
-      configuration: {
-        username: true,
-        apiKey: true,
-      },
-      videoWalkthrough: {
-        step1: 'Video placeholder 1',
-        step2: 'Video placeholder 2',
-      }
-    },
-    {
-      id: '2',
-      name: 'Google Drive MCP',
-      author: '@Samsedin',
-      description: 'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.',
-      configuration: {
-        username: true,
-        apiKey: true,
-      }
-    },
-    {
-      id: '3',
-      name: 'Google Photos MCP',
-      author: '@Samsedin',
-      description: 'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.',
-      configuration: {
-        apiKey: true,
-      }
-    },
-  ]);
+  useEffect(() => {
+    loadConnections();
+  }, []);
 
-  const filteredExtensions = extensions.filter(ext =>
-    ext.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    ext.description.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const loadConnections = async () => {
+    try {
+      setLoading(true);
+      const user = authService.getCurrentUserData();
+      if (!user) {
+        setError('User not authenticated');
+        return;
+      }
 
-  const handleExtensionClick = (extension: Extension) => {
-    setSelectedExtension(extension);
-    setIsDialogOpen(true);
+      const conns = await mcpService.getConnections(user.id);
+      setConnections(conns);
+    } catch (err) {
+      console.error('Failed to load connections:', err);
+      setError('Failed to load connections');
+    } finally {
+      setLoading(false);
+    }
   };
 
+  const handleConnectGitHub = async () => {
+    if (!githubToken.trim()) {
+      setError('Please enter a GitHub token');
+      return;
+    }
+
+    try {
+      setConnecting(true);
+      setError(null);
+      setSuccess(null);
+
+      const user = authService.getCurrentUserData();
+      if (!user) {
+        setError('User not authenticated');
+        return;
+      }
+
+      await mcpService.connectGitHub(user.id, githubToken);
+      setSuccess('GitHub connected successfully!');
+      setGithubToken('');
+      await loadConnections();
+    } catch (err: any) {
+      console.error('Failed to connect GitHub:', err);
+      setError(err.message || 'Failed to connect GitHub');
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnect = async (provider: string) => {
+    if (!confirm(`Are you sure you want to disconnect ${provider}?`)) {
+      return;
+    }
+
+    try {
+      const user = authService.getCurrentUserData();
+      if (!user) {
+        setError('User not authenticated');
+        return;
+      }
+
+      await mcpService.disconnect(user.id, provider);
+      setSuccess(`${provider} disconnected successfully`);
+      await loadConnections();
+    } catch (err: any) {
+      console.error(`Failed to disconnect ${provider}:`, err);
+      setError(err.message || `Failed to disconnect ${provider}`);
+    }
+  };
+
+  const getProviderIcon = (provider: string) => {
+    switch (provider.toLowerCase()) {
+      case 'github':
+        return <Github className="w-5 h-5" />;
+      default:
+        return <Plug className="w-5 h-5" />;
+    }
+  };
+
+  const isGitHubConnected = connections.some(c => c.provider === 'github');
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-white dark:bg-neutral-900">
+        <Loader2 className="w-8 h-8 animate-spin text-neutral-600 dark:text-neutral-400" />
+      </div>
+    );
+  }
+
   return (
-    <div className="flex-1 p-8 bg-background min-h-screen">
-      <div className="max-w-7xl mx-auto">
+    <div className="flex-1 overflow-auto bg-white dark:bg-neutral-900">
+      <div className="max-w-4xl mx-auto p-8">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-4xl font-bold text-foreground mb-4">Extensions</h1>
-          <p className="text-muted-foreground text-base">
-            In this menu, you can choose our diverse collections of{' '}
-            <span className="font-semibold">MCP Servers</span> called{' '}
-            <span className="font-semibold">Extensions</span>. This MCPs, can help your AI Agent to become more sentient.{' '}
-            <span className="font-bold">HAHAHA!</span>
+          <h1 className="text-3xl font-bold text-neutral-900 dark:text-white mb-2">
+            Extensions
+          </h1>
+          <p className="text-neutral-600 dark:text-neutral-400">
+            Connect external services to enhance your workflow
           </p>
         </div>
 
-        {/* Search Bar */}
-        <div className="mb-8 relative">
-          <div className="relative">
-            <Input
-              type="text"
-              placeholder="Type to search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-4 pr-12 py-6 text-base bg-secondary/30 border-border/50 focus:border-primary"
-            />
-            <button className="absolute right-3 top-1/2 -translate-y-1/2 p-2 hover:bg-accent rounded-full transition-colors">
-              <Search className="w-5 h-5 text-muted-foreground" />
-            </button>
-          </div>
-        </div>
+        {/* Alerts */}
+        {error && (
+          <Alert variant="destructive" className="mb-6">
+            <XCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
 
-        {/* Extensions Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredExtensions.map((extension) => (
-            <div
-              key={extension.id}
-              onClick={() => handleExtensionClick(extension)}
-              className="bg-card rounded-xl p-6 shadow-sm border border-border hover:shadow-lg hover:border-primary/50 transition-all cursor-pointer group"
-            >
-              {/* Extension Image/Placeholder */}
-              <div className="w-full h-40 bg-secondary/50 rounded-lg mb-4 flex items-center justify-center group-hover:bg-secondary/70 transition-colors">
-                <div className="text-muted-foreground text-sm">Extension Preview</div>
-              </div>
+        {success && (
+          <Alert className="mb-6 border-green-500 bg-green-50 dark:bg-green-950">
+            <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
+            <AlertDescription className="text-green-600 dark:text-green-400">
+              {success}
+            </AlertDescription>
+          </Alert>
+        )}
 
-              {/* Extension Info */}
-              <div>
-                <h3 className="text-lg font-bold text-foreground mb-1 group-hover:text-primary transition-colors">
-                  {extension.name}
-                </h3>
-                <p className="text-xs text-muted-foreground mb-3">
-                  by {extension.author}
-                </p>
-                <p className="text-sm text-muted-foreground line-clamp-3">
-                  {extension.description}
-                </p>
-              </div>
+        {/* Connected Services */}
+        {connections.length > 0 && (
+          <div className="mb-8">
+            <h2 className="text-xl font-semibold text-neutral-900 dark:text-white mb-4">
+              Connected Services
+            </h2>
+            <div className="space-y-3">
+              {connections.map((conn) => (
+                <Card key={conn.id} className="dark:bg-neutral-800 dark:border-neutral-700">
+                  <CardContent className="flex items-center justify-between p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-lg bg-neutral-100 dark:bg-neutral-700">
+                        {getProviderIcon(conn.provider)}
+                      </div>
+                      <div>
+                        <p className="font-medium text-neutral-900 dark:text-white capitalize">
+                          {conn.provider}
+                        </p>
+                        <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                          @{conn.provider_username || conn.provider_user_id}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleDisconnect(conn.provider)}
+                      className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950"
+                    >
+                      <Trash2 className="w-4 h-4 mr-2" />
+                      Disconnect
+                    </Button>
+                  </CardContent>
+                </Card>
+              ))}
             </div>
-          ))}
-        </div>
-
-        {/* No Results */}
-        {filteredExtensions.length === 0 && (
-          <div className="text-center py-16">
-            <p className="text-muted-foreground text-lg">No extensions found matching your search.</p>
           </div>
         )}
+
+        {/* Available Services */}
+        <div>
+          <h2 className="text-xl font-semibold text-neutral-900 dark:text-white mb-4">
+            Available Services
+          </h2>
+          <div className="space-y-4">
+            {/* GitHub */}
+            <Card className="dark:bg-neutral-800 dark:border-neutral-700">
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-neutral-100 dark:bg-neutral-700">
+                    <Github className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <CardTitle className="text-lg">GitHub</CardTitle>
+                    <CardDescription>
+                      Connect your GitHub account to access repositories and code
+                    </CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {isGitHubConnected ? (
+                  <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                    <CheckCircle className="w-4 h-4" />
+                    <span className="text-sm font-medium">Connected</span>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <Input
+                      type="password"
+                      placeholder="Enter GitHub Personal Access Token"
+                      value={githubToken}
+                      onChange={(e) => setGithubToken(e.target.value)}
+                      className="dark:bg-neutral-700 dark:border-neutral-600"
+                    />
+                    <div className="flex items-start gap-2">
+                      <Button
+                        onClick={handleConnectGitHub}
+                        disabled={connecting || !githubToken.trim()}
+                        className="bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900"
+                      >
+                        {connecting ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Connecting...
+                          </>
+                        ) : (
+                          'Connect GitHub'
+                        )}
+                      </Button>
+                      <a
+                        href="https://github.com/settings/tokens/new?scopes=repo,user"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-blue-600 dark:text-blue-400 hover:underline mt-2"
+                      >
+                        Get a token →
+                      </a>
+                    </div>
+                    <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                      Required scopes: <code className="bg-neutral-100 dark:bg-neutral-700 px-1 py-0.5 rounded">repo</code>, <code className="bg-neutral-100 dark:bg-neutral-700 px-1 py-0.5 rounded">user</code>
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* More services can be added here */}
+          </div>
+        </div>
       </div>
-
-      {/* Extension Detail Dialog */}
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            {/* Image with X lines pattern */}
-            <div className="w-full h-24 bg-secondary/30 rounded-lg mb-4 flex items-center justify-center relative overflow-hidden">
-              <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 30" preserveAspectRatio="none">
-                <line x1="0" y1="0" x2="100" y2="30" stroke="currentColor" strokeWidth="0.5" className="text-border" />
-                <line x1="0" y1="30" x2="100" y2="0" stroke="currentColor" strokeWidth="0.5" className="text-border" />
-              </svg>
-            </div>
-            <DialogTitle className="text-2xl font-bold text-left">
-              {selectedExtension?.name}
-            </DialogTitle>
-            <DialogDescription className="text-sm text-left leading-relaxed pt-2">
-              Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Lorem ipsum dolor sit amet, consectetur adipiscing elit.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mt-6">
-            {/* Configuration Section */}
-            <div>
-              <h3 className="text-base font-bold mb-4">Configuration</h3>
-              <div className="space-y-4">
-                {selectedExtension?.configuration?.username && (
-                  <div className="space-y-2">
-                    <Label htmlFor="username" className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      USERNAME
-                    </Label>
-                    <div className="h-10 bg-secondary/50 rounded border border-border"></div>
-                  </div>
-                )}
-                {selectedExtension?.configuration?.apiKey && (
-                  <div className="space-y-2">
-                    <Label htmlFor="apiKey" className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      API KEY
-                    </Label>
-                    <div className="h-10 bg-secondary/50 rounded border border-border"></div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Video Walkthrough Section */}
-            <div>
-              <h3 className="text-base font-bold mb-4">Video Walkthrough</h3>
-              <div className="space-y-4">
-                {selectedExtension?.videoWalkthrough?.step1 && (
-                  <div className="relative pl-8">
-                    <div className="absolute left-0 top-3 w-6 h-6 rounded-full bg-muted border border-border flex items-center justify-center">
-                      <span className="text-xs font-semibold text-muted-foreground">1</span>
-                    </div>
-                    <div className="w-full h-28 bg-secondary/50 rounded-lg border border-border"></div>
-                  </div>
-                )}
-                {selectedExtension?.videoWalkthrough?.step2 && (
-                  <div className="relative pl-8">
-                    <div className="absolute left-0 top-3 w-6 h-6 rounded-full bg-muted border border-border flex items-center justify-center">
-                      <span className="text-xs font-semibold text-muted-foreground">2</span>
-                    </div>
-                    <div className="w-full h-28 bg-secondary/50 rounded-lg border border-border"></div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Action Buttons - No border top, just spacing */}
-          <div className="flex justify-end gap-3 mt-8">
-            <button
-              onClick={() => setIsDialogOpen(false)}
-              className="px-6 py-2 rounded-lg border border-border hover:bg-accent transition-colors text-sm font-medium"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => {
-                // Handle install logic here
-                console.log('Installing extension:', selectedExtension?.name);
-                setIsDialogOpen(false);
-              }}
-              className="px-6 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors font-medium text-sm"
-            >
-              Install Extension
-            </button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 };

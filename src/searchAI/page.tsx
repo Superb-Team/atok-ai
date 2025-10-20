@@ -6,35 +6,23 @@ import {
   ConversationScrollButton,
 } from "@/components/ui/shadcn-io/ai/conversation";
 import {
-  Message,
-  MessageAvatar,
-  MessageContent,
-} from "@/components/ui/shadcn-io/ai/message";
-import {
   PromptInput,
-  PromptInputModelSelect,
-  PromptInputModelSelectContent,
-  PromptInputModelSelectItem,
-  PromptInputModelSelectTrigger,
-  PromptInputModelSelectValue,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputToolbar,
-  PromptInputTools,
 } from "@/components/ui/shadcn-io/ai/prompt-input";
 import { sendMessageStream, type ChatMessage } from "@/services/bedrock";
+import { User as UserIcon } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 
 // Status untuk chat
 type ChatStatus = "ready" | "submitted" | "streaming" | "error";
-type ChatMode = "chat" | "agent";
 
 // Start with empty conversation - Bedrock requires conversation to start with user message
 const initialMessages: ChatMessage[] = [];
 
 export default function AIChatInterface() {
   const [input, setInput] = useState("");
-  const [chatMode, setChatMode] = useState<ChatMode>("chat");
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [status, setStatus] = useState<ChatStatus>("ready");
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -71,7 +59,7 @@ export default function AIChatInterface() {
     abortControllerRef.current = new AbortController();
 
     try {
-    // Start streaming
+      // Start streaming
       setStatus("streaming");
 
       // Create a temporary message for the AI response that we'll update as chunks arrive
@@ -142,112 +130,159 @@ export default function AIChatInterface() {
   };
 
   return (
-    <div className="flex flex-col h-full flex-1 bg-background">
-      {/* Header - Clean version */}
-      <div className="border-b p-2 bg-card">
-        {/* Empty header for clean look */}
-      </div>
-
+    <div className="flex flex-col h-full flex-1 bg-neutral-50 dark:bg-neutral-900">
       {/* Chat Container */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden flex flex-col">
         <Conversation className="h-full">
           <ConversationContent className="h-full flex flex-col">
-            <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-4 flex-1 overflow-y-auto">
-              {messages.map((message) => (
-                <Message from={message.role} key={message.id} className="mb-4">
-                  <MessageAvatar
-                    src={message.role === "user" ? "" : ""}
-                    name={message.role === "user" ? "You" : "AI"}
-                    className="bg-gradient-to-r from-blue-500 to-purple-600 text-white"
-                  />
-                  <MessageContent className="prose prose-sm dark:prose-invert max-w-none">
-                    {message.content}
-                  </MessageContent>
-                </Message>
-              ))}
+            {messages.length === 0 ? (
+              /* Empty State - Centered Search */
+              <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 pb-32">
+                <div className="text-center mb-8 space-y-4">
+                  <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl mb-4">
+                    <img src="/logo-atok.png" alt="Atok.ai" className="w-20 h-20 rounded-2xl" />
+                  </div>
+                  <h1 className="text-4xl font-bold text-neutral-900 dark:text-white mb-2">
+                    Atok Agents
+                  </h1>
+                  <p className="text-lg text-neutral-600 dark:text-neutral-400 max-w-md">
+                    Ask me anything about your notes, tasks, or let me help you organize your thoughts
+                  </p>
+                </div>
 
-              {/* Loading state */}
-              {(status === "submitted" || status === "streaming") && (
-                <Message from="assistant" className="mb-4">
-                  <MessageAvatar
-                    src=""
-                    name="AI"
-                    className="bg-gradient-to-r from-green-500 to-teal-600 text-white"
-                  />
-                  <MessageContent>
-                    <div className="flex items-center space-x-2">
-                      <div className="flex space-x-1">
-                        <div className="w-2 h-2 bg-primary rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                        <div className="w-2 h-2 bg-primary rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                        <div className="w-2 h-2 bg-primary rounded-full animate-bounce"></div>
+                {/* Centered Search Input */}
+                <div className="w-full max-w-3xl">
+                  <PromptInput onSubmit={handleSubmit} className="max-w-none shadow-xl">
+                    <PromptInputTextarea
+                      value={input}
+                      onChange={(e) => setInput(e.currentTarget.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder="What would you like to know about your notes?"
+                      minHeight={56}
+                      maxHeight={200}
+                      className="resize-none text-base"
+                    />
+
+                    <PromptInputToolbar className="justify-end">
+                      <PromptInputSubmit
+                        disabled={!input.trim() || status !== "ready"}
+                        status={status}
+                        className="bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:hover:bg-neutral-200 text-white dark:text-neutral-900"
+                      />
+                    </PromptInputToolbar>
+                  </PromptInput>
+
+                  <p className="text-center text-xs text-neutral-500 dark:text-neutral-500 mt-3">
+                    Press Enter to send • Shift+Enter for new line
+                  </p>
+                </div>
+              </div>
+            ) : (
+              /* Chat Messages */
+              <div className="flex-1 overflow-y-auto">
+                <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+                  {messages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`flex gap-4 ${message.role === "user" ? "justify-end" : "justify-start"
+                        }`}
+                    >
+                      {message.role === "assistant" && (
+                        <div className="flex-shrink-0">
+                          <div className="w-10 h-10 rounded-full overflow-hidden">
+                            <img src="/logo-atok.png" alt="Atok.ai" className="w-full h-full object-cover" />
+                          </div>
+                        </div>
+                      )}
+
+                      <div
+                        className={`max-w-[80%] rounded-2xl px-5 py-3 ${message.role === "user"
+                          ? "bg-neutral-900 dark:bg-white text-white dark:text-neutral-900"
+                          : "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white border border-neutral-200 dark:border-neutral-700"
+                          }`}
+                      >
+                        <div className="prose prose-sm dark:prose-invert max-w-none">
+                          <p className="whitespace-pre-wrap m-0">{message.content}</p>
+                        </div>
                       </div>
-                      <span className="text-muted-foreground text-sm">
-                        {status === "submitted" ? "Processing..." : "Generating response..."}
-                      </span>
+
+                      {message.role === "user" && (
+                        <div className="flex-shrink-0">
+                          <div className="w-10 h-10 rounded-full bg-neutral-300 dark:bg-neutral-700 flex items-center justify-center">
+                            <UserIcon className="w-5 h-5 text-neutral-700 dark:text-neutral-300" />
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </MessageContent>
-                </Message>
-              )}
-            </div>
+                  ))}
+
+                  {/* Loading state */}
+                  {(status === "submitted" || status === "streaming") && (
+                    <div className="flex gap-4 justify-start">
+                      <div className="flex-shrink-0">
+                        <div className="w-10 h-10 rounded-full overflow-hidden">
+                          <img src="/logo-atok.png" alt="Atok.ai" className="w-full h-full object-cover" />
+                        </div>
+                      </div>
+                      <div className="max-w-[80%] rounded-2xl px-5 py-3 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
+                        <div className="flex items-center space-x-2">
+                          <div className="flex space-x-1">
+                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                            <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+                          </div>
+                          <span className="text-neutral-600 dark:text-neutral-400 text-sm">
+                            {status === "submitted" ? "Thinking..." : "Typing..."}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </ConversationContent>
 
           <ConversationScrollButton />
         </Conversation>
-      </div>
 
-      {/* Input Section */}
-      <div className="border-t bg-background">
-        <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-4">
-          <PromptInput onSubmit={handleSubmit} className="max-w-none">
-            <PromptInputTextarea
-              value={input}
-              onChange={(e) => setInput(e.currentTarget.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Type here what you gonna do with your notes..."
-              minHeight={48}
-              maxHeight={200}
-              className="resize-none"
-            />
+        {/* Input Section - Only show when there are messages */}
+        {messages.length > 0 && (
+          <div className="border-t border-neutral-200 dark:border-neutral-700 bg-white/80 dark:bg-neutral-900/80 backdrop-blur-sm">
+            <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-4">
+              <PromptInput onSubmit={handleSubmit} className="max-w-none shadow-lg">
+                <PromptInputTextarea
+                  value={input}
+                  onChange={(e) => setInput(e.currentTarget.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Type your message..."
+                  minHeight={48}
+                  maxHeight={200}
+                  className="resize-none"
+                />
 
-            <PromptInputToolbar>
-              <PromptInputTools>
-                {/* Chat/Agent Select Dropdown - Clean Design */}
-                <PromptInputModelSelect value={chatMode} onValueChange={(value: ChatMode) => setChatMode(value)}>
-                  <PromptInputModelSelectTrigger className="w-auto min-w-[100px]">
-                    <PromptInputModelSelectValue />
-                  </PromptInputModelSelectTrigger>
-                  <PromptInputModelSelectContent>
-                    <PromptInputModelSelectItem value="chat">Chat</PromptInputModelSelectItem>
-                    <PromptInputModelSelectItem value="agent">Agent</PromptInputModelSelectItem>
-                  </PromptInputModelSelectContent>
-                </PromptInputModelSelect>
-              </PromptInputTools>
+                <PromptInputToolbar className="justify-end">
+                  <PromptInputSubmit
+                    disabled={!input.trim() || status !== "ready"}
+                    status={status}
+                    className="bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:hover:bg-neutral-200 text-white dark:text-neutral-900"
+                  />
+                </PromptInputToolbar>
+              </PromptInput>
 
-              <PromptInputSubmit
-                disabled={!input.trim() || status !== "ready"}
-                status={status}
-                variant="ghost"
-                className="bg-transparent hover:bg-transparent text-foreground hover:text-foreground/80 dark:bg-transparent dark:hover:bg-transparent"
-              />
-            </PromptInputToolbar>
-          </PromptInput>
-
-          {/* Status Footer */}
-          <div className="flex justify-between items-center mt-2 text-xs text-muted-foreground">
-            <div className="flex items-center space-x-4">
-              <span>Press Enter to send, Shift+Enter for new line</span>
-              {status !== "ready" && (
-                <span className="flex items-center space-x-1">
-                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
-                  <span>AI is {status === "submitted" ? "processing" : "generating"}</span>
-                </span>
-              )}
-            </div>
-            <div className="hidden sm:block">
-              {messages.length} messages
+              {/* Status Footer */}
+              <div className="flex justify-between items-center mt-2 text-xs text-neutral-500 dark:text-neutral-500">
+                <span>Press Enter to send • Shift+Enter for new line</span>
+                {status !== "ready" && (
+                  <span className="flex items-center space-x-1">
+                    <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
+                    <span>AI is {status === "submitted" ? "thinking" : "typing"}</span>
+                  </span>
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

@@ -8,6 +8,7 @@ mod database;
 mod models;
 mod notes;
 mod tasks;
+mod mcp_auth;
 
 #[cfg(windows)]
 mod windows_audio;
@@ -119,6 +120,12 @@ pub fn run() {
             tasks::toggle_task_completion,
             tasks::update_task_positions,
             tasks::clear_column_tasks,
+            mcp_auth::get_mcp_connections,
+            mcp_auth::get_mcp_connection,
+            mcp_auth::create_mcp_connection,
+            mcp_auth::update_mcp_connection,
+            mcp_auth::delete_mcp_connection,
+            mcp_auth::test_mcp_connection,
             start_desktop_recording,
             stop_desktop_recording,
             is_recording,

@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
-import { Search, Settings, Share2, FileText, Star, Palette, Edit, Pin } from "lucide-react";
-import { Input } from "@/components/ui/input";
+import { FileText, Star } from "lucide-react";
 
-export default function HomePage() {
+interface HomePageProps {
+  onNoteClick?: (noteId: number) => void;
+}
+
+export default function HomePage({ onNoteClick }: HomePageProps) {
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -50,10 +52,7 @@ export default function HomePage() {
     }
   };
 
-  const filteredNotes = notes.filter((note) =>
-    note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    note.content?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredNotes = notes;
 
   if (loading) {
     return (
@@ -64,48 +63,45 @@ export default function HomePage() {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-screen overflow-hidden">
-      {/* Header with Search Bar */}
-      <div className="p-6 border-b border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900">
-        <div className="max-w-7xl mx-auto flex items-center gap-4">
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-neutral-400 w-5 h-5" />
-            <Input
-              type="text"
-              placeholder="Search notes..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-10 pr-4 py-2 w-full bg-gray-100 dark:bg-neutral-800 border-none"
-            />
-          </div>
-          <button className="p-2 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-colors">
-            <Settings className="w-6 h-6 text-neutral-600 dark:text-neutral-400" />
-          </button>
+    <div className="flex-1 flex flex-col h-screen overflow-hidden bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-900 dark:to-neutral-950">
+      {/* Header */}
+      <div className="px-8 py-6 border-b border-neutral-200/50 dark:border-neutral-700/50 bg-white/80 dark:bg-neutral-900/80 backdrop-blur-sm">
+        <div className="max-w-7xl mx-auto">
+          <h1 className="text-3xl font-bold text-neutral-900 dark:text-white">
+            My Notes
+          </h1>
         </div>
       </div>
 
       {/* Notes Grid */}
-      <div className="flex-1 overflow-y-auto p-8 bg-gray-50 dark:bg-neutral-900">
+      <div className="flex-1 overflow-y-auto p-8">
         <div className="max-w-7xl mx-auto">
           {error && (
-            <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-600 dark:text-red-400">
+            <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-600 dark:text-red-400">
               {error}
             </div>
           )}
           
           {filteredNotes.length === 0 ? (
-            <div className="text-center py-16">
-              <p className="text-neutral-600 dark:text-neutral-400 text-lg">
-                {searchQuery ? "No notes found" : "No notes yet. Click the + button to create one!"}
+            <div className="text-center py-20">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800 mb-4">
+                <FileText className="w-8 h-8 text-neutral-400 dark:text-neutral-500" />
+              </div>
+              <p className="text-neutral-600 dark:text-neutral-400 text-lg font-medium">
+                No notes yet
+              </p>
+              <p className="text-neutral-500 dark:text-neutral-500 text-sm mt-2">
+                Click the + button to create your first note!
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
               {filteredNotes.map((note) => (
                 <NoteCard
                   key={note.id}
                   note={note}
                   onToggleFavorite={handleToggleFavorite}
+                  onClick={() => onNoteClick?.(note.id)}
                 />
               ))}
             </div>
@@ -119,69 +115,86 @@ export default function HomePage() {
 interface NoteCardProps {
   note: Note;
   onToggleFavorite: (noteId: number) => void;
+  onClick?: () => void;
 }
 
-function NoteCard({ note, onToggleFavorite }: NoteCardProps) {
-  const backgroundColor = note.color || "#E5E7EB";
+function NoteCard({ note, onToggleFavorite, onClick }: NoteCardProps) {
+  const backgroundColor = note.color || "#FFFFFF";
+  const isDark = note.color && note.color !== "#FFFFFF";
 
   return (
     <div
-      className="rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow relative group"
-      style={{ backgroundColor }}
+      onClick={onClick}
+      className="rounded-xl p-5 shadow-sm hover:shadow-lg transition-all duration-200 relative group cursor-pointer border border-neutral-200 dark:border-neutral-700 hover:scale-[1.02]"
+      style={{ 
+        backgroundColor,
+        color: isDark ? "#1F2937" : undefined
+      }}
     >
-      {/* Pin Icon */}
-      <button
-        onClick={() => onToggleFavorite(note.id)}
-        className="absolute top-4 right-4 p-1.5 hover:bg-black/10 rounded-full transition-colors"
-      >
-        <Pin
-          className={`w-5 h-5 ${
-            note.is_favorite ? "fill-current text-neutral-700" : "text-neutral-600"
-          }`}
-        />
-      </button>
+      {/* Favorite Star */}
+      {note.is_favorite && (
+        <div className="absolute top-3 right-3">
+          <Star className="w-4 h-4 fill-current text-yellow-500" />
+        </div>
+      )}
 
       {/* Title */}
-      <h3 className="text-2xl font-semibold text-neutral-800 mb-4 pr-8">
+      <h3 className="text-lg font-semibold mb-3 pr-6 line-clamp-2" style={{ color: isDark ? "#1F2937" : undefined }}>
         {note.title}
       </h3>
 
       {/* Content Preview */}
-      <div className="mb-6 min-h-[80px]">
+      <div className="mb-4 min-h-[60px]">
         {note.content ? (
-          <p className="text-neutral-700 line-clamp-3">{note.content}</p>
+          <p className="text-sm line-clamp-3 opacity-80" style={{ color: isDark ? "#374151" : undefined }}>
+            {note.content}
+          </p>
         ) : (
           <div className="space-y-2">
-            <div className="h-2 bg-neutral-400/30 rounded-full w-full"></div>
-            <div className="h-2 bg-neutral-400/30 rounded-full w-full"></div>
-            <div className="h-2 bg-neutral-400/30 rounded-full w-3/4"></div>
+            <div className="h-2 bg-neutral-300/40 dark:bg-neutral-600/40 rounded-full w-full"></div>
+            <div className="h-2 bg-neutral-300/40 dark:bg-neutral-600/40 rounded-full w-5/6"></div>
           </div>
         )}
       </div>
 
-      {/* Action Buttons */}
-      <div className="flex items-center gap-3 pt-4 border-t border-neutral-400/30">
-        <button className="p-2 hover:bg-black/10 rounded-lg transition-colors">
-          <Share2 className="w-5 h-5 text-neutral-700" />
-        </button>
-        <button className="p-2 hover:bg-black/10 rounded-lg transition-colors">
-          <FileText className="w-5 h-5 text-neutral-700" />
-        </button>
+      {/* Tags */}
+      {note.tags && note.tags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {note.tags.slice(0, 2).map((tag, index) => (
+            <span
+              key={index}
+              className="px-2 py-0.5 bg-neutral-200/60 dark:bg-neutral-700/60 rounded text-xs"
+              style={{ color: isDark ? "#4B5563" : undefined }}
+            >
+              {tag}
+            </span>
+          ))}
+          {note.tags.length > 2 && (
+            <span className="px-2 py-0.5 text-xs opacity-60">
+              +{note.tags.length - 2}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Footer */}
+      <div className="flex items-center justify-between pt-3 border-t border-neutral-300/40 dark:border-neutral-600/40">
+        <span className="text-xs opacity-60">
+          {new Date(note.updated_at).toLocaleDateString()}
+        </span>
         <button
-          onClick={() => onToggleFavorite(note.id)}
-          className="p-2 hover:bg-black/10 rounded-lg transition-colors"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFavorite(note.id);
+          }}
+          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
         >
           <Star
-            className={`w-5 h-5 ${
-              note.is_favorite ? "fill-current text-yellow-500" : "text-neutral-700"
+            className={`w-4 h-4 ${
+              note.is_favorite ? "fill-current text-yellow-500" : ""
             }`}
+            style={{ color: isDark && !note.is_favorite ? "#4B5563" : undefined }}
           />
-        </button>
-        <button className="p-2 hover:bg-black/10 rounded-lg transition-colors">
-          <Palette className="w-5 h-5 text-neutral-700" />
-        </button>
-        <button className="p-2 hover:bg-black/10 rounded-lg transition-colors">
-          <Edit className="w-5 h-5 text-neutral-700" />
         </button>
       </div>
     </div>

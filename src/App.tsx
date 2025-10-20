@@ -1,6 +1,7 @@
 import ExtensionsPage from "@/components/ExtensionsPage";
 import TasksPage from "@/components/TasksPage";
 import HomePage from "@/components/HomePage";
+import NoteViewPage from "@/components/NoteViewPage";
 import CreateNoteDialog from "@/components/CreateNoteDialog";
 import LoginPage from "@/components/auth/LoginPage";
 import SignupPage from "@/components/auth/SignupPage";
@@ -12,7 +13,6 @@ import { authService } from "@/services/auth.service";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { motion } from "framer-motion";
 import {
-  Brain,
   CheckSquare,
   Eye,
   FileText,
@@ -28,6 +28,7 @@ import "./App.css";
 function App() {
   const [open, setOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState("home");
+  const [selectedNoteId, setSelectedNoteId] = useState<number | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authView, setAuthView] = useState<"login" | "signup">("login");
   const [loading, setLoading] = useState(true);
@@ -177,14 +178,6 @@ function App() {
       ),
       onClick: () => setCurrentPage("tasks"),
     },
-    {
-      label: "Knowledge Management",
-      href: "#",
-      icon: (
-        <Brain className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ),
-      onClick: () => setCurrentPage("memory"),
-    },
   ];
 
   const bottomLinks = [
@@ -249,14 +242,22 @@ function App() {
       </Sidebar>
 
       {/* Main Content Area - Show different pages based on currentPage state */}
-      {currentPage === "tasks" ? (
+      {selectedNoteId ? (
+        <NoteViewPage
+          noteId={selectedNoteId}
+          onBack={() => {
+            setSelectedNoteId(null);
+            setRefreshNotes(prev => prev + 1);
+          }}
+        />
+      ) : currentPage === "tasks" ? (
         <TasksPage />
       ) : currentPage === "extensions" ? (
         <ExtensionsPage />
       ) : currentPage === "search" ? (
         <AIChatInterface />
       ) : (
-        <HomePage key={refreshNotes} />
+        <HomePage key={refreshNotes} onNoteClick={(noteId) => setSelectedNoteId(noteId)} />
       )}
 
       {/* Floating Action Menu */}
@@ -278,7 +279,7 @@ const Logo = () => {
       href="#"
       className="font-normal flex space-x-2 items-center text-sm text-black py-1 relative z-20"
     >
-      <div className="h-5 w-6 bg-black dark:bg-white rounded-br-lg rounded-tr-sm rounded-tl-lg rounded-bl-sm flex-shrink-0" />
+      <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-8 flex-shrink-0 rounded-lg" />
       <motion.span
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -296,7 +297,7 @@ const LogoIcon = () => {
       href="#"
       className="font-normal flex space-x-2 items-center text-sm text-black py-1 relative z-20"
     >
-      <div className="h-5 w-6 bg-black dark:bg-white rounded-br-lg rounded-tr-sm rounded-tl-lg rounded-bl-sm flex-shrink-0" />
+      <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-8 flex-shrink-0 rounded-lg" />
     </a>
   );
 };
