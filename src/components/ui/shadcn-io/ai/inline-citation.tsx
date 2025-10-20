@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/hover-card';
 import { cn } from '@/lib/utils';
 import { ArrowLeftIcon, ArrowRightIcon } from 'lucide-react';
-import { type ComponentProps, useCallback, useEffect, useState, useRef, createContext, useContext } from 'react';
+import { type ComponentProps, useCallback, useEffect, useState, createContext, useContext } from 'react';
 
 // Context to share carousel API with child components
 const CarouselApiContext = createContext<CarouselApi | undefined>(undefined);
@@ -99,13 +99,13 @@ export const InlineCitationCarousel = ({
   ...props
 }: InlineCitationCarouselProps) => {
   const [api, setApi] = useState<CarouselApi>();
-  
+
   return (
     <CarouselApiContext.Provider value={api}>
-      <Carousel 
-        className={cn('w-full', className)} 
+      <Carousel
+        className={cn('w-full', className)}
         setApi={setApi}
-        {...props} 
+        {...props}
       >
         {children}
       </Carousel>

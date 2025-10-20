@@ -68,9 +68,9 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) =
     
     // Lists - ordered
     let orderCounter = 0;
-    processed = processed.replace(/^\d+\. (.+)$/gm, () => {
+    processed = processed.replace(/^\d+\. (.+)$/gm, (_match, content) => {
       orderCounter++;
-      return `<div class="flex gap-2 my-1"><span class="text-neutral-600 dark:text-neutral-400 font-medium">${orderCounter}.</span><span>$1</span></div>`;
+      return `<div class="flex gap-2 my-1"><span class="text-neutral-600 dark:text-neutral-400 font-medium">${orderCounter}.</span><span>${content}</span></div>`;
     });
     
     // Line breaks (double newline = paragraph, single = br)

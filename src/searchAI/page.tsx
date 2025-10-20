@@ -146,7 +146,7 @@ export default function AIChatInterface() {
       const errorChatMessage: ChatMessage = {
         id: (Date.now() + 2).toString(),
         role: "assistant",
-        content: `⚠️ Error: ${errorMsg}\n\nPlease make sure the agent API is running at http://localhost:8000`,
+        content: `⚠️ Error: ${errorMsg}\n\nPlease make sure the agent API is running at base_url`,
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorChatMessage]);

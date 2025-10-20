@@ -2,6 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
 import { Pause, Square, Settings, Sparkles, Maximize2 } from 'lucide-react';
 
+// Extend CSSProperties to include Tauri-specific properties
+declare module 'react' {
+  interface CSSProperties {
+    WebkitAppRegion?: 'drag' | 'no-drag';
+    appRegion?: 'drag' | 'no-drag';
+  }
+}
+
 const RecordingPopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -320,10 +328,9 @@ const RecordingPopupApp: React.FC = () => {
         `}
         style={{
           cursor: 'move',
+          // @ts-ignore - WebkitAppRegion is not in React types but works in Tauri
           WebkitAppRegion: 'drag',
-          // @ts-ignore
-          appRegion: 'drag'
-        }}
+        } as React.CSSProperties}
       >
         {/* Left Section - Record/Pause Button */}
         <div className="flex items-center space-x-2 ml-2">
@@ -341,8 +348,6 @@ const RecordingPopupApp: React.FC = () => {
               borderRadius: '4px',
               background: 'transparent',
               WebkitAppRegion: 'no-drag',
-              // @ts-ignore
-              appRegion: 'no-drag',
               pointerEvents: 'auto',
               cursor: isRecording ? 'not-allowed' : 'pointer',
               zIndex: 9999,
@@ -365,8 +370,6 @@ const RecordingPopupApp: React.FC = () => {
               `}
               style={{
                 WebkitAppRegion: 'no-drag',
-                // @ts-ignore
-                appRegion: 'no-drag',
                 pointerEvents: 'auto',
                 cursor: 'pointer',
                 zIndex: 9999,
@@ -390,8 +393,6 @@ const RecordingPopupApp: React.FC = () => {
               `}
               style={{
                 WebkitAppRegion: 'no-drag',
-                // @ts-ignore
-                appRegion: 'no-drag',
                 pointerEvents: 'auto',
                 cursor: 'pointer',
                 zIndex: 9999,
@@ -414,8 +415,6 @@ const RecordingPopupApp: React.FC = () => {
             `}
             style={{
               WebkitAppRegion: 'no-drag',
-              // @ts-ignore
-              appRegion: 'no-drag',
               pointerEvents: 'auto',
               cursor: 'pointer',
               zIndex: 9999,
@@ -452,8 +451,6 @@ const RecordingPopupApp: React.FC = () => {
             `}
             style={{
               WebkitAppRegion: 'no-drag',
-              // @ts-ignore
-              appRegion: 'no-drag',
               pointerEvents: 'auto',
               cursor: 'pointer',
               zIndex: 9999,
@@ -475,8 +472,6 @@ const RecordingPopupApp: React.FC = () => {
             `}
             style={{
               WebkitAppRegion: 'no-drag',
-              // @ts-ignore
-              appRegion: 'no-drag',
               pointerEvents: 'auto',
               cursor: 'pointer',
               zIndex: 9999,
@@ -512,8 +507,6 @@ const RecordingPopupApp: React.FC = () => {
               borderRadius: '4px',
               background: 'transparent',
               WebkitAppRegion: 'no-drag',
-              // @ts-ignore
-              appRegion: 'no-drag',
               zIndex: 9999,
               position: 'relative'
             }}
