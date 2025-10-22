@@ -1,7 +1,7 @@
 // Agent API Configuration
 export const AGENT_CONFIG = {
-  API_BASE_URL: 'base_url',
-  API_KEY: 'buwf923g231djewqbndi72e2y1v1ok',
+  API_BASE_URL: 'SERVER_URL',
+  API_KEY: 'SERVER_API_KEY',
   ENDPOINTS: {
     STREAM: '/agent/stream',
     INVOKE: '/agent/invoke',
