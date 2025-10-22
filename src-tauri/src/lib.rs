@@ -1,6 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
-use tauri::Manager;
+use tauri::{Manager, Emitter};
 use std::sync::{Arc, Mutex};
 
 mod auth;
@@ -96,6 +96,30 @@ async fn read_audio_file(path: String) -> Result<String, String> {
     Ok(base64_data)
 }
 
+#[tauri::command]
+async fn notify_recording_started(app: tauri::AppHandle, note_title: String) -> Result<(), String> {
+    println!("📡 Emitting recording-started event to all windows: {}", note_title);
+    
+    app.emit("recording-started", serde_json::json!({
+        "noteTitle": note_title
+    })).map_err(|e| format!("Failed to emit event: {}", e))?;
+    
+    println!("✅ Event emitted successfully");
+    Ok(())
+}
+
+#[tauri::command]
+async fn notify_note_created(app: tauri::AppHandle, note_title: String) -> Result<(), String> {
+    println!("📡 Emitting note-created event to all windows: {}", note_title);
+    
+    app.emit("note-created", serde_json::json!({
+        "noteTitle": note_title
+    })).map_err(|e| format!("Failed to emit event: {}", e))?;
+    
+    println!("✅ Event emitted successfully");
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -149,6 +173,8 @@ pub fn run() {
             stop_desktop_recording,
             is_recording,
             read_audio_file,
+            notify_recording_started,
+            notify_note_created,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

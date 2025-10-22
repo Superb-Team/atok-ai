@@ -23,14 +23,23 @@ export interface AgentStreamEvent {
 export const agentService = {
   /**
    * Transcribe and enhance audio file
+   * Endpoint: POST /transcribe-enhance
    */
   async transcribeAndEnhance(audioFile: File, context?: string): Promise<string> {
     try {
+      console.log('🎤 Starting transcription and enhancement...');
+      console.log('📁 File:', audioFile.name, 'Size:', audioFile.size, 'Type:', audioFile.type);
+      console.log('🌐 API URL:', `${API_BASE_URL}/transcribe-enhance`);
+
       const formData = new FormData();
       formData.append('file', audioFile);
       if (context) {
         formData.append('context', context);
+        console.log('📝 Context:', context);
       }
+
+      console.log('📤 Sending request to transcription API...');
+      const startTime = Date.now();
 
       const response = await fetch(`${API_BASE_URL}/transcribe-enhance`, {
         method: 'POST',
@@ -40,15 +49,40 @@ export const agentService = {
         body: formData,
       });
 
+      const duration = Date.now() - startTime;
+      console.log(`📥 Response received in ${duration}ms`);
+      console.log('📊 Status:', response.status, response.statusText);
+      console.log('📋 Headers:', Object.fromEntries(response.headers.entries()));
+
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`Transcription failed: ${errorText}`);
+        console.error('❌ Transcription API error response:', errorText);
+        throw new Error(`Transcription failed (${response.status}): ${errorText}`);
       }
 
+      const contentType = response.headers.get('content-type');
+      console.log('📄 Content-Type:', contentType);
+
       const data = await response.json();
-      return data.enhanced_text || data.transcript || '';
+      console.log('✅ Transcription response data:', data);
+
+      // Try different possible field names
+      const result = data.enhanced_text || data.transcript || data.text || data.result || '';
+      console.log('✅ Transcription result length:', result.length);
+      console.log('📝 First 200 chars:', result.substring(0, 200));
+
+      if (!result) {
+        console.error('⚠️ Empty transcription result. Full response:', data);
+        throw new Error('Transcription returned empty result');
+      }
+
+      return result;
     } catch (error) {
-      console.error('Error transcribing audio:', error);
+      console.error('❌ Error transcribing audio:', error);
+      if (error instanceof Error) {
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+      }
       throw error;
     }
   },
@@ -177,7 +211,7 @@ export const agentService = {
     try {
       while (true) {
         const { done, value } = await reader.read();
-        
+
         if (done) break;
 
         // Decode the chunk
@@ -190,7 +224,7 @@ export const agentService = {
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             const data = line.slice(6).trim();
-            
+
             // Skip [DONE] marker and keepalive
             if (data === '[DONE]' || !data) {
               continue;
@@ -198,7 +232,7 @@ export const agentService = {
 
             try {
               const parsed = JSON.parse(data);
-              
+
               // Handle different event types from agent API
               if (parsed.type === 'text' || parsed.type === 'log') {
                 // Main content from agent

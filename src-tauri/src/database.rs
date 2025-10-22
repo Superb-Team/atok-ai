@@ -9,7 +9,7 @@ pub async fn init_database() -> Result<Database, String> {
     // Get database URL from environment variable
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| {
-            "base_url_postgre".to_string()
+            "DB_URL".to_string()
         });
     
     println!("Connecting to database...");

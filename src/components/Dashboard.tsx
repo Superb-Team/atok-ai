@@ -20,12 +20,17 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import FloatingActionMenu from "@/components/ui/floating-action-menu";
 import TasksPage from "@/components/TasksPage";
 import ExtensionsPage from "@/components/ExtensionsPage";
-import { useAuth } from "@/contexts/AuthContext";
 import { useNavigate } from "react-router-dom";
+import { authService } from "@/services/auth.service";
 
 function Dashboard() {
-  const { logout, user } = useAuth();
   const navigate = useNavigate();
+  const user = authService.getUser();
+
+  const logout = () => {
+    authService.logout();
+    navigate("/login");
+  };
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
   const [open, setOpen] = useState(false);
@@ -79,11 +84,6 @@ function Dashboard() {
 
   const handleCreateNote = () => {
     console.log("Create Note clicked");
-  };
-
-  const handleLogout = () => {
-    logout();
-    navigate("/signin");
   };
 
   const links = [
@@ -153,7 +153,7 @@ function Dashboard() {
       icon: (
         <LogOut className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
       ),
-      onClick: handleLogout,
+      onClick: logout,
     },
   ];
 
