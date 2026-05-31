@@ -17,13 +17,3 @@ export interface CreateNoteRequest {
   tags?: string[];
   color?: string;
 }
-
-export interface UpdateNoteRequest {
-  id: number;
-  title?: string;
-  content?: string;
-  tags?: string[];
-  is_favorite?: boolean;
-  is_archived?: boolean;
-  color?: string;
-}

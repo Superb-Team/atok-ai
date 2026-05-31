@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Task, CreateTaskRequest, UpdateTaskRequest, TaskPositionUpdate } from "@/types/task.types";
+import type { Task, CreateTaskRequest, TaskPositionUpdate } from "@/types/task.types";
 
 export const taskService = {
   async getTasks(userId: string): Promise<Task[]> {
@@ -8,14 +8,6 @@ export const taskService = {
 
   async createTask(userId: string, request: CreateTaskRequest): Promise<Task> {
     return await invoke<Task>("create_task", { userId, request });
-  },
-
-  async updateTask(userId: string, request: UpdateTaskRequest): Promise<Task> {
-    return await invoke<Task>("update_task", { userId, request });
-  },
-
-  async deleteTask(taskId: number, userId: string): Promise<{ message: string }> {
-    return await invoke<{ message: string }>("delete_task", { taskId, userId });
   },
 
   async toggleTaskCompletion(taskId: number, userId: string): Promise<Task> {

@@ -125,159 +125,18 @@ const RecordingPopupApp: React.FC = () => {
     if (isRecording) {
       try {
         const { recordingService } = await import('@/services/recording.service');
-        const savedPath = await recordingService.stopRecording();
+        await recordingService.stopRecording();
 
         setIsRecording(false);
         setIsPaused(false);
-        setTime(0);
 
-        console.log('✅ Recording stopped:', savedPath);
-
-        // Start processing workflow
-        await processRecording(savedPath);
+        console.log('Recording stopped (use Finish to process)');
       } catch (error) {
-        console.error('❌ Failed to stop recording:', error);
+        console.error('Failed to stop recording:', error);
         alert(`Failed to stop recording: ${error}`);
       }
     }
   };
-
-  const processRecording = async (audioPath: string) => {
-    console.log('🎙️ Starting audio processing workflow...');
-    console.log('📁 Audio path:', audioPath);
-
-    // Generate note title
-    const now = new Date();
-    const timestamp = now.toLocaleTimeString('en-US', { 
-      hour12: false, 
-      hour: '2-digit', 
-      minute: '2-digit', 
-      second: '2-digit' 
-    });
-    const noteTitle = `Note - ${timestamp}`;
-
-    try {
-      // Step 1: Read audio file using Tauri invoke
-      console.log('📖 Step 1: Reading audio file...');
-      console.log('📁 Audio path:', audioPath);
-      const { invoke } = await import('@tauri-apps/api/core');
-
-      // Read file as base64
-      const base64Data = await invoke<string>('read_audio_file', { path: audioPath });
-      console.log('✅ Audio file read successfully');
-      console.log('📊 Base64 data length:', base64Data.length);
-
-      // Convert base64 to blob
-      const binaryString = atob(base64Data);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      const audioBlob = new Blob([bytes], { type: 'audio/mpeg' });
-      const audioFile = new File([audioBlob], 'recording.mp3', { type: 'audio/mpeg' });
-      console.log('✅ Audio file created:', {
-        name: audioFile.name,
-        size: audioFile.size,
-        type: audioFile.type
-      });
-      
-      if (audioFile.size === 0) {
-        throw new Error('Audio file is empty (0 bytes)');
-      }
-
-      // Step 2: Transcribe and enhance
-      console.log('🤖 Step 2: Transcribing and enhancing...');
-      const { agentService } = await import('@/services/agent.service');
-
-      const enhancedText = await Promise.race([
-        agentService.transcribeAndEnhance(audioFile, 'voice recording'),
-        new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('Transcription timeout after 5 minutes')), 300000)
-        )
-      ]);
-
-      console.log('✅ Transcription completed:', enhancedText.substring(0, 100) + '...');
-
-      // Step 3: Get user info
-      console.log('👤 Step 3: Getting user info...');
-      const { authService } = await import('@/services/auth.service');
-      const user = authService.getUser();
-
-      if (!user) {
-        throw new Error('User not authenticated');
-      }
-      console.log('✅ User:', user.id);
-
-      // Step 4: Save to notes
-      console.log('📝 Step 4: Saving to notes...');
-      const { noteService } = await import('@/services/note.service');
-
-      const newNote = {
-        title: noteTitle,
-        content: enhancedText,
-        tags: ['voice-recording', 'transcription'],
-        color: '#E0F2FE', // Light blue
-        is_favorite: false,
-      };
-
-      await noteService.createNote(user.id, newNote);
-
-      console.log('✅ Note created successfully');
-
-      // Step 5: Insert to OpenSearch RAG
-      console.log('🔍 Step 5: Inserting to RAG...');
-      const currentDate = now.toISOString().split('T')[0];
-      await agentService.insertDocument(user.id, enhancedText, {
-        type: 'voice_recording',
-        date: currentDate,
-        timestamp: now.toISOString(),
-        source: 'audio_transcription',
-      });
-      console.log('✅ Document inserted to RAG');
-
-      // Success - notify main window
-      console.log('🎉 Workflow completed successfully!');
-      
-      // Notify via localStorage (most reliable)
-      localStorage.setItem('note_created', JSON.stringify({
-        noteTitle,
-        timestamp: Date.now()
-      }));
-      console.log('✅ localStorage updated for note_created');
-      
-      // Also try Tauri command as backup
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('notify_note_created', { noteTitle });
-        console.log('✅ Tauri notification sent');
-      } catch (notifyError) {
-        console.warn('⚠️ Tauri notification failed:', notifyError);
-      }
-
-    } catch (error) {
-      console.error('❌ Failed to process recording:', error);
-      
-      // Show error to user
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      alert(`Recording processing failed:\n${errorMessage}\n\nCheck console for details.`);
-      
-      // Notify error to remove loading note
-      localStorage.setItem('note_created', JSON.stringify({
-        noteTitle,
-        timestamp: Date.now(),
-        error: true
-      }));
-      console.log('✅ Error notification sent via localStorage');
-      
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('notify_note_created', { noteTitle });
-      } catch (notifyError) {
-        console.warn('⚠️ Tauri error notification failed:', notifyError);
-      }
-    }
-  };
-
 
   const handleFinish = async () => {
     console.log('🔴 FINISH BUTTON CLICKED - Starting close process');
@@ -293,15 +152,8 @@ const RecordingPopupApp: React.FC = () => {
         savedPath = await recordingService.stopRecording();
         console.log('✅ Recording stopped successfully:', savedPath);
 
-        // Generate note title
-        const now = new Date();
-        const timestamp = now.toLocaleTimeString('en-US', { 
-          hour12: false, 
-          hour: '2-digit', 
-          minute: '2-digit', 
-          second: '2-digit' 
-        });
-        noteTitle = `Note - ${timestamp}`;
+        const { generateNoteTitle } = await import('@/services/audio-processor.service');
+        noteTitle = generateNoteTitle();
 
         setIsRecording(false);
         setIsPaused(false);
@@ -311,41 +163,38 @@ const RecordingPopupApp: React.FC = () => {
       }
     }
 
-    // Notify main window via multiple methods for reliability
+    // Notify main window via localStorage
     if (savedPath && noteTitle) {
       try {
-        console.log('📡 Notifying main window...');
-        
-        // Method 1: localStorage (most reliable for cross-window communication)
-        localStorage.setItem('recording_started', JSON.stringify({
+        console.log('Notifying main window...');
+
+        // Send audio path to main window for processing
+        localStorage.setItem('audio_to_process', JSON.stringify({
+          audioPath: savedPath,
           noteTitle,
           timestamp: Date.now()
         }));
-        console.log('✅ localStorage updated');
-        
-        // Method 2: Tauri command
+        console.log('Audio path saved to localStorage');
+
+        // Also try Tauri command as backup
         try {
           const { invoke } = await import('@tauri-apps/api/core');
           await invoke('notify_recording_started', { noteTitle });
-          console.log('✅ Tauri command sent');
+          console.log('Tauri notification sent');
         } catch (invokeError) {
-          console.warn('⚠️ Tauri command failed:', invokeError);
+          console.warn('Tauri notification failed:', invokeError);
         }
-        
-        // Wait a bit to ensure notification is received
+
         await new Promise(resolve => setTimeout(resolve, 200));
-        console.log('⏱️ Waited 200ms for notification propagation');
       } catch (notifyError) {
-        console.error('❌ Failed to notify main window:', notifyError);
+        console.error('Failed to notify main window:', notifyError);
       }
     } else {
-      console.warn('⚠️ No savedPath or noteTitle, skipping notification');
-      console.log('savedPath:', savedPath);
-      console.log('noteTitle:', noteTitle);
+      console.warn('No savedPath or noteTitle, skipping notification');
     }
 
-    // Close window after event is emitted
-    console.log('🚪 Closing window...');
+    // Close window
+    console.log('Closing window...');
     const closeWindow = async () => {
       if (appWindow) {
         try {
@@ -364,17 +213,6 @@ const RecordingPopupApp: React.FC = () => {
         }
       }
     };
-
-    // Send audio path to main window for processing
-    if (savedPath) {
-      console.log('📤 Sending audio path to main window for processing...');
-      localStorage.setItem('audio_to_process', JSON.stringify({
-        audioPath: savedPath,
-        noteTitle,
-        timestamp: Date.now()
-      }));
-      console.log('✅ Audio path saved to localStorage');
-    }
 
     // Close window after sending data
     closeWindow();

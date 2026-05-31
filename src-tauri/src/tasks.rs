@@ -7,13 +7,14 @@ pub async fn get_tasks(
     db: State<'_, Database>,
     user_id: String,
 ) -> Result<Vec<TaskResponse>, String> {
+    let pool = db.get_pool()?;
     let tasks = sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks 
          WHERE user_id = $1 AND is_deleted = false 
          ORDER BY position ASC"
     )
     .bind(&user_id)
-    .fetch_all(db.0.as_ref())
+    .fetch_all(pool)
     .await
     .map_err(|e| format!("Failed to fetch tasks: {}", e))?;
     
@@ -39,6 +40,7 @@ pub async fn create_task(
     user_id: String,
     request: CreateTaskRequest,
 ) -> Result<TaskResponse, String> {
+    let pool = db.get_pool()?;
     let task = sqlx::query_as::<_, Task>(
         "INSERT INTO tasks (user_id, title, description, status, priority, duration_minutes, tags, due_date, position) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
@@ -49,11 +51,11 @@ pub async fn create_task(
     .bind(&request.description)
     .bind(&request.status)
     .bind(&request.priority)
-    .bind(&request.duration_minutes)
+    .bind(request.duration_minutes)
     .bind(&request.tags)
-    .bind(&request.due_date)
+    .bind(request.due_date)
     .bind(0) // Default position
-    .fetch_one(db.0.as_ref())
+    .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to create task: {}", e))?;
     
@@ -79,6 +81,7 @@ pub async fn update_task(
     user_id: String,
     request: UpdateTaskRequest,
 ) -> Result<TaskResponse, String> {
+    let pool = db.get_pool()?;
     let task = sqlx::query_as::<_, Task>(
         "UPDATE tasks 
          SET title = COALESCE($1, title),
@@ -97,13 +100,13 @@ pub async fn update_task(
     .bind(&request.description)
     .bind(&request.status)
     .bind(&request.priority)
-    .bind(&request.duration_minutes)
+    .bind(request.duration_minutes)
     .bind(&request.tags)
-    .bind(&request.due_date)
-    .bind(&request.position)
+    .bind(request.due_date)
+    .bind(request.position)
     .bind(request.id)
     .bind(&user_id)
-    .fetch_optional(db.0.as_ref())
+    .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to update task: {}", e))?
     .ok_or_else(|| "Task not found".to_string())?;
@@ -130,13 +133,14 @@ pub async fn delete_task(
     task_id: i32,
     user_id: String,
 ) -> Result<MessageResponse, String> {
+    let pool = db.get_pool()?;
     let result = sqlx::query(
         "UPDATE tasks SET is_deleted = true 
          WHERE id = $1 AND user_id = $2"
     )
     .bind(task_id)
     .bind(&user_id)
-    .execute(db.0.as_ref())
+    .execute(pool)
     .await
     .map_err(|e| format!("Failed to delete task: {}", e))?;
     
@@ -155,13 +159,14 @@ pub async fn toggle_task_completion(
     task_id: i32,
     user_id: String,
 ) -> Result<TaskResponse, String> {
+    let pool = db.get_pool()?;
     // Get current task
     let current_task = sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks WHERE id = $1 AND user_id = $2"
     )
     .bind(task_id)
     .bind(&user_id)
-    .fetch_optional(db.0.as_ref())
+    .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to fetch task: {}", e))?
     .ok_or_else(|| "Task not found".to_string())?;
@@ -182,7 +187,7 @@ pub async fn toggle_task_completion(
     .bind(new_completed_at)
     .bind(task_id)
     .bind(&user_id)
-    .fetch_one(db.0.as_ref())
+    .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to toggle task completion: {}", e))?;
     
@@ -208,6 +213,7 @@ pub async fn update_task_positions(
     user_id: String,
     updates: Vec<TaskPositionUpdate>,
 ) -> Result<MessageResponse, String> {
+    let pool = db.get_pool()?;
     for update in updates {
         sqlx::query(
             "UPDATE tasks 
@@ -218,7 +224,7 @@ pub async fn update_task_positions(
         .bind(&update.status)
         .bind(update.id)
         .bind(&user_id)
-        .execute(db.0.as_ref())
+        .execute(pool)
         .await
         .map_err(|e| format!("Failed to update task position: {}", e))?;
     }
@@ -234,13 +240,14 @@ pub async fn clear_column_tasks(
     user_id: String,
     status: String,
 ) -> Result<MessageResponse, String> {
+    let pool = db.get_pool()?;
     sqlx::query(
         "UPDATE tasks SET is_deleted = true 
          WHERE user_id = $1 AND status = $2"
     )
     .bind(&user_id)
     .bind(&status)
-    .execute(db.0.as_ref())
+    .execute(pool)
     .await
     .map_err(|e| format!("Failed to clear tasks: {}", e))?;
     

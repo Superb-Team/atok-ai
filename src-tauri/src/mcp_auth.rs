@@ -10,6 +10,7 @@ pub async fn get_mcp_connections(
     db: State<'_, Database>,
     user_id: String,
 ) -> Result<Vec<McpAuthConnection>, String> {
+    let pool = db.get_pool()?;
     let query = "
         SELECT id, user_id, provider, provider_user_id, provider_username, 
                access_token, refresh_token, token_expires_at, provider_data,
@@ -21,7 +22,7 @@ pub async fn get_mcp_connections(
 
     let rows = sqlx::query(query)
         .bind(&user_id)
-        .fetch_all(db.0.as_ref())
+        .fetch_all(pool)
         .await
         .map_err(|e| format!("Failed to fetch MCP connections: {}", e))?;
 
@@ -51,6 +52,7 @@ pub async fn get_mcp_connection(
     user_id: String,
     provider: String,
 ) -> Result<Option<McpAuthConnection>, String> {
+    let pool = db.get_pool()?;
     let query = "
         SELECT id, user_id, provider, provider_user_id, provider_username, 
                access_token, refresh_token, token_expires_at, provider_data,
@@ -62,7 +64,7 @@ pub async fn get_mcp_connection(
     let row = sqlx::query(query)
         .bind(&user_id)
         .bind(&provider)
-        .fetch_optional(db.0.as_ref())
+        .fetch_optional(pool)
         .await
         .map_err(|e| format!("Failed to fetch MCP connection: {}", e))?;
 
@@ -87,6 +89,7 @@ pub async fn create_mcp_connection(
     user_id: String,
     request: CreateMcpAuthRequest,
 ) -> Result<McpAuthConnection, String> {
+    let pool = db.get_pool()?;
     // Check if connection already exists
     let existing = get_mcp_connection(db.clone(), user_id.clone(), request.provider.clone()).await?;
     
@@ -118,9 +121,9 @@ pub async fn create_mcp_connection(
         .bind(&request.provider_username)
         .bind(&request.access_token)
         .bind(&request.refresh_token)
-        .bind(&request.token_expires_at)
+        .bind(request.token_expires_at)
         .bind(&provider_data)
-        .fetch_one(db.0.as_ref())
+        .fetch_one(pool)
         .await
         .map_err(|e| format!("Failed to create MCP connection: {}", e))?;
 
@@ -146,6 +149,7 @@ pub async fn update_mcp_connection(
     provider: String,
     request: UpdateMcpAuthRequest,
 ) -> Result<McpAuthConnection, String> {
+    let pool = db.get_pool()?;
     let query = "
         UPDATE mcp_auth
         SET access_token = COALESCE($1, access_token),
@@ -161,11 +165,11 @@ pub async fn update_mcp_connection(
     let row = sqlx::query(query)
         .bind(&request.access_token)
         .bind(&request.refresh_token)
-        .bind(&request.token_expires_at)
+        .bind(request.token_expires_at)
         .bind(&request.provider_data)
         .bind(&user_id)
         .bind(&provider)
-        .fetch_optional(db.0.as_ref())
+        .fetch_optional(pool)
         .await
         .map_err(|e| format!("Failed to update MCP connection: {}", e))?;
 
@@ -191,6 +195,7 @@ pub async fn delete_mcp_connection(
     user_id: String,
     provider: String,
 ) -> Result<String, String> {
+    let pool = db.get_pool()?;
     let query = "
         DELETE FROM mcp_auth
         WHERE user_id = $1 AND provider = $2
@@ -200,7 +205,7 @@ pub async fn delete_mcp_connection(
     let row = sqlx::query(query)
         .bind(&user_id)
         .bind(&provider)
-        .fetch_optional(db.0.as_ref())
+        .fetch_optional(pool)
         .await
         .map_err(|e| format!("Failed to delete MCP connection: {}", e))?;
 
@@ -217,10 +222,8 @@ pub async fn test_mcp_connection(
     provider: String,
     access_token: String,
 ) -> Result<bool, String> {
-    // Test connection based on provider
     match provider.as_str() {
         "github" => {
-            // Test GitHub API
             let client = reqwest::Client::new();
             let response = client
                 .get("https://api.github.com/user")

@@ -1,9 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Component } from "react";
 import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
 import { ArrowLeft, Star, Trash2, Edit, Calendar, Tag, Palette } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { MarkdownRenderer } from "@/components/MarkdownRenderer";
+
+class ErrorBoundary extends Component<{ fallback: React.ReactNode; children: React.ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() {
+    if (this.state.hasError) return this.props.fallback;
+    return this.props.children;
+  }
+}
 
 interface NoteViewPageProps {
   noteId: number;
@@ -205,11 +215,15 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
           )}
 
           {/* Content */}
-          <div className="prose prose-neutral dark:prose-invert max-w-none">
+          <div className="mt-2">
             {note.content ? (
-              <div className="text-neutral-700 dark:text-neutral-300 text-lg leading-relaxed whitespace-pre-wrap">
-                {note.content}
-              </div>
+              <ErrorBoundary fallback={
+                <pre className="text-neutral-700 dark:text-neutral-300 whitespace-pre-wrap leading-relaxed">
+                  {note.content}
+                </pre>
+              }>
+                <MarkdownRenderer content={note.content} />
+              </ErrorBoundary>
             ) : (
               <p className="text-neutral-500 dark:text-neutral-400 italic">
                 No content

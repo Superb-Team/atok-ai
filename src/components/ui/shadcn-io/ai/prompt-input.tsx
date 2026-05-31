@@ -1,13 +1,6 @@
 'use client';
 
 import { Button } from '@/components/ui/button';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import type { ChatStatus } from 'ai';
@@ -47,11 +40,9 @@ export const PromptInputTextarea = ({
   const handleKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
     if (e.key === 'Enter') {
       if (e.shiftKey) {
-        // Allow newline
         return;
       }
 
-      // Submit on Enter (without Shift)
       e.preventDefault();
       const form = e.currentTarget.form;
       if (form) {
@@ -168,61 +159,3 @@ export const PromptInputSubmit = ({
     </Button>
   );
 };
-
-export type PromptInputModelSelectProps = ComponentProps<typeof Select>;
-
-export const PromptInputModelSelect = (props: PromptInputModelSelectProps) => (
-  <Select {...props} />
-);
-
-export type PromptInputModelSelectTriggerProps = ComponentProps<
-  typeof SelectTrigger
->;
-
-export const PromptInputModelSelectTrigger = ({
-  className,
-  ...props
-}: PromptInputModelSelectTriggerProps) => (
-  <SelectTrigger
-    className={cn(
-      'border-none bg-transparent font-medium text-muted-foreground shadow-none transition-colors',
-      'hover:bg-transparent hover:text-foreground [&[aria-expanded="true"]]:bg-transparent [&[aria-expanded="true"]]:text-foreground',
-      'dark:bg-transparent dark:hover:bg-transparent',
-      'outline-none ring-0 focus-visible:ring-0 focus-visible:border-none focus-visible:outline-none',
-      'focus:ring-0 focus:border-none focus:outline-none',
-      className
-    )}
-    {...props}
-  />
-);
-
-export type PromptInputModelSelectContentProps = ComponentProps<
-  typeof SelectContent
->;
-
-export const PromptInputModelSelectContent = ({
-  className,
-  ...props
-}: PromptInputModelSelectContentProps) => (
-  <SelectContent className={cn(className)} {...props} />
-);
-
-export type PromptInputModelSelectItemProps = ComponentProps<typeof SelectItem>;
-
-export const PromptInputModelSelectItem = ({
-  className,
-  ...props
-}: PromptInputModelSelectItemProps) => (
-  <SelectItem className={cn(className)} {...props} />
-);
-
-export type PromptInputModelSelectValueProps = ComponentProps<
-  typeof SelectValue
->;
-
-export const PromptInputModelSelectValue = ({
-  className,
-  ...props
-}: PromptInputModelSelectValueProps) => (
-  <SelectValue className={cn(className)} {...props} />
-);

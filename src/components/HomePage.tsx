@@ -177,63 +177,12 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     console.log('📝 Note title:', noteTitle);
 
     try {
-      // Step 1: Read audio file
-      console.log('📖 Step 1: Reading audio file...');
-      const { invoke } = await import('@tauri-apps/api/core');
-      const base64Data = await invoke<string>('read_audio_file', { path: audioPath });
-      console.log('✅ Audio file read, size:', base64Data.length);
+      const { processAudioRecording: processAudio } = await import('@/services/audio-processor.service');
+      const result = await processAudio(audioPath, noteTitle);
 
-      // Convert base64 to blob
-      const binaryString = atob(base64Data);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+      if (!result.success) {
+        throw new Error(result.error || 'Processing failed');
       }
-      const audioBlob = new Blob([bytes], { type: 'audio/mpeg' });
-      const audioFile = new File([audioBlob], 'recording.mp3', { type: 'audio/mpeg' });
-      console.log('✅ Audio file created:', audioFile.size, 'bytes');
-
-      if (audioFile.size === 0) {
-        throw new Error('Audio file is empty (0 bytes)');
-      }
-
-      // Step 2: Transcribe and enhance
-      console.log('🤖 Step 2: Transcribing and enhancing...');
-      const { agentService } = await import('@/services/agent.service');
-      const enhancedText = await agentService.transcribeAndEnhance(audioFile, 'voice recording');
-      console.log('✅ Transcription completed, length:', enhancedText.length);
-
-      // Step 3: Get user info
-      console.log('👤 Step 3: Getting user info...');
-      const user = authService.getUser();
-      if (!user) {
-        throw new Error('User not authenticated');
-      }
-      console.log('✅ User:', user.id);
-
-      // Step 4: Save to notes
-      console.log('📝 Step 4: Saving to notes...');
-      const newNote = {
-        title: noteTitle,
-        content: enhancedText,
-        tags: ['voice-recording', 'transcription'],
-        color: '#E0F2FE',
-        is_favorite: false,
-      };
-      await noteService.createNote(user.id, newNote);
-      console.log('✅ Note created successfully in database');
-
-      // Step 5: Insert to OpenSearch RAG
-      console.log('🔍 Step 5: Inserting to RAG...');
-      const now = new Date();
-      const currentDate = now.toISOString().split('T')[0];
-      await agentService.insertDocument(user.id, enhancedText, {
-        type: 'voice_recording',
-        date: currentDate,
-        timestamp: now.toISOString(),
-        source: 'audio_transcription',
-      });
-      console.log('✅ Document inserted to RAG');
 
       // Success - update UI
       console.log('🎉 Workflow completed successfully!');
@@ -272,8 +221,6 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     }
   };
 
-  const filteredNotes = notes;
-
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center bg-gray-50 dark:bg-neutral-900">
@@ -302,7 +249,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
             </div>
           )}
           
-          {filteredNotes.length === 0 && processingNotes.size === 0 ? (
+          {notes.length === 0 && processingNotes.size === 0 ? (
             <div className="text-center py-20">
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800 mb-4">
                 <FileText className="w-8 h-8 text-neutral-400 dark:text-neutral-500" />
@@ -322,7 +269,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
               ))}
               
               {/* Actual notes */}
-              {filteredNotes.map((note) => (
+              {notes.map((note) => (
                 <NoteCard
                   key={note.id}
                   note={note}

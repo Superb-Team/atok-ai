@@ -22,9 +22,7 @@
 
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"],
-      "@repo/shadcn-ui/components/ui/*": ["./src/components/ui/*"],
-      "@repo/shadcn-ui/lib/*": ["./src/lib/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"],

@@ -5,7 +5,7 @@ import NoteViewPage from "@/components/NoteViewPage";
 import SettingsPage from "@/components/SettingsPage";
 import CreateNoteDialog from "@/components/CreateNoteDialog";
 import LoginPage from "@/components/auth/LoginPage";
-import SignupPage from "@/components/auth/SignupPage";
+import SignUpPage from "@/components/auth/SignUpPage";
 import FloatingActionMenu from "@/components/ui/floating-action-menu";
 import { Sidebar, SidebarBody, SidebarLink } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
@@ -153,7 +153,7 @@ function App() {
   if (!isAuthenticated) {
     if (authView === "signup") {
       return (
-        <SignupPage
+        <SignUpPage
           onSignupSuccess={handleLoginSuccess}
           onSwitchToLogin={() => setAuthView("login")}
         />

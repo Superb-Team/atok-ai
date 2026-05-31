@@ -1,6 +1,5 @@
 use crate::database::Database;
 use crate::models::*;
-use chrono::Utc;
 use tauri::State;
 
 #[tauri::command]
@@ -8,13 +7,14 @@ pub async fn get_notes(
     db: State<'_, Database>,
     user_id: String,
 ) -> Result<Vec<NoteResponse>, String> {
+    let pool = db.get_pool()?;
     let notes = sqlx::query_as::<_, Note>(
         "SELECT * FROM notes 
          WHERE user_id = $1 AND is_deleted = false 
          ORDER BY created_at DESC"
     )
     .bind(&user_id)
-    .fetch_all(db.0.as_ref())
+    .fetch_all(pool)
     .await
     .map_err(|e| format!("Failed to fetch notes: {}", e))?;
     
@@ -38,12 +38,13 @@ pub async fn get_note(
     note_id: i32,
     user_id: String,
 ) -> Result<NoteResponse, String> {
+    let pool = db.get_pool()?;
     let note = sqlx::query_as::<_, Note>(
         "SELECT * FROM notes WHERE id = $1 AND user_id = $2 AND is_deleted = false"
     )
     .bind(note_id)
     .bind(&user_id)
-    .fetch_optional(db.0.as_ref())
+    .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to fetch note: {}", e))?
     .ok_or_else(|| "Note not found".to_string())?;
@@ -68,6 +69,7 @@ pub async fn create_note(
     user_id: String,
     request: CreateNoteRequest,
 ) -> Result<NoteResponse, String> {
+    let pool = db.get_pool()?;
     let note = sqlx::query_as::<_, Note>(
         "INSERT INTO notes (user_id, title, content, tags, color) 
          VALUES ($1, $2, $3, $4, $5) 
@@ -78,7 +80,7 @@ pub async fn create_note(
     .bind(&request.content)
     .bind(&request.tags)
     .bind(&request.color)
-    .fetch_one(db.0.as_ref())
+    .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to create note: {}", e))?;
     
@@ -102,40 +104,7 @@ pub async fn update_note(
     user_id: String,
     request: UpdateNoteRequest,
 ) -> Result<NoteResponse, String> {
-    // Build dynamic update query
-    let mut query = String::from("UPDATE notes SET updated_at = CURRENT_TIMESTAMP");
-    let mut params: Vec<String> = vec![];
-    let mut param_count = 1;
-    
-    if let Some(title) = &request.title {
-        query.push_str(&format!(", title = ${}", param_count));
-        params.push(title.clone());
-        param_count += 1;
-    }
-    
-    if let Some(content) = &request.content {
-        query.push_str(&format!(", content = ${}", param_count));
-        params.push(content.clone());
-        param_count += 1;
-    }
-    
-    if let Some(is_favorite) = request.is_favorite {
-        query.push_str(&format!(", is_favorite = {}", is_favorite));
-    }
-    
-    if let Some(is_archived) = request.is_archived {
-        query.push_str(&format!(", is_archived = {}", is_archived));
-    }
-    
-    if let Some(color) = &request.color {
-        query.push_str(&format!(", color = ${}", param_count));
-        params.push(color.clone());
-        param_count += 1;
-    }
-    
-    query.push_str(&format!(" WHERE id = {} AND user_id = '{}' RETURNING *", request.id, user_id));
-    
-    // For simplicity, use a direct query with all fields
+    let pool = db.get_pool()?;
     let note = sqlx::query_as::<_, Note>(
         "UPDATE notes 
          SET title = COALESCE($1, title),
@@ -143,8 +112,9 @@ pub async fn update_note(
              is_favorite = COALESCE($3, is_favorite),
              is_archived = COALESCE($4, is_archived),
              color = COALESCE($5, color),
+             tags = COALESCE($6, tags),
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = $6 AND user_id = $7
+         WHERE id = $7 AND user_id = $8
          RETURNING *"
     )
     .bind(&request.title)
@@ -152,9 +122,10 @@ pub async fn update_note(
     .bind(request.is_favorite)
     .bind(request.is_archived)
     .bind(&request.color)
+    .bind(&request.tags)
     .bind(request.id)
     .bind(&user_id)
-    .fetch_optional(db.0.as_ref())
+    .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to update note: {}", e))?
     .ok_or_else(|| "Note not found".to_string())?;
@@ -179,13 +150,14 @@ pub async fn delete_note(
     note_id: i32,
     user_id: String,
 ) -> Result<MessageResponse, String> {
+    let pool = db.get_pool()?;
     let result = sqlx::query(
         "UPDATE notes SET is_deleted = true, deleted_at = CURRENT_TIMESTAMP 
          WHERE id = $1 AND user_id = $2"
     )
     .bind(note_id)
     .bind(&user_id)
-    .execute(db.0.as_ref())
+    .execute(pool)
     .await
     .map_err(|e| format!("Failed to delete note: {}", e))?;
     
@@ -204,6 +176,7 @@ pub async fn toggle_favorite(
     note_id: i32,
     user_id: String,
 ) -> Result<NoteResponse, String> {
+    let pool = db.get_pool()?;
     let note = sqlx::query_as::<_, Note>(
         "UPDATE notes SET is_favorite = NOT is_favorite, updated_at = CURRENT_TIMESTAMP 
          WHERE id = $1 AND user_id = $2 
@@ -211,7 +184,7 @@ pub async fn toggle_favorite(
     )
     .bind(note_id)
     .bind(&user_id)
-    .fetch_optional(db.0.as_ref())
+    .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to toggle favorite: {}", e))?
     .ok_or_else(|| "Note not found".to_string())?;

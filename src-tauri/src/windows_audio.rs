@@ -23,10 +23,10 @@ impl DesktopAudioRecorder {
     }
 
     #[cfg(windows)]
-    pub fn start_recording(&self, output_path: PathBuf) -> Result<()> {
-        let mut recording = self.is_recording.lock().unwrap();
+    pub fn start_recording(&self, output_path: PathBuf) -> Result<(), String> {
+        let mut recording = self.is_recording.lock().map_err(|e| e.to_string())?;
         if *recording {
-            return Err(Error::from_hresult(HRESULT(0x80070057_u32 as i32)));
+            return Err("Already recording".to_string());
         }
         *recording = true;
         drop(recording);
@@ -34,11 +34,11 @@ impl DesktopAudioRecorder {
         let is_recording = Arc::clone(&self.is_recording);
         let thread_handle = std::thread::spawn(move || {
             if let Err(e) = Self::recording_thread_fn(output_path, is_recording) {
-                eprintln!("❌ Recording error: {}", e);
+                eprintln!("Recording error: {}", e);
             }
         });
 
-        *self.recording_thread.lock().unwrap() = Some(thread_handle);
+        *self.recording_thread.lock().map_err(|e| e.to_string())? = Some(thread_handle);
         Ok(())
     }
 
@@ -385,18 +385,18 @@ impl DesktopAudioRecorder {
     }
 
     #[cfg(not(windows))]
-    pub fn start_recording(&self, _output_path: PathBuf) -> Result<()> {
-        Err(Error::from_hresult(HRESULT(0x80004001)))
+    pub fn start_recording(&self, _output_path: PathBuf) -> Result<(), String> {
+        Err("Recording only supported on Windows".to_string())
     }
 
-    pub fn stop_recording(&self) -> Result<()> {
-        println!("🛑 Stopping recording...");
-        
+    pub fn stop_recording(&self) -> Result<(), String> {
+        println!("Stopping recording...");
+
         // Set flag to stop recording
         {
-            let mut recording = self.is_recording.lock().unwrap();
+            let mut recording = self.is_recording.lock().map_err(|e| e.to_string())?;
             if !*recording {
-                println!("⚠️ Recording already stopped");
+                println!("Recording already stopped");
                 return Ok(());
             }
             *recording = false;
@@ -406,27 +406,27 @@ impl DesktopAudioRecorder {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Try to join thread with timeout
-        let mut thread_lock = self.recording_thread.lock().unwrap();
+        let mut thread_lock = self.recording_thread.lock().map_err(|e| e.to_string())?;
         if let Some(handle) = thread_lock.take() {
             // Spawn a timeout thread to avoid blocking forever
             let join_handle = std::thread::spawn(move || {
                 handle.join()
             });
-            
+
             // Wait max 2 seconds for thread to finish
             for _ in 0..20 {
                 if join_handle.is_finished() {
                     let _ = join_handle.join();
-                    println!("✅ Recording stopped gracefully");
+                    println!("Recording stopped gracefully");
                     return Ok(());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            
-            println!("⚠️ Recording thread took too long, continuing anyway");
+
+            println!("Recording thread took too long, continuing anyway");
         }
 
-        println!("✅ Recording stopped");
+        println!("Recording stopped");
         Ok(())
     }
 

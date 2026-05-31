@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Note, CreateNoteRequest, UpdateNoteRequest } from "@/types/note.types";
+import type { Note, CreateNoteRequest } from "@/types/note.types";
 
 export const noteService = {
   async getNotes(userId: string): Promise<Note[]> {
@@ -12,10 +12,6 @@ export const noteService = {
 
   async createNote(userId: string, request: CreateNoteRequest): Promise<Note> {
     return await invoke<Note>("create_note", { userId, request });
-  },
-
-  async updateNote(userId: string, request: UpdateNoteRequest): Promise<Note> {
-    return await invoke<Note>("update_note", { userId, request });
   },
 
   async deleteNote(noteId: number, userId: string): Promise<{ message: string }> {

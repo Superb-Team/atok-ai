@@ -90,10 +90,12 @@ export default function AIChatInterface() {
       }));
 
       // Stream the response from agent
+      let hasReceivedContent = false;
       for await (const event of agentService.streamAgent({
         prompt: userMessage.content,
         user_id: user.id,
         conversation_history: conversationHistory.slice(0, -1), // Exclude current message
+        system_prompt: 'You are Atok AI, an intelligent assistant integrated into the Atok.ai workspace. You help users manage their notes, tasks, and answer questions based on their stored knowledge. Be helpful, concise, and accurate. When referencing notes or tasks, provide specific details.',
       })) {
         // Check if aborted
         if (abortControllerRef.current?.signal.aborted) {
@@ -102,10 +104,9 @@ export default function AIChatInterface() {
 
         // Handle different event types
         if (event.type === 'tool') {
-          // Tool is being used
           setIsUsingTool(true);
         } else if (event.type === 'content') {
-          // Content chunk received
+          hasReceivedContent = true;
           setIsUsingTool(false);
           accumulatedContent += event.content || '';
 
@@ -135,6 +136,16 @@ export default function AIChatInterface() {
 
       setIsUsingTool(false);
 
+      // If no content was received, add a fallback message
+      if (!hasReceivedContent && accumulatedContent === '') {
+        setMessages((prev) => [...prev, {
+          id: aiMessageId,
+          role: "assistant",
+          content: "I processed your request but didn't generate a response. Please try rephrasing your question.",
+          timestamp: new Date(),
+        }]);
+      }
+
       setStatus("ready");
     } catch (error) {
       console.error("Error sending message:", error);
@@ -157,14 +168,6 @@ export default function AIChatInterface() {
       }, 3000);
     } finally {
       abortControllerRef.current = null;
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Handle Shift+Enter for new line, Enter for submit
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSubmit(e);
     }
   };
 
@@ -195,7 +198,6 @@ export default function AIChatInterface() {
                     <PromptInputTextarea
                       value={input}
                       onChange={(e) => setInput(e.currentTarget.value)}
-                      onKeyDown={handleKeyDown}
                       placeholder="What would you like to know about your notes?"
                       minHeight={56}
                       maxHeight={200}
@@ -298,7 +300,6 @@ export default function AIChatInterface() {
                 <PromptInputTextarea
                   value={input}
                   onChange={(e) => setInput(e.currentTarget.value)}
-                  onKeyDown={handleKeyDown}
                   placeholder="Type your message..."
                   minHeight={48}
                   maxHeight={200}

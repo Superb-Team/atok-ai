@@ -1,80 +1,48 @@
 import { invoke } from '@tauri-apps/api/core';
-import { downloadDir } from '@tauri-apps/api/path';
+import { appDataDir, join } from '@tauri-apps/api/path';
 
 export class RecordingService {
   private static currentRecordingPath: string | null = null;
 
   /**
-   * Start recording microphone + desktop audio
-   * @returns Path to the output file
+   * Get the recordings directory (cross-platform)
+   */
+  private static async getRecordingsDir(): Promise<string> {
+    const appDir = await appDataDir();
+    const recordingsDir = await join(appDir, 'recordings');
+    return recordingsDir;
+  }
+
+  /**
+   * Start recording microphone audio
    */
   static async startRecording(): Promise<string> {
-    try {
-      // Get Downloads folder path
-      const downloads = await downloadDir();
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const outputPath = `${downloads}mixed-audio-${timestamp}.mp3`;
-      
-      console.log('🎙️ Starting MIC + DESKTOP recording to:', outputPath);
-      
-      // Call Tauri command to start recording
-      await invoke('start_desktop_recording', { outputPath });
-      
-      this.currentRecordingPath = outputPath;
-      console.log('✅ MIC + DESKTOP recording started successfully');
-      
-      return outputPath;
-    } catch (error) {
-      console.error('❌ Failed to start recording:', error);
-      throw new Error(`Failed to start recording: ${error}`);
-    }
+    const recordingsDir = await this.getRecordingsDir();
+    await invoke('ensure_recordings_dir', { path: recordingsDir });
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const outputPath = await join(recordingsDir, `recording-${timestamp}.mp3`);
+
+    await invoke('start_desktop_recording', { outputPath });
+    this.currentRecordingPath = outputPath;
+
+    return outputPath;
   }
 
   /**
    * Stop the current recording
-   * @returns Path to the saved recording file
    */
   static async stopRecording(): Promise<string> {
-    try {
-      console.log('🛑 Stopping recording...');
-      
-      // Call Tauri command to stop recording
-      await invoke('stop_desktop_recording');
-      
-      const savedPath = this.currentRecordingPath;
-      this.currentRecordingPath = null;
-      
-      console.log('✅ Recording stopped successfully');
-      
-      if (!savedPath) {
-        throw new Error('No recording path found');
-      }
-      
-      return savedPath;
-    } catch (error) {
-      console.error('❌ Failed to stop recording:', error);
-      throw new Error(`Failed to stop recording: ${error}`);
-    }
-  }
+    await invoke('stop_desktop_recording');
 
-  /**
-   * Check if currently recording
-   */
-  static async isRecording(): Promise<boolean> {
-    try {
-      const recording = await invoke<boolean>('is_recording');
-      return recording;
-    } catch (error) {
-      console.error('❌ Failed to check recording status:', error);
-      return false;
-    }
-  }
+    const savedPath = this.currentRecordingPath;
+    this.currentRecordingPath = null;
 
-  /**
-   * Get the current recording file path
-   */
-  static getCurrentRecordingPath(): string | null {
-    return this.currentRecordingPath;
+    if (!savedPath) {
+      throw new Error('No recording path found');
+    }
+
+    return savedPath;
   }
 }
 
