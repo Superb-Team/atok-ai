@@ -1,9 +1,9 @@
 // MCP Authentication Management
 use crate::database::Database;
-use crate::models::{McpAuthConnection, CreateMcpAuthRequest, UpdateMcpAuthRequest};
-use tauri::State;
+use crate::models::{CreateMcpAuthRequest, McpAuthConnection, UpdateMcpAuthRequest};
 use serde_json::json;
 use sqlx::Row;
+use tauri::State;
 
 #[tauri::command]
 pub async fn get_mcp_connections(
@@ -91,10 +91,14 @@ pub async fn create_mcp_connection(
 ) -> Result<McpAuthConnection, String> {
     let pool = db.get_pool()?;
     // Check if connection already exists
-    let existing = get_mcp_connection(db.clone(), user_id.clone(), request.provider.clone()).await?;
-    
+    let existing =
+        get_mcp_connection(db.clone(), user_id.clone(), request.provider.clone()).await?;
+
     if existing.is_some() {
-        return Err(format!("Connection for {} already exists", request.provider));
+        return Err(format!(
+            "Connection for {} already exists",
+            request.provider
+        ));
     }
 
     let query = "
@@ -210,9 +214,15 @@ pub async fn delete_mcp_connection(
         .map_err(|e| format!("Failed to delete MCP connection: {}", e))?;
 
     if row.is_some() {
-        Ok(format!("MCP connection for {} deleted successfully", provider))
+        Ok(format!(
+            "MCP connection for {} deleted successfully",
+            provider
+        ))
     } else {
-        Err(format!("MCP connection not found for provider: {}", provider))
+        Err(format!(
+            "MCP connection not found for provider: {}",
+            provider
+        ))
     }
 }
 

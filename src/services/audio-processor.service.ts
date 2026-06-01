@@ -11,32 +11,27 @@ export interface AudioProcessingResult {
 
 /**
  * Audio processing workflow:
- * 1. Transcribe audio via DeepInfra Whisper (backend)
+ * 1. Transcribe audio via Groq Whisper (backend)
  * 2. Enhance transcript via DeepInfra chat (backend)
  * 3. Save as note
+ * 4. Insert into RAG (optional)
  */
 export async function processAudioRecording(
   audioPath: string,
   noteTitle: string
 ): Promise<AudioProcessingResult> {
-  console.log('Starting audio processing...');
-
   try {
     // Step 1: Transcribe via Whisper
-    console.log('Step 1: Transcribing via Whisper...');
     let transcript: string;
     try {
       transcript = await invoke<string>('transcribe_audio', { audioPath });
-      console.log('Transcription completed:', transcript.length, 'chars');
     } catch (transcribeError) {
-      console.warn('Transcription failed:', transcribeError);
       const user = authService.getUser();
       await saveNote(noteTitle, `[Voice recording - transcription failed]\n\nAudio: ${audioPath}\nError: ${transcribeError}`, ['voice-recording'], user?.id);
       return { noteTitle, enhancedText: '', success: false, error: String(transcribeError) };
     }
 
     // Step 2: Enhance transcript via AI chat
-    console.log('Step 2: Enhancing transcript...');
     let enhancedText: string;
     try {
       enhancedText = await invoke<string>('ai_chat', {
@@ -67,22 +62,16 @@ FORMAT:
 
 If the transcript is mostly noise or unintelligible, say so briefly and extract only the clear parts.`,
           },
-          {
-            role: 'user',
-            content: transcript,
-          },
+          { role: 'user', content: transcript },
         ],
         temperature: 0.2,
         maxTokens: 4096,
       });
-      console.log('Enhancement completed:', enhancedText.length, 'chars');
-    } catch (enhanceError) {
-      console.warn('Enhancement failed, using raw transcript:', enhanceError);
+    } catch {
       enhancedText = transcript;
     }
 
     // Step 3: Save note
-    console.log('Step 3: Saving note...');
     const user = authService.getUser();
     if (!user) throw new Error('User not authenticated');
 
@@ -99,16 +88,12 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
           source: 'whisper_transcription',
         },
       });
-      console.log('Inserted to RAG');
-    } catch (ragError) {
-      console.warn('RAG insert failed (non-fatal):', ragError);
+    } catch {
+      // RAG insertion is optional — don't fail the workflow
     }
 
-    console.log('Audio processing completed!');
     return { noteTitle, enhancedText, success: true };
-
   } catch (error) {
-    console.error('Failed to process recording:', error);
     return { noteTitle, enhancedText: '', success: false, error: String(error) };
   }
 }

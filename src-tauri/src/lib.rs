@@ -1,19 +1,21 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
-use tauri::{Manager, Emitter};
 use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager};
 
+mod agent;
+mod audio_dsp;
 mod auth;
 mod database;
+mod mcp_auth;
 mod models;
 mod notes;
 mod tasks;
-mod mcp_auth;
-mod agent;
 
-// Platform-specific audio recording
-// Windows: mic + desktop audio via WASAPI
-// Linux/macOS: mic input via cpal (ALSA/PulseAudio/PipeWire/CoreAudio)
+// Platform-specific audio recording — captures system audio + mic (like Google Meet/Zoom/Discord)
+// Windows: WASAPI loopback + mic (windows_audio.rs)
+// Linux:   PulseAudio native API (audio_recorder.rs)
+// macOS:   ScreenCaptureKit native API (audio_recorder.rs)
 #[cfg(windows)]
 mod windows_audio;
 
@@ -33,25 +35,28 @@ lazy_static::lazy_static! {
 
 #[tauri::command]
 async fn start_desktop_recording(output_path: String) -> Result<String, String> {
-    println!("Received desktop recording request");
-    println!("Output path: {}", output_path);
-
     let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
-    recorder.start_recording(std::path::PathBuf::from(output_path))
+    recorder
+        .start_recording(std::path::PathBuf::from(output_path))
         .map_err(|e| format!("Failed to start recording: {}", e))?;
-
     Ok("Desktop recording started".to_string())
 }
 
 #[tauri::command]
 async fn stop_desktop_recording() -> Result<String, String> {
-    println!("Received stop desktop recording request");
-
-    let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
-    recorder.stop_recording()
-        .map_err(|e| format!("Failed to stop recording: {}", e))?;
-
-    Ok("Recording stopped successfully".to_string())
+    // Do the blocking work on a dedicated thread to avoid blocking the async runtime
+    let result = tokio::task::spawn_blocking(move || {
+        let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
+        recorder
+            .stop_recording()
+            .map_err(|e| format!("Failed to stop recording: {}", e))
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Ok("Recording stopped successfully".to_string()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("Task join error: {}", e)),
+    }
 }
 
 #[tauri::command]
@@ -62,64 +67,57 @@ async fn is_recording() -> Result<bool, String> {
 
 #[tauri::command]
 async fn read_audio_file(path: String) -> Result<String, String> {
+    use base64::{engine::general_purpose, Engine as _};
     use std::fs;
-    use base64::{Engine as _, engine::general_purpose};
 
-    println!("Reading audio file: {}", path);
+    let bytes =
+        fs::read(&path).map_err(|e| format!("Failed to read audio file '{}': {}", path, e))?;
 
-    let bytes = fs::read(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-
-    println!("File read: {} bytes", bytes.len());
-
-    let base64_data = general_purpose::STANDARD.encode(&bytes);
-    Ok(base64_data)
+    Ok(general_purpose::STANDARD.encode(&bytes))
 }
 
 #[tauri::command]
 async fn write_temp_audio(path: String, data: String) -> Result<(), String> {
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
 
     let bytes = general_purpose::STANDARD
         .decode(&data)
-        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+        .map_err(|e| format!("Failed to decode base64 audio data: {}", e))?;
 
-    // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(&path).parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
+                .map_err(|e| format!("Failed to create directory '{}': {}", parent.display(), e))?;
         }
     }
 
     std::fs::write(&path, &bytes)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+        .map_err(|e| format!("Failed to write audio file '{}': {}", path, e))?;
 
-    println!("Temp audio written: {} bytes to {}", bytes.len(), path);
     Ok(())
 }
 
 #[tauri::command]
 async fn notify_recording_started(app: tauri::AppHandle, note_title: String) -> Result<(), String> {
-    println!("Emitting recording-started event to all windows: {}", note_title);
-
-    app.emit("recording-started", serde_json::json!({
-        "noteTitle": note_title
-    })).map_err(|e| format!("Failed to emit event: {}", e))?;
-
-    println!("Event emitted successfully");
+    app.emit(
+        "recording-started",
+        serde_json::json!({
+            "noteTitle": note_title
+        }),
+    )
+    .map_err(|e| format!("Failed to emit recording-started event: {}", e))?;
     Ok(())
 }
 
 #[tauri::command]
 async fn notify_note_created(app: tauri::AppHandle, note_title: String) -> Result<(), String> {
-    println!("Emitting note-created event to all windows: {}", note_title);
-
-    app.emit("note-created", serde_json::json!({
-        "noteTitle": note_title
-    })).map_err(|e| format!("Failed to emit event: {}", e))?;
-
-    println!("Event emitted successfully");
+    app.emit(
+        "note-created",
+        serde_json::json!({
+            "noteTitle": note_title
+        }),
+    )
+    .map_err(|e| format!("Failed to emit note-created event: {}", e))?;
     Ok(())
 }
 
@@ -208,7 +206,7 @@ mod tests {
         let result = read_audio_file("/nonexistent/path/audio.mp3".to_string()).await;
         assert!(result.is_err(), "should error on nonexistent file");
         let err = result.unwrap_err();
-        assert!(err.contains("Failed to read file"), "error message should mention file read failure");
+        assert!(err.contains("Failed to read audio file"), "error: {}", err);
     }
 
     #[tokio::test]

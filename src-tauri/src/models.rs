@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 // ==================== User Models ====================
@@ -62,13 +62,13 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Fields deserialized but not read — commands are stubs
 pub struct ForgotPasswordRequest {
     pub email: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Fields deserialized but not read — commands are stubs
 pub struct ResetPasswordRequest {
     pub token: String,
     pub new_password: String,
@@ -93,25 +93,25 @@ pub struct MessageResponse {
 pub enum AuthError {
     #[error("Database error: {0}")]
     Database(String),
-    
+
     #[error("User not found")]
     UserNotFound,
-    
+
     #[error("Invalid credentials")]
     InvalidCredentials,
-    
+
     #[error("User already exists")]
     UserAlreadyExists,
-    
+
     #[error("Invalid token")]
     InvalidToken,
-    
+
     #[error("Token expired")]
     TokenExpired,
-    
+
     #[error("Hashing error: {0}")]
     HashError(String),
-    
+
     #[error("JWT error: {0}")]
     JwtError(String),
 }
@@ -325,7 +325,10 @@ mod tests {
             is_active: true,
         };
         let json = serde_json::to_string(&response).unwrap();
-        assert!(!json.contains("password"), "serialized UserResponse should not contain password");
+        assert!(
+            !json.contains("password"),
+            "serialized UserResponse should not contain password"
+        );
         assert!(json.contains("user_xyz"));
         assert!(json.contains("xyz@test.com"));
     }

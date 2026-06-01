@@ -10,6 +10,7 @@ import FloatingActionMenu from "@/components/ui/floating-action-menu";
 import { Sidebar, SidebarBody, SidebarLink } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
 import AIChatInterface from "@/searchAI/page";
+import { agentService } from "@/services/agent.service";
 import { authService } from "@/services/auth.service";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { motion } from "framer-motion";
@@ -50,14 +51,11 @@ function App() {
         // Ensure OpenSearch collection exists for user
         const user = authService.getUser();
         if (user) {
-          import("@/services/agent.service").then(({ agentService }) => {
-            agentService.ensureCollection(user.id).catch(err => {
-              console.error("Failed to ensure collection:", err);
-            });
+          agentService.ensureCollection(user.id).catch(err => {
+            console.error("Failed to ensure collection:", err);
           });
         }
       } catch (error) {
-        console.error("Auth check failed:", error);
         authService.logout();
         setIsAuthenticated(false);
       }
@@ -69,19 +67,12 @@ function App() {
   const [refreshNotes, setRefreshNotes] = useState(0);
 
   const handleLoginSuccess = async () => {
-    console.log("Login success, checking auth...");
     setIsAuthenticated(true);
     setCurrentPage("home");
 
-    // Ensure OpenSearch collection exists for user
     const user = authService.getUser();
     if (user) {
-      // Import agent service dynamically to avoid circular dependency
-      import("@/services/agent.service").then(({ agentService }) => {
-        agentService.ensureCollection(user.id).catch(err => {
-          console.error("Failed to ensure collection:", err);
-        });
-      });
+      agentService.ensureCollection(user.id).catch(() => {});
     }
   };
 
@@ -92,44 +83,33 @@ function App() {
   };
 
   const handleOpenPopup = async () => {
-    console.log("Opening recording popup window...");
     try {
-      // Check if WebviewWindow is available
-      console.log("WebviewWindow available:", !!WebviewWindow);
-
       const webview = new WebviewWindow('recording-popup', {
         url: 'recording-popup.html',
         title: 'Atok.ai Recording Studio',
         width: 750,
         height: 85,
-        x: 100, // Will be adjusted to center via JavaScript
-        y: 50, // Position in upper part of screen
+        x: 100,
+        y: 50,
         minWidth: 700,
         minHeight: 80,
         maxWidth: 900,
         maxHeight: 100,
-        center: false, // We'll position it manually
+        center: false,
         resizable: false,
         decorations: false,
         alwaysOnTop: true,
         skipTaskbar: true,
         transparent: true,
         shadow: false,
-        dragDropEnabled: false, // Important: disable drag-drop to enable window dragging
-      });
-
-      console.log("WebviewWindow created:", webview);
-
-      // Listen for window events
-      webview.once('tauri://created', () => {
-        console.log('Recording popup window created');
+        dragDropEnabled: false,
       });
 
       webview.once('tauri://error', (e) => {
-        console.error('Error creating recording popup window:', e);
+        console.error('Failed to create recording popup:', e);
       });
     } catch (error) {
-      console.error('Failed to create recording popup window:', error);
+      console.error('Failed to create recording popup:', error);
     }
   };
 

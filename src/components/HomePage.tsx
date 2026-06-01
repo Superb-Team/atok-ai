@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
@@ -13,169 +13,135 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [processingNotes, setProcessingNotes] = useState<Set<string>>(new Set());
+  const loadRequestId = useRef(0);
+
+  const loadNotes = useCallback(async () => {
+    const requestId = ++loadRequestId.current;
+
+    try {
+      setError("");
+      const user = authService.getUser();
+      if (!user) {
+        if (requestId === loadRequestId.current) {
+          setError("User not authenticated");
+          setLoading(false);
+        }
+        return;
+      }
+
+      const fetchedNotes = await noteService.getNotes(user.id);
+      if (requestId === loadRequestId.current) {
+        setNotes(fetchedNotes);
+        setError("");
+      }
+    } catch (err) {
+      if (requestId === loadRequestId.current) {
+        setError(getErrorMessage(err, "Failed to load notes"));
+      }
+    } finally {
+      if (requestId === loadRequestId.current) {
+        setLoading(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
-    console.log('🏠 HomePage mounted, setting up listeners...');
     loadNotes();
-    
-    // Listen for recording events via multiple methods
+
     let unlisten1: (() => void) | undefined;
     let unlisten2: (() => void) | undefined;
     let storageInterval: NodeJS.Timeout | undefined;
-    
-    // Method 1: localStorage polling (most reliable)
+
     let lastRecordingCheck = 0;
     let lastNoteCheck = 0;
-    
+
     storageInterval = setInterval(() => {
-      // Check for audio to process
       const audioData = localStorage.getItem('audio_to_process');
       if (audioData) {
         try {
           const { audioPath, noteTitle, timestamp } = JSON.parse(audioData);
           if (timestamp > lastRecordingCheck) {
-            console.log('🎉 Audio to process detected!');
-            console.log('📁 Audio path:', audioPath);
-            console.log('📝 Note title:', noteTitle);
             lastRecordingCheck = timestamp;
-            
-            // Show loading note
-            setProcessingNotes(prev => {
-              const newSet = new Set(prev).add(noteTitle);
-              console.log('📋 Processing notes:', Array.from(newSet));
-              return newSet;
-            });
-            
-            // Clear the flag immediately
+            setProcessingNotes(prev => new Set(prev).add(noteTitle));
             localStorage.removeItem('audio_to_process');
-            
-            // Process audio in main window
             processAudioRecording(audioPath, noteTitle);
           }
-        } catch (e) {
-          console.error('Error parsing audio_to_process:', e);
+        } catch {
+          localStorage.removeItem('audio_to_process');
         }
       }
-      
-      // Check for recording started (legacy)
+
       const recordingData = localStorage.getItem('recording_started');
       if (recordingData) {
         try {
           const { noteTitle, timestamp } = JSON.parse(recordingData);
           if (timestamp > lastRecordingCheck) {
-            console.log('🎉 Recording started detected via localStorage!');
-            console.log('📝 Note title:', noteTitle);
             lastRecordingCheck = timestamp;
-            setProcessingNotes(prev => {
-              const newSet = new Set(prev).add(noteTitle);
-              console.log('📋 Processing notes:', Array.from(newSet));
-              return newSet;
-            });
-            // Clear the flag
+            setProcessingNotes(prev => new Set(prev).add(noteTitle));
             localStorage.removeItem('recording_started');
           }
-        } catch (e) {
-          console.error('Error parsing recording_started:', e);
+        } catch {
+          localStorage.removeItem('recording_started');
         }
       }
-      
-      // Check for note created
+
       const noteCreatedData = localStorage.getItem('note_created');
       if (noteCreatedData) {
         try {
           const { noteTitle, timestamp } = JSON.parse(noteCreatedData);
           if (timestamp > lastNoteCheck) {
-            console.log('🎉 Note created detected via localStorage!');
-            console.log('📝 Note title:', noteTitle);
             lastNoteCheck = timestamp;
             setProcessingNotes(prev => {
-              const newSet = new Set(prev);
-              newSet.delete(noteTitle);
-              console.log('📋 Processing notes after removal:', Array.from(newSet));
-              return newSet;
+              const next = new Set(prev);
+              next.delete(noteTitle);
+              return next;
             });
-            // Refresh notes list
-            console.log('🔄 Refreshing notes list...');
             loadNotes();
-            // Clear the flag
             localStorage.removeItem('note_created');
           }
-        } catch (e) {
-          console.error('Error parsing note_created:', e);
+        } catch {
+          localStorage.removeItem('note_created');
         }
       }
-    }, 500); // Check every 500ms
-    
-    // Method 2: Tauri events (backup)
+    }, 500);
+
     const setupTauriListeners = async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        
+
         unlisten1 = await listen('recording-started', (event: any) => {
-          console.log('🎉 Recording started event received via Tauri!');
           const noteTitle = event.payload?.noteTitle;
           if (noteTitle) {
             setProcessingNotes(prev => new Set(prev).add(noteTitle));
           }
         });
-        
+
         unlisten2 = await listen('note-created', (event: any) => {
-          console.log('🎉 Note created event received via Tauri!');
           const noteTitle = event.payload?.noteTitle;
           if (noteTitle) {
             setProcessingNotes(prev => {
-              const newSet = new Set(prev);
-              newSet.delete(noteTitle);
-              return newSet;
+              const next = new Set(prev);
+              next.delete(noteTitle);
+              return next;
             });
             loadNotes();
           }
         });
-        
-        console.log('✅ Tauri event listeners registered');
-      } catch (error) {
-        console.error('❌ Error setting up Tauri listeners:', error);
+      } catch (err) {
+        console.error("Failed to set up Tauri event listeners:", err);
       }
     };
-    
+
     setupTauriListeners();
-    
+
     return () => {
-      console.log('🧹 HomePage unmounting, cleaning up...');
       if (storageInterval) clearInterval(storageInterval);
       unlisten1?.();
       unlisten2?.();
     };
-  }, []);
-
-  const loadNotes = async () => {
-    try {
-      setError("");
-      const user = authService.getUser();
-      if (!user) {
-        console.error("No user found");
-        setError("User not authenticated");
-        setLoading(false);
-        return;
-      }
-
-      console.log("Loading notes for user:", user.id);
-      const fetchedNotes = await noteService.getNotes(user.id);
-      console.log("Notes loaded:", fetchedNotes);
-      setNotes(fetchedNotes);
-    } catch (err) {
-      console.error("Failed to load notes:", err);
-      setError(err instanceof Error ? err.message : "Failed to load notes");
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [loadNotes]);
 
   const processAudioRecording = async (audioPath: string, noteTitle: string) => {
-    console.log('🎙️ Starting audio processing in main window...');
-    console.log('📁 Audio path:', audioPath);
-    console.log('📝 Note title:', noteTitle);
-
     try {
       const { processAudioRecording: processAudio } = await import('@/services/audio-processor.service');
       const result = await processAudio(audioPath, noteTitle);
@@ -184,27 +150,21 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         throw new Error(result.error || 'Processing failed');
       }
 
-      // Success - update UI
-      console.log('🎉 Workflow completed successfully!');
       setProcessingNotes(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(noteTitle);
-        return newSet;
+        const next = new Set(prev);
+        next.delete(noteTitle);
+        return next;
       });
-      
-      // Refresh notes list
+
       await loadNotes();
-      
-    } catch (error) {
-      console.error('❌ Failed to process recording:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       alert(`Recording processing failed:\n${errorMessage}`);
-      
-      // Remove loading note
+
       setProcessingNotes(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(noteTitle);
-        return newSet;
+        const next = new Set(prev);
+        next.delete(noteTitle);
+        return next;
       });
     }
   };
@@ -216,8 +176,8 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
       await noteService.toggleFavorite(noteId, user.id);
       await loadNotes();
-    } catch (error) {
-      console.error("Failed to toggle favorite:", error);
+    } catch (err) {
+      console.error("Failed to toggle favorite:", err);
     }
   };
 
@@ -231,7 +191,6 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
   return (
     <div className="flex-1 flex flex-col h-screen overflow-hidden bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-900 dark:to-neutral-950">
-      {/* Header */}
       <div className="px-8 py-6 border-b border-neutral-200/50 dark:border-neutral-700/50 bg-white/80 dark:bg-neutral-900/80 backdrop-blur-sm">
         <div className="max-w-7xl mx-auto">
           <h1 className="text-3xl font-bold text-neutral-900 dark:text-white">
@@ -240,7 +199,6 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         </div>
       </div>
 
-      {/* Notes Grid */}
       <div className="flex-1 overflow-y-auto p-8">
         <div className="max-w-7xl mx-auto">
           {error && (
@@ -248,7 +206,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
               {error}
             </div>
           )}
-          
+
           {notes.length === 0 && processingNotes.size === 0 ? (
             <div className="text-center py-20">
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800 mb-4">
@@ -263,12 +221,10 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-              {/* Processing notes (loading state) */}
               {Array.from(processingNotes).map((noteTitle) => (
                 <LoadingNoteCard key={noteTitle} title={noteTitle} />
               ))}
-              
-              {/* Actual notes */}
+
               {notes.map((note) => (
                 <NoteCard
                   key={note.id}
@@ -283,6 +239,12 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       </div>
     </div>
   );
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  return fallback;
 }
 
 function LoadingNoteCard({ title }: { title: string }) {
@@ -324,24 +286,18 @@ function NoteCard({ note, onToggleFavorite, onClick }: NoteCardProps) {
     <div
       onClick={onClick}
       className="rounded-xl p-5 shadow-sm hover:shadow-lg transition-all duration-200 relative group cursor-pointer border border-neutral-200 dark:border-neutral-700 hover:scale-[1.02]"
-      style={{ 
-        backgroundColor,
-        color: isDark ? "#1F2937" : undefined
-      }}
+      style={{ backgroundColor, color: isDark ? "#1F2937" : undefined }}
     >
-      {/* Favorite Star */}
       {note.is_favorite && (
         <div className="absolute top-3 right-3">
           <Star className="w-4 h-4 fill-current text-yellow-500" />
         </div>
       )}
 
-      {/* Title */}
       <h3 className="text-lg font-semibold mb-3 pr-6 line-clamp-2" style={{ color: isDark ? "#1F2937" : undefined }}>
         {note.title}
       </h3>
 
-      {/* Content Preview */}
       <div className="mb-4 min-h-[60px]">
         {note.content ? (
           <p className="text-sm line-clamp-3 opacity-80" style={{ color: isDark ? "#374151" : undefined }}>
@@ -355,7 +311,6 @@ function NoteCard({ note, onToggleFavorite, onClick }: NoteCardProps) {
         )}
       </div>
 
-      {/* Tags */}
       {note.tags && note.tags.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mb-3">
           {note.tags.slice(0, 2).map((tag, index) => (
@@ -375,7 +330,6 @@ function NoteCard({ note, onToggleFavorite, onClick }: NoteCardProps) {
         </div>
       )}
 
-      {/* Footer */}
       <div className="flex items-center justify-between pt-3 border-t border-neutral-300/40 dark:border-neutral-600/40">
         <span className="text-xs opacity-60">
           {new Date(note.updated_at).toLocaleDateString()}
@@ -388,9 +342,7 @@ function NoteCard({ note, onToggleFavorite, onClick }: NoteCardProps) {
           className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
         >
           <Star
-            className={`w-4 h-4 ${
-              note.is_favorite ? "fill-current text-yellow-500" : ""
-            }`}
+            className={`w-4 h-4 ${note.is_favorite ? "fill-current text-yellow-500" : ""}`}
             style={{ color: isDark && !note.is_favorite ? "#4B5563" : undefined }}
           />
         </button>

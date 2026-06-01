@@ -3,22 +3,48 @@ import type { Note, CreateNoteRequest } from "@/types/note.types";
 
 export const noteService = {
   async getNotes(userId: string): Promise<Note[]> {
-    return await invoke<Note[]>("get_notes", { userId });
+    try {
+      return await invoke<Note[]>("get_notes", { userId });
+    } catch (error) {
+      throw toError(error, "Failed to load notes");
+    }
   },
 
   async getNote(noteId: number, userId: string): Promise<Note> {
-    return await invoke<Note>("get_note", { noteId, userId });
+    try {
+      return await invoke<Note>("get_note", { noteId, userId });
+    } catch (error) {
+      throw toError(error, "Failed to load note");
+    }
   },
 
   async createNote(userId: string, request: CreateNoteRequest): Promise<Note> {
-    return await invoke<Note>("create_note", { userId, request });
+    try {
+      return await invoke<Note>("create_note", { userId, request });
+    } catch (error) {
+      throw toError(error, "Failed to create note");
+    }
   },
 
   async deleteNote(noteId: number, userId: string): Promise<{ message: string }> {
-    return await invoke<{ message: string }>("delete_note", { noteId, userId });
+    try {
+      return await invoke<{ message: string }>("delete_note", { noteId, userId });
+    } catch (error) {
+      throw toError(error, "Failed to delete note");
+    }
   },
 
   async toggleFavorite(noteId: number, userId: string): Promise<Note> {
-    return await invoke<Note>("toggle_favorite", { noteId, userId });
+    try {
+      return await invoke<Note>("toggle_favorite", { noteId, userId });
+    } catch (error) {
+      throw toError(error, "Failed to update note");
+    }
   },
 };
+
+function toError(error: unknown, fallback: string): Error {
+  if (error instanceof Error) return error;
+  if (typeof error === "string" && error.trim()) return new Error(error);
+  return new Error(fallback);
+}

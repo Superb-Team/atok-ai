@@ -186,6 +186,29 @@ button {
   }
 }
 
+.recording-popup-ui button {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font-family: inherit;
+  outline: none;
+  padding: 0;
+}
+
+.recording-popup-ui button:hover,
+.recording-popup-ui button:active {
+  background: transparent;
+  border-color: transparent;
+}
+
+.recording-popup-ui button:focus-visible {
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.55), 0 0 0 5px rgba(16, 185, 129, 0.18);
+}
+
+.recording-popup-ui button:disabled {
+  pointer-events: none;
+}
+
 @theme inline {
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);

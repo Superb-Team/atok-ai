@@ -11,27 +11,30 @@ pub async fn get_tasks(
     let tasks = sqlx::query_as::<_, Task>(
         "SELECT * FROM tasks 
          WHERE user_id = $1 AND is_deleted = false 
-         ORDER BY position ASC"
+         ORDER BY position ASC",
     )
     .bind(&user_id)
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Failed to fetch tasks: {}", e))?;
-    
-    Ok(tasks.into_iter().map(|task| TaskResponse {
-        id: task.id,
-        title: task.title,
-        description: task.description,
-        status: task.status,
-        priority: task.priority,
-        duration_minutes: task.duration_minutes,
-        tags: task.tags,
-        due_date: task.due_date,
-        completed_at: task.completed_at,
-        position: task.position,
-        created_at: task.created_at,
-        updated_at: task.updated_at,
-    }).collect())
+
+    Ok(tasks
+        .into_iter()
+        .map(|task| TaskResponse {
+            id: task.id,
+            title: task.title,
+            description: task.description,
+            status: task.status,
+            priority: task.priority,
+            duration_minutes: task.duration_minutes,
+            tags: task.tags,
+            due_date: task.due_date,
+            completed_at: task.completed_at,
+            position: task.position,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -58,7 +61,7 @@ pub async fn create_task(
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to create task: {}", e))?;
-    
+
     Ok(TaskResponse {
         id: task.id,
         title: task.title,
@@ -94,7 +97,7 @@ pub async fn update_task(
              position = COALESCE($8, position),
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $9 AND user_id = $10
-         RETURNING *"
+         RETURNING *",
     )
     .bind(&request.title)
     .bind(&request.description)
@@ -110,7 +113,7 @@ pub async fn update_task(
     .await
     .map_err(|e| format!("Failed to update task: {}", e))?
     .ok_or_else(|| "Task not found".to_string())?;
-    
+
     Ok(TaskResponse {
         id: task.id,
         title: task.title,
@@ -136,18 +139,18 @@ pub async fn delete_task(
     let pool = db.get_pool()?;
     let result = sqlx::query(
         "UPDATE tasks SET is_deleted = true 
-         WHERE id = $1 AND user_id = $2"
+         WHERE id = $1 AND user_id = $2",
     )
     .bind(task_id)
     .bind(&user_id)
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to delete task: {}", e))?;
-    
+
     if result.rows_affected() == 0 {
         return Err("Task not found".to_string());
     }
-    
+
     Ok(MessageResponse {
         message: "Task deleted successfully".to_string(),
     })
@@ -161,28 +164,27 @@ pub async fn toggle_task_completion(
 ) -> Result<TaskResponse, String> {
     let pool = db.get_pool()?;
     // Get current task
-    let current_task = sqlx::query_as::<_, Task>(
-        "SELECT * FROM tasks WHERE id = $1 AND user_id = $2"
-    )
-    .bind(task_id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to fetch task: {}", e))?
-    .ok_or_else(|| "Task not found".to_string())?;
-    
+    let current_task =
+        sqlx::query_as::<_, Task>("SELECT * FROM tasks WHERE id = $1 AND user_id = $2")
+            .bind(task_id)
+            .bind(&user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Failed to fetch task: {}", e))?
+            .ok_or_else(|| "Task not found".to_string())?;
+
     // Toggle completion
     let new_completed_at = if current_task.completed_at.is_some() {
         None
     } else {
         Some(chrono::Utc::now())
     };
-    
+
     let task = sqlx::query_as::<_, Task>(
         "UPDATE tasks 
          SET completed_at = $1, updated_at = CURRENT_TIMESTAMP 
          WHERE id = $2 AND user_id = $3
-         RETURNING *"
+         RETURNING *",
     )
     .bind(new_completed_at)
     .bind(task_id)
@@ -190,7 +192,7 @@ pub async fn toggle_task_completion(
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to toggle task completion: {}", e))?;
-    
+
     Ok(TaskResponse {
         id: task.id,
         title: task.title,
@@ -218,7 +220,7 @@ pub async fn update_task_positions(
         sqlx::query(
             "UPDATE tasks 
              SET position = $1, status = $2, updated_at = CURRENT_TIMESTAMP 
-             WHERE id = $3 AND user_id = $4"
+             WHERE id = $3 AND user_id = $4",
         )
         .bind(update.position)
         .bind(&update.status)
@@ -228,7 +230,7 @@ pub async fn update_task_positions(
         .await
         .map_err(|e| format!("Failed to update task position: {}", e))?;
     }
-    
+
     Ok(MessageResponse {
         message: "Task positions updated successfully".to_string(),
     })
@@ -243,14 +245,14 @@ pub async fn clear_column_tasks(
     let pool = db.get_pool()?;
     sqlx::query(
         "UPDATE tasks SET is_deleted = true 
-         WHERE user_id = $1 AND status = $2"
+         WHERE user_id = $1 AND status = $2",
     )
     .bind(&user_id)
     .bind(&status)
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to clear tasks: {}", e))?;
-    
+
     Ok(MessageResponse {
         message: "Tasks cleared successfully".to_string(),
     })

@@ -12,17 +12,16 @@ use uuid::Uuid;
 // JWT Claims structure
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: String,  // user id
+    sub: String, // user id
     email: String,
-    exp: usize,   // expiration time
+    exp: usize, // expiration time
 }
 
 fn get_jwt_secret() -> String {
-    std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| {
-            eprintln!("WARNING: JWT_SECRET not set in .env! Using fallback dev key. THIS IS INSECURE.");
-            "atok-ai-super-secret-jwt-key-development-2025".to_string()
-        })
+    std::env::var("JWT_SECRET").unwrap_or_else(|_| {
+        eprintln!("WARNING: JWT_SECRET not set in .env! Using fallback dev key. THIS IS INSECURE.");
+        "atok-ai-super-secret-jwt-key-development-2025".to_string()
+    })
 }
 
 // ==================== Helper Functions ====================
@@ -30,7 +29,7 @@ fn get_jwt_secret() -> String {
 fn hash_password(password: &str) -> Result<String, AuthError> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
-    
+
     argon2
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
@@ -38,9 +37,8 @@ fn hash_password(password: &str) -> Result<String, AuthError> {
 }
 
 fn verify_password(password: &str, hash: &str) -> Result<bool, AuthError> {
-    let parsed_hash = PasswordHash::new(hash)
-        .map_err(|e| AuthError::HashError(e.to_string()))?;
-    
+    let parsed_hash = PasswordHash::new(hash).map_err(|e| AuthError::HashError(e.to_string()))?;
+
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok())
@@ -51,13 +49,13 @@ fn generate_jwt(user_id: &str, email: &str) -> Result<String, AuthError> {
         .checked_add_signed(chrono::Duration::days(7))
         .expect("valid timestamp")
         .timestamp() as usize;
-    
+
     let claims = Claims {
         sub: user_id.to_string(),
         email: email.to_string(),
         exp: expiration,
     };
-    
+
     let secret = get_jwt_secret();
     encode(
         &Header::default(),
@@ -90,7 +88,11 @@ mod tests {
     fn test_hash_password_produces_valid_hash() {
         let hash = hash_password("my-secret-password").expect("hashing should succeed");
         // Argon2 hashes start with $argon2
-        assert!(hash.starts_with("$argon2"), "hash should be argon2 format, got: {}", hash);
+        assert!(
+            hash.starts_with("$argon2"),
+            "hash should be argon2 format, got: {}",
+            hash
+        );
         assert!(hash.len() > 50, "hash should be sufficiently long");
     }
 
@@ -99,7 +101,10 @@ mod tests {
         let hash1 = hash_password("password123").unwrap();
         let hash2 = hash_password("password123").unwrap();
         // Salts are random, so hashes differ despite same password
-        assert_ne!(hash1, hash2, "same password should produce different hashes due to random salt");
+        assert_ne!(
+            hash1, hash2,
+            "same password should produce different hashes due to random salt"
+        );
     }
 
     #[test]
@@ -227,7 +232,10 @@ mod tests {
         assert!(claims.exp > now, "expiration should be in the future");
         // Should expire in roughly 7 days (604800 seconds)
         let seven_days = now + 604800;
-        assert!(claims.exp <= seven_days + 10, "expiration should be ~7 days from now");
+        assert!(
+            claims.exp <= seven_days + 10,
+            "expiration should be ~7 days from now"
+        );
     }
 
     // ─── Error Messages ───────────────────────────────────
@@ -235,8 +243,14 @@ mod tests {
     #[test]
     fn test_auth_error_display() {
         assert_eq!(AuthError::UserNotFound.to_string(), "User not found");
-        assert_eq!(AuthError::InvalidCredentials.to_string(), "Invalid credentials");
-        assert_eq!(AuthError::UserAlreadyExists.to_string(), "User already exists");
+        assert_eq!(
+            AuthError::InvalidCredentials.to_string(),
+            "Invalid credentials"
+        );
+        assert_eq!(
+            AuthError::UserAlreadyExists.to_string(),
+            "User already exists"
+        );
         assert_eq!(AuthError::InvalidToken.to_string(), "Invalid token");
         assert_eq!(AuthError::TokenExpired.to_string(), "Token expired");
     }
@@ -278,28 +292,30 @@ pub async fn register(
     // Check if user exists
     let pool = db.get_pool()?;
     let existing = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM users WHERE email = $1 OR username = $2"
+        "SELECT COUNT(*) FROM users WHERE email = $1 OR username = $2",
     )
     .bind(&request.email)
     .bind(&request.username)
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Database query failed: {}", e))?;
-    
+
     if existing > 0 {
         return Err(AuthError::UserAlreadyExists.to_string());
     }
-    
+
     // Hash password
-    let hashed_password = hash_password(&request.password)
-        .map_err(|e| e.to_string())?;
-    
+    let hashed_password = hash_password(&request.password).map_err(|e| e.to_string())?;
+
     // Create user — use 12 hex chars from UUID (16^12 = ~281 trillion possibilities)
-    let user_id = format!("user_{}", &Uuid::new_v4().to_string().replace("-", "")[..12]);
-    
+    let user_id = format!(
+        "user_{}",
+        &Uuid::new_v4().to_string().replace("-", "")[..12]
+    );
+
     sqlx::query(
         "INSERT INTO users (id, email, username, password, full_name, is_verified, is_active) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&user_id)
     .bind(&request.email)
@@ -311,11 +327,10 @@ pub async fn register(
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to create user: {}", e))?;
-    
+
     // Generate JWT
-    let token = generate_jwt(&user_id, &request.email)
-        .map_err(|e| e.to_string())?;
-    
+    let token = generate_jwt(&user_id, &request.email).map_err(|e| e.to_string())?;
+
     Ok(AuthResponse {
         token,
         user: UserResponse {
@@ -331,37 +346,30 @@ pub async fn register(
 }
 
 #[tauri::command]
-pub async fn login(
-    db: State<'_, Database>,
-    request: LoginRequest,
-) -> Result<AuthResponse, String> {
+pub async fn login(db: State<'_, Database>, request: LoginRequest) -> Result<AuthResponse, String> {
     // Find user by email or username
     let pool = db.get_pool()?;
-    let user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE email = $1 OR username = $1"
-    )
-    .bind(&request.email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Database query failed: {}", e))?
-    .ok_or_else(|| AuthError::InvalidCredentials.to_string())?;
-    
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1 OR username = $1")
+        .bind(&request.email)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Database query failed: {}", e))?
+        .ok_or_else(|| AuthError::InvalidCredentials.to_string())?;
+
     // Verify password
-    if !verify_password(&request.password, &user.password)
-        .map_err(|e| e.to_string())? {
+    if !verify_password(&request.password, &user.password).map_err(|e| e.to_string())? {
         return Err(AuthError::InvalidCredentials.to_string());
     }
-    
+
     // Update last login
     let _ = sqlx::query("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = $1")
         .bind(&user.id)
         .execute(pool)
         .await;
-    
+
     // Generate JWT
-    let token = generate_jwt(&user.id, &user.email)
-        .map_err(|e| e.to_string())?;
-    
+    let token = generate_jwt(&user.id, &user.email).map_err(|e| e.to_string())?;
+
     Ok(AuthResponse {
         token,
         user: UserResponse {
@@ -405,36 +413,16 @@ pub async fn get_current_user(
     db: State<'_, Database>,
     token: String,
 ) -> Result<UserResponse, String> {
-    println!("get_current_user called with token: {}...", &token[..20.min(token.len())]);
-    
-    // Verify JWT
-    let claims = verify_jwt(&token)
-        .map_err(|e| {
-            println!("JWT verification failed: {}", e);
-            e.to_string()
-        })?;
-    
-    println!("JWT verified, user_id from claims.sub: {}", claims.sub);
-    
-    // Fetch user
+    let claims = verify_jwt(&token).map_err(|e| e.to_string())?;
+
     let pool = db.get_pool()?;
-    let user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE id = $1"
-    )
-    .bind(&claims.sub)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        println!("Database query failed: {}", e);
-        format!("Database query failed: {}", e)
-    })?
-    .ok_or_else(|| {
-        println!("User not found for id: {}", claims.sub);
-        AuthError::UserNotFound.to_string()
-    })?;
-    
-    println!("User found: {} ({})", user.username, user.email);
-    
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(&claims.sub)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Database query failed: {}", e))?
+        .ok_or_else(|| AuthError::UserNotFound.to_string())?;
+
     Ok(UserResponse {
         id: user.id,
         email: user.email,

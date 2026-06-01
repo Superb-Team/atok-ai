@@ -11,25 +11,28 @@ pub async fn get_notes(
     let notes = sqlx::query_as::<_, Note>(
         "SELECT * FROM notes 
          WHERE user_id = $1 AND is_deleted = false 
-         ORDER BY created_at DESC"
+         ORDER BY created_at DESC",
     )
     .bind(&user_id)
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Failed to fetch notes: {}", e))?;
-    
-    Ok(notes.into_iter().map(|note| NoteResponse {
-        id: note.id,
-        title: note.title,
-        content: note.content,
-        tags: note.tags,
-        is_favorite: note.is_favorite,
-        is_archived: note.is_archived,
-        color: note.color,
-        reminder_at: note.reminder_at,
-        created_at: note.created_at,
-        updated_at: note.updated_at,
-    }).collect())
+
+    Ok(notes
+        .into_iter()
+        .map(|note| NoteResponse {
+            id: note.id,
+            title: note.title,
+            content: note.content,
+            tags: note.tags,
+            is_favorite: note.is_favorite,
+            is_archived: note.is_archived,
+            color: note.color,
+            reminder_at: note.reminder_at,
+            created_at: note.created_at,
+            updated_at: note.updated_at,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -40,7 +43,7 @@ pub async fn get_note(
 ) -> Result<NoteResponse, String> {
     let pool = db.get_pool()?;
     let note = sqlx::query_as::<_, Note>(
-        "SELECT * FROM notes WHERE id = $1 AND user_id = $2 AND is_deleted = false"
+        "SELECT * FROM notes WHERE id = $1 AND user_id = $2 AND is_deleted = false",
     )
     .bind(note_id)
     .bind(&user_id)
@@ -48,7 +51,7 @@ pub async fn get_note(
     .await
     .map_err(|e| format!("Failed to fetch note: {}", e))?
     .ok_or_else(|| "Note not found".to_string())?;
-    
+
     Ok(NoteResponse {
         id: note.id,
         title: note.title,
@@ -73,7 +76,7 @@ pub async fn create_note(
     let note = sqlx::query_as::<_, Note>(
         "INSERT INTO notes (user_id, title, content, tags, color) 
          VALUES ($1, $2, $3, $4, $5) 
-         RETURNING *"
+         RETURNING *",
     )
     .bind(&user_id)
     .bind(&request.title)
@@ -83,7 +86,7 @@ pub async fn create_note(
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to create note: {}", e))?;
-    
+
     Ok(NoteResponse {
         id: note.id,
         title: note.title,
@@ -115,7 +118,7 @@ pub async fn update_note(
              tags = COALESCE($6, tags),
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $7 AND user_id = $8
-         RETURNING *"
+         RETURNING *",
     )
     .bind(&request.title)
     .bind(&request.content)
@@ -129,7 +132,7 @@ pub async fn update_note(
     .await
     .map_err(|e| format!("Failed to update note: {}", e))?
     .ok_or_else(|| "Note not found".to_string())?;
-    
+
     Ok(NoteResponse {
         id: note.id,
         title: note.title,
@@ -153,18 +156,18 @@ pub async fn delete_note(
     let pool = db.get_pool()?;
     let result = sqlx::query(
         "UPDATE notes SET is_deleted = true, deleted_at = CURRENT_TIMESTAMP 
-         WHERE id = $1 AND user_id = $2"
+         WHERE id = $1 AND user_id = $2",
     )
     .bind(note_id)
     .bind(&user_id)
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to delete note: {}", e))?;
-    
+
     if result.rows_affected() == 0 {
         return Err("Note not found".to_string());
     }
-    
+
     Ok(MessageResponse {
         message: "Note deleted successfully".to_string(),
     })
@@ -180,7 +183,7 @@ pub async fn toggle_favorite(
     let note = sqlx::query_as::<_, Note>(
         "UPDATE notes SET is_favorite = NOT is_favorite, updated_at = CURRENT_TIMESTAMP 
          WHERE id = $1 AND user_id = $2 
-         RETURNING *"
+         RETURNING *",
     )
     .bind(note_id)
     .bind(&user_id)
@@ -188,7 +191,7 @@ pub async fn toggle_favorite(
     .await
     .map_err(|e| format!("Failed to toggle favorite: {}", e))?
     .ok_or_else(|| "Note not found".to_string())?;
-    
+
     Ok(NoteResponse {
         id: note.id,
         title: note.title,

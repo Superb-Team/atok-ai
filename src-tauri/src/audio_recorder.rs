@@ -1,35 +1,34 @@
 // Cross-platform audio recorder
 //
-// Captures both microphone AND system audio (desktop/device) like Google Meet/Zoom/Discord
-//
 // Windows: WASAPI loopback + mic (windows_audio.rs)
-// Linux:   PulseAudio monitor source + mic via parec
-// macOS:   ffmpeg avfoundation (system audio + mic)
+// Linux:   parec (PulseAudio/PipeWire) + cpal mic
+// macOS:   ScreenCaptureKit + cpal mic
+// Fallback: cpal mic only
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::audio_dsp::AudioDsp;
+
 pub struct DesktopAudioRecorder {
-    is_recording: Arc<Mutex<bool>>,
+    is_recording: Arc<AtomicBool>,
     recording_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl DesktopAudioRecorder {
     pub fn new() -> Self {
         Self {
-            is_recording: Arc::new(Mutex::new(false)),
+            is_recording: Arc::new(AtomicBool::new(false)),
             recording_thread: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn start_recording(&self, output_path: PathBuf) -> Result<(), String> {
-        let mut recording = self.is_recording.lock().map_err(|e| e.to_string())?;
-        if *recording {
+        if self.is_recording.swap(true, Ordering::SeqCst) {
             return Err("Already recording".to_string());
         }
-        *recording = true;
-        drop(recording);
 
         let is_recording = Arc::clone(&self.is_recording);
         let thread_handle = std::thread::spawn(move || {
@@ -43,40 +42,42 @@ impl DesktopAudioRecorder {
     }
 
     pub fn stop_recording(&self) -> Result<(), String> {
-        println!("Stopping recording...");
-        {
-            let mut recording = self.is_recording.lock().map_err(|e| e.to_string())?;
-            if !*recording {
-                println!("Recording already stopped");
-                return Ok(());
-            }
-            *recording = false;
+        if !self.is_recording.swap(false, Ordering::SeqCst) {
+            return Ok(());
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        eprintln!("[recorder] Stop signal sent");
 
         let mut thread_lock = self.recording_thread.lock().map_err(|e| e.to_string())?;
         if let Some(handle) = thread_lock.take() {
             let join_handle = std::thread::spawn(move || handle.join());
-            for _ in 0..30 {
+            for i in 0..300 {
                 if join_handle.is_finished() {
-                    let _ = join_handle.join();
-                    println!("Recording stopped gracefully");
-                    return Ok(());
+                    return match join_handle.join() {
+                        Ok(Ok(())) => {
+                            eprintln!("[recorder] Thread finished OK");
+                            Ok(())
+                        }
+                        Ok(Err(_)) => Err("Recording thread error".to_string()),
+                        Err(_) => Err("Recording thread panicked".to_string()),
+                    };
+                }
+                if i % 50 == 0 && i > 0 {
+                    eprintln!("[recorder] Waiting for encoding... ({}s)", i / 10);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            println!("Recording thread timed out");
+            eprintln!("[recorder] Timeout after 30s");
+            Ok(())
+        } else {
+            Ok(())
         }
-        println!("Recording stopped");
-        Ok(())
     }
 
     pub fn is_recording(&self) -> bool {
-        *self.is_recording.lock().unwrap()
+        self.is_recording.load(Ordering::SeqCst)
     }
 
-    fn record(output_path: PathBuf, is_recording: Arc<Mutex<bool>>) -> Result<(), String> {
+    fn record(output_path: PathBuf, is_recording: Arc<AtomicBool>) -> Result<(), String> {
         let mp3_path = match output_path.extension().and_then(|s| s.to_str()) {
             Some("mp3") => output_path,
             _ => output_path.with_extension("mp3"),
@@ -89,296 +90,644 @@ impl DesktopAudioRecorder {
             }
         }
 
-        // Try platform-specific recording first
-        let platform_result = {
-            #[cfg(target_os = "linux")]
-            { Self::record_linux(&mp3_path, &is_recording) }
-
-            #[cfg(target_os = "macos")]
-            { Self::record_macos(&mp3_path, &is_recording) }
-        };
-
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         {
-            match platform_result {
+            match Self::record_linux(&mp3_path, &is_recording) {
                 Ok(()) => return Ok(()),
-                Err(e) => println!("Platform recording failed: {}, falling back to cpal", e),
+                Err(e) => eprintln!("Linux recording failed: {}, falling back", e),
             }
         }
 
-        // Fallback: cpal (mic only)
+        #[cfg(target_os = "macos")]
+        {
+            match Self::record_macos(&mp3_path, &is_recording) {
+                Ok(()) => return Ok(()),
+                Err(e) => eprintln!("macOS recording failed: {}, falling back to cpal", e),
+            }
+        }
+
         Self::record_with_cpal(&mp3_path, &is_recording)
     }
 
-    // ==================== Linux: PulseAudio ====================
+    // ==================== Linux: parec (system) + cpal (mic) ====================
 
     #[cfg(target_os = "linux")]
-    fn record_linux(mp3_path: &Path, is_recording: &Arc<Mutex<bool>>) -> Result<(), String> {
-        use std::process::{Command, Stdio};
+    fn record_linux(mp3_path: &Path, is_recording: &Arc<AtomicBool>) -> Result<(), String> {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::SampleFormat;
 
-        if !Self::cmd_exists("pactl") || !Self::cmd_exists("parec") {
-            return Err("pactl/parec not available".to_string());
-        }
+        eprintln!("[recorder] Linux capture starting");
 
-        println!("PulseAudio recording starting...");
+        let sys_raw = "/tmp/atok_linux_sys.raw";
+        let mic_raw = "/tmp/atok_linux_mic.raw";
+        let _ = std::fs::remove_file(sys_raw);
+        let _ = std::fs::remove_file(mic_raw);
 
-        let monitor = Self::find_monitor_source()?;
-        let mic = Self::find_default_source()?;
-        let sample_rate = Self::get_source_sample_rate(&monitor);
+        // --- System audio via parec (PulseAudio/PipeWire) ---
+        let sample_rate = 48000u32;
         let channels = 2u32;
-        println!("Monitor: {}, Mic: {}, Rate: {}Hz", monitor, mic, sample_rate);
+        let sys_device = Self::linux_default_monitor_source();
+        if let Some(device) = &sys_device {
+            eprintln!("[recorder] System monitor: {}", device);
+        }
+        let sys_is_rec = is_recording.clone();
+        let sys_path = sys_raw.to_string();
+        let sys_thread = std::thread::Builder::new()
+            .name("parec-sys".into())
+            .spawn(move || {
+                Self::parec_record(&sys_path, sample_rate, channels, sys_device, &sys_is_rec)
+            })
+            .map_err(|e| format!("Failed to spawn parec thread: {}", e))?;
 
-        let desktop_wav = "/tmp/atok_desktop.wav";
-        let mic_wav = "/tmp/atok_mic.wav";
-        let _ = std::fs::remove_file(desktop_wav);
-        let _ = std::fs::remove_file(mic_wav);
+        // --- Mic via cpal (native device rate) ---
+        let host = cpal::default_host();
+        let mic_device = host
+            .default_input_device()
+            .ok_or("No default input device (mic)")?;
 
-        let mut desktop_proc = Command::new("parec")
-            .args(["--device", &monitor, "--format=s16le",
-                &format!("--rate={}", sample_rate), &format!("--channels={}", channels),
-                "--file-format=wav", desktop_wav])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .spawn().map_err(|e| format!("Failed to start desktop: {}", e))?;
+        let mic_cfg_range = mic_device
+            .supported_input_configs()
+            .map_err(|e| format!("Mic supported_input_configs: {}", e))?
+            .find(|c| c.sample_format() == SampleFormat::F32)
+            .ok_or("Mic does not support F32")?;
 
-        let mut mic_proc = Command::new("parec")
-            .args(["--device", &mic, "--format=s16le",
-                &format!("--rate={}", sample_rate), &format!("--channels={}", channels),
-                "--file-format=wav", mic_wav])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .spawn().map_err(|e| format!("Failed to start mic: {}", e))?;
+        let mic_cfg = Self::with_preferred_sample_rate(mic_cfg_range, sample_rate);
+        let mic_sr = mic_cfg.sample_rate().0;
+        let mic_ch = mic_cfg.channels() as u32;
 
-        println!("Recording system audio + microphone...");
+        eprintln!(
+            "[recorder] Mic: {}Hz, {}ch, F32 | Sys: {}Hz, {}ch via parec",
+            mic_sr, mic_ch, sample_rate, channels
+        );
 
-        while *is_recording.lock().unwrap() {
+        let mic_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let mic_buf_c = mic_buffer.clone();
+
+        let mic_stream = mic_device
+            .build_input_stream(
+                &mic_cfg.config(),
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let mut buf: Vec<u8> = Vec::with_capacity(data.len() * 2);
+                    for &s in data {
+                        let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                        buf.extend_from_slice(&s16.to_le_bytes());
+                    }
+                    if let Ok(mut b) = mic_buf_c.lock() {
+                        b.extend_from_slice(&buf);
+                    }
+                },
+                move |err| eprintln!("[recorder] Mic stream error: {}", err),
+                None,
+            )
+            .map_err(|e| format!("Mic stream build failed: {}", e))?;
+
+        mic_stream
+            .play()
+            .map_err(|e| format!("Mic play failed: {}", e))?;
+        eprintln!("[recorder] Streams playing");
+
+        while is_recording.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        let _ = mic_proc.kill();
-        let _ = desktop_proc.kill();
-        let _ = mic_proc.wait();
-        let _ = desktop_proc.wait();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(mic_stream);
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
-        let has_desktop = Self::file_ok(desktop_wav);
-        let has_mic = Self::file_ok(mic_wav);
+        let _ = sys_thread.join();
 
-        if has_desktop && has_mic {
-            Self::ffmpeg_mix(desktop_wav, mic_wav, mp3_path)?;
-        } else if has_mic {
-            Self::ffmpeg_convert(mic_wav, mp3_path)?;
-        } else if has_desktop {
-            Self::ffmpeg_convert(desktop_wav, mp3_path)?;
-        } else {
-            return Err("No audio captured".to_string());
+        let sys_data = std::fs::read(sys_raw).unwrap_or_default();
+        let mic_data = match Arc::try_unwrap(mic_buffer) {
+            Ok(m) => m.into_inner().map_err(|e| e.to_string())?,
+            Err(_) => return Err("Mic buffer still locked".into()),
+        };
+
+        let _ = std::fs::remove_file(sys_raw);
+        eprintln!(
+            "[recorder] Captured: sys={} bytes, mic={} bytes",
+            sys_data.len(),
+            mic_data.len()
+        );
+
+        let has_sys = sys_data.len() > 1024;
+        let has_mic = mic_data.len() > 1024;
+
+        if !has_sys && !has_mic {
+            return Err("No audio captured".into());
         }
 
-        let _ = std::fs::remove_file(desktop_wav);
-        let _ = std::fs::remove_file(mic_wav);
+        // Resample mic to match system rate if different
+        let (sys_final, mic_final, final_sr, final_ch) =
+            if has_sys && has_mic && mic_sr != sample_rate {
+                let resampled = Self::resample_linear(&mic_data, mic_sr, sample_rate, mic_ch);
+                (sys_data, resampled, sample_rate, channels)
+            } else if has_sys && has_mic {
+                (sys_data, mic_data, sample_rate, channels)
+            } else if has_sys {
+                (sys_data, Vec::new(), sample_rate, channels)
+            } else {
+                (Vec::new(), mic_data, mic_sr, mic_ch)
+            };
+
+        let mic_final = if has_mic {
+            Self::denoise_mic_pcm(&mic_final, final_sr, mic_ch)
+        } else {
+            mic_final
+        };
+
+        let (sys_out, mic_out) =
+            if mic_ch == 1 && final_ch == 2 && !mic_final.is_empty() && !sys_final.is_empty() {
+                let stereo_mic = Self::mono_to_stereo(&mic_final);
+                (sys_final, stereo_mic)
+            } else {
+                (sys_final, mic_final)
+            };
+
+        let encode_ch = if !sys_out.is_empty() { 2u32 } else { final_ch };
+        let encode_sr = final_sr;
+
+        if !sys_out.is_empty() && !mic_out.is_empty() {
+            let mut dsp = AudioDsp::new(4.0);
+            let mixed = dsp.process(&sys_out, &mic_out);
+            if mixed.is_empty() {
+                return Err("DSP produced no output".into());
+            }
+            Self::encode_i16_to_mp3(&mixed, mp3_path, encode_sr, encode_ch)?;
+        } else if !sys_out.is_empty() {
+            Self::pcm_to_mp3(&sys_out, mp3_path, encode_sr, encode_ch)?;
+        } else {
+            Self::pcm_to_mp3(&mic_out, mp3_path, encode_sr, encode_ch)?;
+        }
+
+        eprintln!("[recorder] Encoding done");
         Self::verify_output(mp3_path)
     }
 
-    // ==================== macOS: ffmpeg avfoundation ====================
-
-    #[cfg(target_os = "macos")]
-    fn record_macos(mp3_path: &Path, is_recording: &Arc<Mutex<bool>>) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    fn parec_record(
+        output_path: &str,
+        sample_rate: u32,
+        channels: u32,
+        device: Option<String>,
+        is_recording: &Arc<AtomicBool>,
+    ) -> Result<(), String> {
+        use std::io::Read;
         use std::process::{Command, Stdio};
 
-        if !Self::cmd_exists("ffmpeg") {
-            return Err("ffmpeg not available".to_string());
+        eprintln!("[recorder] parec starting");
+
+        let mut args = vec![
+            "--format=s16le".to_string(),
+            format!("--rate={}", sample_rate),
+            format!("--channels={}", channels),
+            "--volume=65536".to_string(),
+        ];
+        if let Some(device) = device {
+            args.push(format!("--device={}", device));
         }
 
-        println!("macOS avfoundation recording starting...");
-
-        // List available devices
-        let devices_output = Command::new("ffmpeg")
-            .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
-            .unwrap_or_default();
-        println!("Available devices:\n{}", devices_output);
-
-        // Find screen capture device index (for system audio)
-        // On macOS, system audio is captured via screen recording
-        // Device ":0" = screen 0 (captures system audio when Screen Recording permission granted)
-        // Device "0" = mic input 0
-
-        let raw_wav = "/tmp/atok_macos_recording.wav";
-
-        // Record screen (system audio) + mic simultaneously
-        // -f avfoundation -i "0:0" captures mic (audio device 0) + screen (video device 0 with audio)
-        // We use -i ":0" for screen audio and separate mic
-        let mut proc = Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-f", "avfoundation",
-                "-i", ":0",  // Screen capture with system audio
-                "-vn",        // No video
-                "-ac", "2",
-                "-ar", "48000",
-                "-f", "wav",
-                raw_wav,
-            ])
-            .stdout(Stdio::null())
+        let mut child = Command::new("parec")
+            .args(args)
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("Failed to start macOS recording: {}", e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to start parec: {}. Is PulseAudio/PipeWire installed?",
+                    e
+                )
+            })?;
 
-        println!("Recording system audio via avfoundation...");
+        let mut stdout = child.stdout.take().ok_or("parec stdout not available")?;
+        let mut file = std::io::BufWriter::new(
+            std::fs::File::create(output_path)
+                .map_err(|e| format!("Failed to create {}: {}", output_path, e))?,
+        );
+        let mut buf = [0u8; 8192];
 
-        while *is_recording.lock().unwrap() {
+        while is_recording.load(Ordering::SeqCst) {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = file.write_all(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = file.flush();
+        eprintln!("[recorder] parec stopped");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_default_monitor_source() -> Option<String> {
+        use std::process::Command;
+
+        let output = Command::new("pactl")
+            .arg("get-default-sink")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let sink = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if sink.is_empty() {
+            None
+        } else {
+            Some(format!("{}.monitor", sink))
+        }
+    }
+
+    // ==================== macOS: ScreenCaptureKit + cpal mic ====================
+
+    #[cfg(target_os = "macos")]
+    fn record_macos(mp3_path: &Path, is_recording: &Arc<AtomicBool>) -> Result<(), String> {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::SampleFormat;
+        use swift_rs::swift;
+
+        swift! {
+            fn sc_start_system_audio(path: *const u8, path_len: u32) -> bool;
+            fn sc_stop_system_audio() -> bool;
+        }
+
+        eprintln!("[recorder] macOS ScreenCaptureKit recording start");
+
+        let sample_rate = 48000u32;
+        let channels = 2u32;
+
+        let sys_raw = "/tmp/atok_macos_system.raw";
+        let mic_raw = "/tmp/atok_macos_mic.raw";
+        let _ = std::fs::remove_file(sys_raw);
+        let _ = std::fs::remove_file(mic_raw);
+
+        let path_bytes = sys_raw.as_bytes();
+        let success =
+            unsafe { sc_start_system_audio(path_bytes.as_ptr(), path_bytes.len() as u32) };
+        if !success {
+            return Err("ScreenCaptureKit failed. Grant Screen Recording permission.".into());
+        }
+
+        let host = cpal::default_host();
+        let mic_device = host
+            .default_input_device()
+            .ok_or("No default input device (mic)")?;
+
+        let mic_cfg_range = mic_device
+            .supported_input_configs()
+            .map_err(|e| format!("Mic supported_input_configs: {}", e))?
+            .find(|c| c.sample_format() == SampleFormat::F32)
+            .ok_or("Mic does not support F32")?;
+
+        let mic_cfg = Self::with_preferred_sample_rate(mic_cfg_range, sample_rate);
+        let mic_sr = mic_cfg.sample_rate().0;
+        let mic_ch = mic_cfg.channels() as u32;
+
+        eprintln!("[recorder] macOS mic: {}Hz, {}ch", mic_sr, mic_ch);
+
+        let mic_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let mic_buf_c = mic_buffer.clone();
+
+        let mic_stream = mic_device
+            .build_input_stream(
+                &mic_cfg.config(),
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let mut buf: Vec<u8> = Vec::with_capacity(data.len() * 2);
+                    for &s in data {
+                        let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                        buf.extend_from_slice(&s16.to_le_bytes());
+                    }
+                    if let Ok(mut b) = mic_buf_c.lock() {
+                        b.extend_from_slice(&buf);
+                    }
+                },
+                move |err| eprintln!("[recorder] Mic stream error: {}", err),
+                None,
+            )
+            .map_err(|e| format!("Mic stream build failed: {}", e))?;
+
+        mic_stream
+            .play()
+            .map_err(|e| format!("Mic play failed: {}", e))?;
+        eprintln!("[recorder] macOS streams playing");
+
+        while is_recording.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        let _ = proc.kill();
-        let _ = proc.wait();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        unsafe {
+            sc_stop_system_audio();
+        }
+        drop(mic_stream);
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
-        if Self::file_ok(raw_wav) {
-            Self::ffmpeg_convert(raw_wav, mp3_path)?;
-            let _ = std::fs::remove_file(raw_wav);
-            Self::verify_output(mp3_path)
+        let mic_data = match Arc::try_unwrap(mic_buffer) {
+            Ok(m) => m.into_inner().map_err(|e| e.to_string())?,
+            Err(_) => return Err("Mic buffer still locked".into()),
+        };
+        let sys_data = std::fs::read(sys_raw).unwrap_or_default();
+        let _ = std::fs::remove_file(sys_raw);
+
+        eprintln!(
+            "[recorder] macOS captured: sys={} bytes, mic={} bytes",
+            sys_data.len(),
+            mic_data.len()
+        );
+
+        let has_sys = sys_data.len() > 1024;
+        let has_mic = mic_data.len() > 1024;
+
+        if !has_sys && !has_mic {
+            return Err("No audio captured on macOS".into());
+        }
+
+        // Resample mic if sample rates differ
+        let mic_final = if has_sys && has_mic && mic_sr != sample_rate {
+            Self::resample_linear(&mic_data, mic_sr, sample_rate, mic_ch)
         } else {
-            // Fallback: try mic only
-            println!("System audio failed, trying mic only...");
-            let mic_wav = "/tmp/atok_macos_mic.wav";
-            let mut mic_proc = Command::new("ffmpeg")
-                .args(["-y", "-f", "avfoundation", "-i", "0",
-                    "-vn", "-ac", "2", "-ar", "48000", "-f", "wav", mic_wav])
-                .stdout(Stdio::null()).stderr(Stdio::null())
-                .spawn().map_err(|e| format!("Failed to start mic: {}", e))?;
+            mic_data.clone()
+        };
 
-            while *is_recording.lock().unwrap() {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            let _ = mic_proc.kill();
-            let _ = mic_proc.wait();
-
-            if Self::file_ok(mic_wav) {
-                Self::ffmpeg_convert(mic_wav, mp3_path)?;
-                let _ = std::fs::remove_file(mic_wav);
-                Self::verify_output(mp3_path)
+        let mic_final = if has_mic {
+            let mic_rate = if has_sys && has_mic {
+                sample_rate
             } else {
-                Err("No audio captured on macOS".to_string())
-            }
+                mic_sr
+            };
+            Self::denoise_mic_pcm(&mic_final, mic_rate, mic_ch)
+        } else {
+            mic_final
+        };
+
+        let mic_stereo = if mic_ch == 1 && has_sys && has_mic {
+            Self::mono_to_stereo(&mic_final)
+        } else {
+            mic_final
+        };
+
+        if has_sys && has_mic {
+            let mut dsp = AudioDsp::new(4.0);
+            let mixed = dsp.process(&sys_data, &mic_stereo);
+            Self::encode_i16_to_mp3(&mixed, mp3_path, sample_rate, channels)?;
+        } else if has_sys {
+            Self::pcm_to_mp3(&sys_data, mp3_path, sample_rate, channels)?;
+        } else {
+            Self::pcm_to_mp3(&mic_final, mp3_path, mic_sr, mic_ch)?;
         }
+
+        eprintln!("[recorder] macOS encoding done");
+        Self::verify_output(mp3_path)
     }
 
-    // ==================== Shared Helpers ====================
+    // ==================== Shared: Encoding & Utils ====================
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn cmd_exists(cmd: &str) -> bool {
-        std::process::Command::new("which").arg(cmd)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false)
+    fn pcm_to_mp3(
+        pcm_data: &[u8],
+        output: &Path,
+        sample_rate: u32,
+        channels: u32,
+    ) -> Result<(), String> {
+        let samples: Vec<i16> = pcm_data
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        Self::encode_i16_to_mp3(&samples, output, sample_rate, channels)
     }
 
-    fn file_ok(path: &str) -> bool {
-        std::fs::metadata(path).map(|m| m.len() > 4096).unwrap_or(false)
-    }
+    fn encode_i16_to_mp3(
+        samples: &[i16],
+        output: &Path,
+        sample_rate: u32,
+        channels: u32,
+    ) -> Result<(), String> {
+        use mp3lame_encoder::{Builder, FlushNoGap, InterleavedPcm, MonoPcm};
 
-    #[cfg(target_os = "linux")]
-    fn find_monitor_source() -> Result<String, String> {
-        use std::process::Command;
-        let output = Command::new("pactl")
-            .args(["list", "short", "sources"])
-            .output().map_err(|e| format!("pactl failed: {}", e))?;
-        let sources = String::from_utf8_lossy(&output.stdout);
-        for line in sources.lines() {
-            if line.contains(".monitor") {
-                if let Some(name) = line.split_whitespace().nth(1) {
-                    return Ok(name.to_string());
+        if channels != 1 && channels != 2 {
+            return Err(format!(
+                "MP3 encoder only supports mono/stereo, got {} channels",
+                channels
+            ));
+        }
+
+        let channel_count = channels as usize;
+        let aligned_len = samples.len() - (samples.len() % channel_count);
+        if aligned_len == 0 {
+            return Err("No aligned PCM samples to encode".into());
+        }
+        let samples = &samples[..aligned_len];
+
+        let mut builder = Builder::new().ok_or("MP3 encoder init failed")?;
+        builder
+            .set_sample_rate(sample_rate)
+            .map_err(|e| format!("{:?}", e))?;
+        builder
+            .set_num_channels(channels as u8)
+            .map_err(|e| format!("{:?}", e))?;
+        builder
+            .set_quality(mp3lame_encoder::Quality::Best)
+            .map_err(|e| format!("{:?}", e))?;
+        builder
+            .set_brate(mp3lame_encoder::Bitrate::Kbps192)
+            .map_err(|e| format!("{:?}", e))?;
+
+        let mut encoder = builder.build().map_err(|e| format!("{:?}", e))?;
+        let mut mp3_file = std::fs::File::create(output)
+            .map_err(|e| format!("Failed to create MP3 file: {}", e))?;
+
+        let chunk_size = 1152 * channel_count;
+        let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); chunk_size * 5 / 4 + 7200];
+
+        for chunk in samples.chunks(chunk_size) {
+            let encoded = if channels == 1 {
+                encoder.encode(MonoPcm(chunk), &mut mp3_buf)
+            } else {
+                encoder.encode(InterleavedPcm(chunk), &mut mp3_buf)
+            };
+
+            match encoded {
+                Ok(written) if written > 0 => {
+                    let data = unsafe {
+                        std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, written)
+                    };
+                    mp3_file
+                        .write_all(data)
+                        .map_err(|e| format!("MP3 write error: {}", e))?;
                 }
+                Err(e) => return Err(format!("MP3 encode error: {:?}", e)),
+                _ => {}
             }
         }
-        let output = Command::new("pactl")
-            .args(["get-default-sink"])
-            .output().map_err(|e| format!("pactl failed: {}", e))?;
-        let sink = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !sink.is_empty() { return Ok(format!("{}.monitor", sink)); }
-        Err("No monitor source found".to_string())
-    }
 
-    #[cfg(target_os = "linux")]
-    fn find_default_source() -> Result<String, String> {
-        use std::process::Command;
-        let output = Command::new("pactl")
-            .args(["get-default-source"])
-            .output().map_err(|e| format!("pactl failed: {}", e))?;
-        let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if source.is_empty() { return Err("No mic source found".to_string()); }
-        Ok(source)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn get_source_sample_rate(source: &str) -> u32 {
-        use std::process::Command;
-        if let Ok(output) = Command::new("pactl").args(["list", "short", "sources"]).output() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                if line.contains(source) {
-                    for part in line.split_whitespace() {
-                        if part.ends_with("Hz") {
-                            if let Ok(rate) = part.trim_end_matches("Hz").parse::<u32>() {
-                                return rate;
-                            }
-                        }
-                    }
-                }
+        match encoder.flush::<FlushNoGap>(&mut mp3_buf) {
+            Ok(written) if written > 0 => {
+                let data =
+                    unsafe { std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, written) };
+                mp3_file
+                    .write_all(data)
+                    .map_err(|e| format!("MP3 flush error: {}", e))?;
             }
+            Err(e) => return Err(format!("MP3 flush error: {:?}", e)),
+            _ => {}
         }
-        48000
-    }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn ffmpeg_mix(input1: &str, input2: &str, output: &Path) -> Result<(), String> {
-        use std::process::{Command, Stdio};
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-i", input1, "-i", input2,
-                "-filter_complex",
-                "[0:a]volume=0.7[a0];[1:a]volume=1.3[a1];[a0][a1]amix=inputs=2:duration=longest:dropout_transition=2",
-                "-ar", "48000", "-ac", "2", "-b:a", "192k",
-                output.to_str().unwrap_or("output.mp3")])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().map_err(|e| format!("ffmpeg not found: {}", e))?;
-        if !status.success() { return Err("ffmpeg mix failed".to_string()); }
+        mp3_file
+            .sync_all()
+            .map_err(|e| format!("Sync failed: {}", e))?;
         Ok(())
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn ffmpeg_convert(input: &str, output: &Path) -> Result<(), String> {
-        use std::process::{Command, Stdio};
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-i", input, "-ar", "48000", "-ac", "2", "-b:a", "192k",
-                output.to_str().unwrap_or("output.mp3")])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().map_err(|e| format!("ffmpeg not found: {}", e))?;
-        if !status.success() { return Err("ffmpeg convert failed".to_string()); }
-        Ok(())
+    fn resample_linear(input: &[u8], from_sr: u32, to_sr: u32, channels: u32) -> Vec<u8> {
+        if from_sr == to_sr || input.is_empty() {
+            return input.to_vec();
+        }
+
+        let ch = channels as usize;
+        let input_samples: Vec<i16> = input
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let input_frames = input_samples.len() / ch;
+        let output_frames = (input_frames as f64 * to_sr as f64 / from_sr as f64) as usize;
+        let ratio = input_frames as f64 / output_frames as f64;
+
+        let mut output = Vec::with_capacity(output_frames * ch);
+        for i in 0..output_frames {
+            let pos = i as f64 * ratio;
+            let idx = pos as usize;
+            let frac = pos - idx as f64;
+
+            for c in 0..ch {
+                let s0 = if idx * ch + c < input_samples.len() {
+                    input_samples[idx * ch + c]
+                } else {
+                    0
+                };
+                let s1 = if (idx + 1) * ch + c < input_samples.len() {
+                    input_samples[(idx + 1) * ch + c]
+                } else {
+                    s0
+                };
+                let interpolated = s0 as f64 + (s1 as f64 - s0 as f64) * frac;
+                let s16 = (interpolated).clamp(-32768.0, 32767.0) as i16;
+                output.extend_from_slice(&s16.to_le_bytes());
+            }
+        }
+        output
     }
 
-    // ==================== cpal Fallback (mic only) ====================
+    fn mono_to_stereo(mono: &[u8]) -> Vec<u8> {
+        let mut stereo = Vec::with_capacity(mono.len() * 2);
+        for chunk in mono.chunks_exact(2) {
+            stereo.extend_from_slice(chunk);
+            stereo.extend_from_slice(chunk);
+        }
+        stereo
+    }
 
-    fn record_with_cpal(mp3_path: &Path, is_recording: &Arc<Mutex<bool>>) -> Result<(), String> {
+    fn denoise_mic_pcm(pcm: &[u8], sample_rate: u32, channels: u32) -> Vec<u8> {
+        let channel_count = channels as usize;
+        if sample_rate != 48_000 || !(1..=2).contains(&channel_count) || pcm.len() < 2 {
+            return pcm.to_vec();
+        }
+
+        let mut samples: Vec<i16> = pcm
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let frame_count = samples.len() / channel_count;
+        let full_frames = frame_count / nnnoiseless::DenoiseState::FRAME_SIZE;
+        if full_frames == 0 {
+            return pcm.to_vec();
+        }
+
+        eprintln!(
+            "[recorder] RNNoise mic denoise: {} frames, {}ch",
+            full_frames, channels
+        );
+
+        let mut denoisers: Vec<_> = (0..channel_count)
+            .map(|_| nnnoiseless::DenoiseState::new())
+            .collect();
+        let mut input = [0.0_f32; nnnoiseless::DenoiseState::FRAME_SIZE];
+        let mut output = [0.0_f32; nnnoiseless::DenoiseState::FRAME_SIZE];
+
+        for channel in 0..channel_count {
+            for frame in 0..full_frames {
+                let frame_start = frame * nnnoiseless::DenoiseState::FRAME_SIZE;
+                for i in 0..nnnoiseless::DenoiseState::FRAME_SIZE {
+                    input[i] = samples[(frame_start + i) * channel_count + channel] as f32;
+                }
+
+                denoisers[channel].process_frame(&mut output, &input);
+
+                for i in 0..nnnoiseless::DenoiseState::FRAME_SIZE {
+                    samples[(frame_start + i) * channel_count + channel] =
+                        output[i].round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                }
+            }
+        }
+
+        let mut denoised = Vec::with_capacity(pcm.len());
+        for sample in samples {
+            denoised.extend_from_slice(&sample.to_le_bytes());
+        }
+        denoised.extend_from_slice(&pcm[denoised.len()..]);
+        denoised
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn with_preferred_sample_rate(
+        config: cpal::SupportedStreamConfigRange,
+        preferred_sample_rate: u32,
+    ) -> cpal::SupportedStreamConfig {
+        let sample_rate =
+            preferred_sample_rate.clamp(config.min_sample_rate().0, config.max_sample_rate().0);
+        config.with_sample_rate(cpal::SampleRate(sample_rate))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn encode_i16_to_pcm(samples: &[i16]) -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity(samples.len() * 2);
+        for &s in samples {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    // ==================== cpal Fallback (mic only, all platforms) ====================
+
+    fn record_with_cpal(mp3_path: &Path, is_recording: &Arc<AtomicBool>) -> Result<(), String> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::SampleFormat;
 
         let host = cpal::default_host();
-        let mic = host.default_input_device()
-            .ok_or_else(|| "No input device".to_string())?;
+        let mic = host
+            .default_input_device()
+            .ok_or_else(|| "No input device found".to_string())?;
 
-        let config = mic.default_input_config()
-            .map_err(|e| format!("Config failed: {}", e))?;
+        let cfg_range = mic
+            .supported_input_configs()
+            .map_err(|e| format!("supported_input_configs: {}", e))?
+            .find(|c| c.sample_format() == SampleFormat::F32)
+            .ok_or("Mic does not support F32 format")?;
 
-        let sample_rate = config.sample_rate().0;
-        let channels = config.channels() as u32;
-        println!("cpal: {}Hz, {}ch", sample_rate, channels);
+        // Prefer 48kHz and clamp to the device range to avoid extreme rates like 384kHz.
+        let cfg = Self::with_preferred_sample_rate(cfg_range, 48000);
+        let sample_rate = cfg.sample_rate().0;
+        let channels = cfg.channels() as u32;
+
+        eprintln!(
+            "[recorder] Fallback cpal: {}Hz, {}ch, F32",
+            sample_rate, channels
+        );
 
         let mp3_file = Arc::new(Mutex::new(
-            std::fs::File::create(mp3_path)
-                .map_err(|e| format!("Create file failed: {}", e))?,
+            std::fs::File::create(mp3_path).map_err(|e| format!("Create file failed: {}", e))?,
         ));
-
-        let encoder = Self::build_encoder(sample_rate, channels)?;
+        let encoder = Self::build_cpal_encoder(sample_rate, channels)?;
         let encoder = Arc::new(Mutex::new(encoder));
         let buffer: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -388,38 +737,53 @@ impl DesktopAudioRecorder {
             let mp3_file = Arc::clone(&mp3_file);
 
             mic.build_input_stream(
-                &config.into(),
+                &cfg.config(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    Self::encode_audio(data, &buffer, &encoder, &mp3_file, channels);
+                    Self::cpal_encode_audio(data, &buffer, &encoder, &mp3_file, channels);
                 },
                 move |err| eprintln!("Stream error: {}", err),
                 None,
-            ).map_err(|e| format!("Stream failed: {}", e))?
+            )
+            .map_err(|e| format!("Stream failed: {}", e))?
         };
 
         stream.play().map_err(|e| format!("Play failed: {}", e))?;
-        println!("Recording (mic only via cpal)...");
 
-        while *is_recording.lock().unwrap() {
+        while is_recording.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         drop(stream);
-        Self::flush_encoder(&buffer, &encoder, &mp3_file)?;
-        Self::finalize_encoder(&encoder, &mp3_file)?;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        Self::cpal_flush_encoder(&buffer, &encoder, &mp3_file, channels)?;
+        Self::cpal_finalize_encoder(&encoder, &mp3_file)?;
         Self::verify_output(mp3_path)
     }
 
-    fn build_encoder(sample_rate: u32, channels: u32) -> Result<mp3lame_encoder::Encoder, String> {
+    fn build_cpal_encoder(
+        sample_rate: u32,
+        channels: u32,
+    ) -> Result<mp3lame_encoder::Encoder, String> {
+        if channels != 1 && channels != 2 {
+            return Err(format!(
+                "MP3 encoder only supports mono/stereo, got {} channels",
+                channels
+            ));
+        }
+
         let mut b = mp3lame_encoder::Builder::new().ok_or("Encoder init failed")?;
-        b.set_sample_rate(sample_rate).map_err(|e| format!("{:?}", e))?;
-        b.set_num_channels(channels as u8).map_err(|e| format!("{:?}", e))?;
-        b.set_quality(mp3lame_encoder::Quality::Best).map_err(|e| format!("{:?}", e))?;
-        b.set_brate(mp3lame_encoder::Bitrate::Kbps192).map_err(|e| format!("{:?}", e))?;
+        b.set_sample_rate(sample_rate)
+            .map_err(|e| format!("{:?}", e))?;
+        b.set_num_channels(channels as u8)
+            .map_err(|e| format!("{:?}", e))?;
+        b.set_quality(mp3lame_encoder::Quality::Best)
+            .map_err(|e| format!("{:?}", e))?;
+        b.set_brate(mp3lame_encoder::Bitrate::Kbps192)
+            .map_err(|e| format!("{:?}", e))?;
         b.build().map_err(|e| format!("{:?}", e))
     }
 
-    fn encode_audio(
+    fn cpal_encode_audio(
         data: &[f32],
         buffer: &Arc<Mutex<Vec<i16>>>,
         encoder: &Arc<Mutex<mp3lame_encoder::Encoder>>,
@@ -431,14 +795,20 @@ impl DesktopAudioRecorder {
             buf.push((s * 32767.0).clamp(-32768.0, 32767.0) as i16);
         }
         let chunk_size = 1152 * channels as usize;
-        let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); 8192];
+        let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); chunk_size * 5 / 4 + 7200];
         while buf.len() >= chunk_size {
             let chunk: Vec<i16> = buf.drain(..chunk_size).collect();
-            let input = mp3lame_encoder::InterleavedPcm(&chunk);
             if let Ok(mut enc) = encoder.lock() {
-                if let Ok(w) = enc.encode(input, &mut mp3_buf) {
+                let encoded = if channels == 1 {
+                    enc.encode(mp3lame_encoder::MonoPcm(&chunk), &mut mp3_buf)
+                } else {
+                    enc.encode(mp3lame_encoder::InterleavedPcm(&chunk), &mut mp3_buf)
+                };
+
+                if let Ok(w) = encoded {
                     if w > 0 {
-                        let data = unsafe { std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, w) };
+                        let data =
+                            unsafe { std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, w) };
                         if let Ok(mut f) = mp3_file.lock() {
                             let _ = f.write_all(data);
                         }
@@ -448,28 +818,44 @@ impl DesktopAudioRecorder {
         }
     }
 
-    fn flush_encoder(
+    fn cpal_flush_encoder(
         buffer: &Arc<Mutex<Vec<i16>>>,
         encoder: &Arc<Mutex<mp3lame_encoder::Encoder>>,
         mp3_file: &Arc<Mutex<std::fs::File>>,
+        channels: u32,
     ) -> Result<(), String> {
         let mut buf = buffer.lock().map_err(|e| e.to_string())?;
-        if buf.is_empty() { return Ok(()); }
-        let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); 8192];
-        let input = mp3lame_encoder::InterleavedPcm(&buf);
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let channel_count = channels as usize;
+        let aligned_len = buf.len() - (buf.len() % channel_count);
+        if aligned_len == 0 {
+            buf.clear();
+            return Ok(());
+        }
+        let chunk: Vec<i16> = buf.drain(..aligned_len).collect();
+        buf.clear();
+
+        let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); chunk.len() * 5 / 4 + 7200];
         let mut enc = encoder.lock().map_err(|e| e.to_string())?;
-        if let Ok(w) = enc.encode(input, &mut mp3_buf) {
+        let encoded = if channels == 1 {
+            enc.encode(mp3lame_encoder::MonoPcm(&chunk), &mut mp3_buf)
+        } else {
+            enc.encode(mp3lame_encoder::InterleavedPcm(&chunk), &mut mp3_buf)
+        };
+
+        if let Ok(w) = encoded {
             if w > 0 {
                 let data = unsafe { std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, w) };
                 let mut f = mp3_file.lock().map_err(|e| e.to_string())?;
                 f.write_all(data).map_err(|e| e.to_string())?;
             }
         }
-        buf.clear();
         Ok(())
     }
 
-    fn finalize_encoder(
+    fn cpal_finalize_encoder(
         encoder: &Arc<Mutex<mp3lame_encoder::Encoder>>,
         mp3_file: &Arc<Mutex<std::fs::File>>,
     ) -> Result<(), String> {
@@ -490,10 +876,75 @@ impl DesktopAudioRecorder {
     fn verify_output(path: &Path) -> Result<(), String> {
         if path.exists() {
             let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            println!("Saved: {} ({} bytes)", path.display(), size);
+            if size < 100 {
+                return Err(format!("Output file too small: {} bytes", size));
+            }
             Ok(())
         } else {
             Err("Output file missing".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_mp3_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("atok-ai-{}-{}.mp3", name, nanos))
+    }
+
+    fn test_pcm_samples(count: usize) -> Vec<i16> {
+        (0..count)
+            .map(|i| ((i as f32 * 0.01).sin() * 12_000.0) as i16)
+            .collect()
+    }
+
+    #[test]
+    fn encodes_odd_length_mono_pcm_without_panicking() {
+        let path = temp_mp3_path("mono-odd");
+        let samples = test_pcm_samples(48_001);
+
+        let result = DesktopAudioRecorder::encode_i16_to_mp3(&samples, &path, 48000, 1);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(std::fs::metadata(&path).unwrap().len() > 100);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn encodes_odd_length_stereo_pcm_without_panicking() {
+        let path = temp_mp3_path("stereo-odd");
+        let samples = test_pcm_samples(96_001);
+
+        let result = DesktopAudioRecorder::encode_i16_to_mp3(&samples, &path, 48000, 2);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(std::fs::metadata(&path).unwrap().len() > 100);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn denoises_48khz_mono_pcm_without_changing_length() {
+        let samples = test_pcm_samples(nnnoiseless::DenoiseState::FRAME_SIZE * 2);
+        let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+
+        let denoised = DesktopAudioRecorder::denoise_mic_pcm(&pcm, 48_000, 1);
+
+        assert_eq!(denoised.len(), pcm.len());
+    }
+
+    #[test]
+    fn skips_denoise_for_non_48khz_pcm() {
+        let samples = test_pcm_samples(nnnoiseless::DenoiseState::FRAME_SIZE * 2);
+        let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+
+        let denoised = DesktopAudioRecorder::denoise_mic_pcm(&pcm, 44_100, 1);
+
+        assert_eq!(denoised, pcm);
     }
 }

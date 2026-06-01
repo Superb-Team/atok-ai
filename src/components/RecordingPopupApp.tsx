@@ -1,8 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
-import { Pause, Square, Settings, Sparkles, Maximize2 } from 'lucide-react';
 
-// Extend CSSProperties to include Tauri-specific properties
 declare module 'react' {
   interface CSSProperties {
     WebkitAppRegion?: 'drag' | 'no-drag';
@@ -12,13 +10,12 @@ declare module 'react' {
 
 const RecordingPopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
   const [time, setTime] = useState(0);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
   const dragAreaRef = useRef<HTMLDivElement>(null);
 
-  // Format time as MM:SS:MS
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
@@ -26,417 +23,169 @@ const RecordingPopupApp: React.FC = () => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}:${ms.toString().padStart(2, '0')}`;
   };
 
-  // Get window reference in useEffect (Tauri 2.0 best practice)
   useEffect(() => {
-    async function fetchWindow() {
-      try {
-        const window = getCurrentWindow();
-        setAppWindow(window);
-        console.log('✅ Window reference stored successfully');
-      } catch (error) {
-        console.error('❌ Error getting window reference:', error);
-      }
+    try {
+      setAppWindow(getCurrentWindow());
+    } catch (err) {
+      console.error("Failed to get window reference:", err);
     }
-    fetchWindow();
   }, []);
 
-  // Setup drag functionality using JavaScript API
   useEffect(() => {
     if (!appWindow || !dragAreaRef.current) return;
 
     const dragArea = dragAreaRef.current;
-
     const handleMouseDown = async (e: MouseEvent) => {
-      // Ignore if clicking on interactive elements
       const target = e.target as HTMLElement;
-      if (target.closest('button') || target.closest('input')) {
-        return;
-      }
-
-      console.log('🎯 Mouse down on drag area, starting drag...');
-
+      if (target.closest('button') || target.closest('input')) return;
       try {
         await appWindow.startDragging();
-        console.log('✅ Drag started successfully');
-      } catch (error) {
-        console.error('❌ Error starting drag:', error);
+      } catch (err) {
+        console.error("Failed to start window drag:", err);
       }
     };
 
     dragArea.addEventListener('mousedown', handleMouseDown);
-
-    return () => {
-      dragArea.removeEventListener('mousedown', handleMouseDown);
-    };
+    return () => dragArea.removeEventListener('mousedown', handleMouseDown);
   }, [appWindow]);
 
-  // Timer effect
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (isRecording && !isPaused) {
-      interval = setInterval(() => {
-        setTime(prevTime => prevTime + 0.01);
-      }, 10);
+    if (isRecording) {
+      interval = setInterval(() => setTime(prev => prev + 0.01), 10);
     }
     return () => clearInterval(interval);
-  }, [isRecording, isPaused]);
+  }, [isRecording]);
 
-  // Dark mode detection from system
   useEffect(() => {
-    const checkDarkMode = () => {
-      const darkModeQuery = window.matchMedia('(prefers-color-scheme: dark)');
-      setIsDarkMode(darkModeQuery.matches);
-    };
-
-    checkDarkMode();
-    const darkModeQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    darkModeQuery.addEventListener('change', checkDarkMode);
-
-    return () => darkModeQuery.removeEventListener('change', checkDarkMode);
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = (e: MediaQueryListEvent) => setIsDarkMode(e.matches);
+    setIsDarkMode(mq.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
   }, []);
 
   const handleRecord = async () => {
-    if (!isRecording) {
-      try {
-        const { recordingService } = await import('@/services/recording.service');
-        const outputPath = await recordingService.startRecording();
-
-        setIsRecording(true);
-        setIsPaused(false);
-        setTime(0);
-
-        console.log('✅ Recording started:', outputPath);
-      } catch (error) {
-        console.error('❌ Failed to start recording:', error);
-        alert(`Failed to start recording: ${error}`);
-      }
-    }
-  };
-
-  const handlePause = () => {
-    if (isRecording && !isPaused) {
-      setIsPaused(true);
-      // Note: Pause functionality would need backend support
-      console.log('⏸️ Pause requested (not yet implemented in backend)');
-    }
-  };
-
-  const handleStop = async () => {
-    if (isRecording) {
-      try {
-        const { recordingService } = await import('@/services/recording.service');
-        await recordingService.stopRecording();
-
-        setIsRecording(false);
-        setIsPaused(false);
-
-        console.log('Recording stopped (use Finish to process)');
-      } catch (error) {
-        console.error('Failed to stop recording:', error);
-        alert(`Failed to stop recording: ${error}`);
-      }
+    if (isRecording || isFinalizing) return;
+    try {
+      const { recordingService } = await import('@/services/recording.service');
+      await recordingService.startRecording();
+      setIsRecording(true);
+      setTime(0);
+    } catch (err) {
+      console.error("Failed to start recording:", err);
+      alert(`Failed to start recording: ${err}`);
     }
   };
 
   const handleFinish = async () => {
-    console.log('🔴 FINISH BUTTON CLICKED - Starting close process');
+    if (isFinalizing) return;
 
     let savedPath: string | null = null;
     let noteTitle: string | null = null;
 
-    // Stop recording first if it's active
     if (isRecording) {
-      console.log('⏹️ Stopping recording before closing...');
+      setIsRecording(false);
+      setIsFinalizing(true);
       try {
         const { recordingService } = await import('@/services/recording.service');
         savedPath = await recordingService.stopRecording();
-        console.log('✅ Recording stopped successfully:', savedPath);
 
         const { generateNoteTitle } = await import('@/services/audio-processor.service');
         noteTitle = generateNoteTitle();
 
-        setIsRecording(false);
-        setIsPaused(false);
         setTime(0);
-      } catch (error) {
-        console.error('❌ Failed to stop recording:', error);
+      } catch (err) {
+        setIsRecording(true);
+        console.error("Failed to stop recording:", err);
+        alert(`Failed to stop recording: ${err}`);
+        return;
+      } finally {
+        setIsFinalizing(false);
       }
     }
 
-    // Notify main window via localStorage
     if (savedPath && noteTitle) {
+      localStorage.setItem('audio_to_process', JSON.stringify({
+        audioPath: savedPath,
+        noteTitle,
+        timestamp: Date.now()
+      }));
+
       try {
-        console.log('Notifying main window...');
-
-        // Send audio path to main window for processing
-        localStorage.setItem('audio_to_process', JSON.stringify({
-          audioPath: savedPath,
-          noteTitle,
-          timestamp: Date.now()
-        }));
-        console.log('Audio path saved to localStorage');
-
-        // Also try Tauri command as backup
-        try {
-          const { invoke } = await import('@tauri-apps/api/core');
-          await invoke('notify_recording_started', { noteTitle });
-          console.log('Tauri notification sent');
-        } catch (invokeError) {
-          console.warn('Tauri notification failed:', invokeError);
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 200));
-      } catch (notifyError) {
-        console.error('Failed to notify main window:', notifyError);
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('notify_recording_started', { noteTitle });
+      } catch {
+        // Tauri notification is optional backup
       }
-    } else {
-      console.warn('No savedPath or noteTitle, skipping notification');
+
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
 
-    // Close window
-    console.log('Closing window...');
-    const closeWindow = async () => {
-      if (appWindow) {
-        try {
-          await appWindow.close();
-          console.log('✅ Window closed successfully');
-        } catch (error) {
-          console.error('❌ Window close error:', error);
-        }
-      } else {
-        try {
-          const currentWindow = getCurrentWindow();
-          await currentWindow.close();
-          console.log('✅ Window closed successfully');
-        } catch (error) {
-          console.error('❌ Error closing window:', error);
-        }
-      }
-    };
-
-    // Close window after sending data
-    closeWindow();
-  };
-
-  const handleSettings = () => {
-    console.log('Settings clicked');
-    // TODO: Implement settings functionality
-  };
-
-  const handleSparkles = () => {
-    console.log('AI Enhancement clicked');
-    // TODO: Implement AI enhancement functionality
-  };
-
-  const handleMaximize = () => {
-    console.log('Maximize clicked');
-    // TODO: Implement maximize functionality
+    try {
+      const win = appWindow || getCurrentWindow();
+      await win.close();
+    } catch (err) {
+      console.error("Failed to close window:", err);
+    }
   };
 
   return (
-    <div
-      className="w-full h-full flex items-center justify-center"
-      style={{ background: 'transparent' }}
-    >
+    <div className="recording-popup-ui w-full h-full flex items-center justify-center" style={{ background: 'transparent' }}>
       <div
         ref={dragAreaRef}
-        data-tauri-drag-region
         className={`
-          flex items-center justify-between px-8 py-4 rounded-full
-          backdrop-blur-md border shadow-xl
-          ${isDarkMode
-            ? 'bg-black/80 border-gray-700 text-white'
-            : 'bg-white/90 border-gray-200 text-gray-900'
-          }
-          transition-all duration-300 ease-in-out
-          w-[720px] h-15 mx-4
+          grid grid-cols-[1fr_auto_1fr] items-center gap-5 px-5 rounded-full
+          backdrop-blur-xl border shadow-2xl
+          ${isDarkMode ? 'bg-neutral-950/88 border-white/12 text-white shadow-black/40' : 'bg-white/90 border-black/10 text-neutral-950 shadow-black/15'}
+          transition-all duration-300 ease-out w-[720px] h-[64px] mx-4
         `}
-        style={{
-          cursor: 'move',
-          // @ts-ignore - WebkitAppRegion is not in React types but works in Tauri
-          WebkitAppRegion: 'drag',
-        } as React.CSSProperties}
+        style={{ cursor: 'move' }}
       >
-        {/* Left Section - Record/Pause Button */}
-        <div className="flex items-center space-x-2 ml-2">
+        <div className="flex items-center justify-start">
           <button
             onClick={handleRecord}
-            className={`
-              px-1.5 py-1 rounded font-medium text-xs ml-1
-              transition-all duration-200 hover:scale-105 active:scale-95
-              ${!isRecording
-                ? (isDarkMode ? 'text-green-400 hover:text-green-300' : 'text-green-600 hover:text-green-500')
-                : (isDarkMode ? 'text-gray-400' : 'text-gray-500')
-              }
-            `}
-            style={{
-              borderRadius: '4px',
-              background: 'transparent',
-              WebkitAppRegion: 'no-drag',
-              pointerEvents: 'auto',
-              cursor: isRecording ? 'not-allowed' : 'pointer',
-              zIndex: 9999,
-              position: 'relative'
-            }}
-            disabled={isRecording}
+            disabled={isRecording || isFinalizing}
+            className={`inline-flex h-10 min-w-[132px] items-center justify-center gap-2 rounded-full px-5 text-sm font-semibold tracking-[0.1em] transition-[color,opacity,transform] duration-200 ${
+              isRecording
+                ? (isDarkMode ? 'text-red-200' : 'text-red-700')
+                : isFinalizing
+                  ? (isDarkMode ? 'text-white/35' : 'text-neutral-400')
+                  : (isDarkMode ? 'text-white/90 hover:text-emerald-300 active:scale-[0.98]' : 'text-neutral-800 hover:text-emerald-700 active:scale-[0.98]')
+            }`}
+            style={{ WebkitAppRegion: 'no-drag', pointerEvents: 'auto', cursor: isRecording || isFinalizing ? 'default' : 'pointer' }}
           >
-            RECORD
-          </button>
-
-          {isRecording && !isPaused && (
-            <button
-              onClick={handlePause}
-              className={`
-                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
-                ${isDarkMode
-                  ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
-                  : 'bg-yellow-500 hover:bg-yellow-600 text-white'
-                }
-              `}
-              style={{
-                WebkitAppRegion: 'no-drag',
-                pointerEvents: 'auto',
-                cursor: 'pointer',
-                zIndex: 9999,
-                position: 'relative'
-              }}
-              title="Pause"
-            >
-              <Pause className="w-3 h-3" />
-            </button>
-          )}
-
-          {isRecording && (
-            <button
-              onClick={handleStop}
-              className={`
-                p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
-                ${isDarkMode
-                  ? 'bg-red-600 hover:bg-red-700 text-white'
-                  : 'bg-red-500 hover:bg-red-600 text-white'
-                }
-              `}
-              style={{
-                WebkitAppRegion: 'no-drag',
-                pointerEvents: 'auto',
-                cursor: 'pointer',
-                zIndex: 9999,
-                position: 'relative'
-              }}
-              title="Stop"
-            >
-              <Square className="w-3 h-3" />
-            </button>
-          )}
-
-          <button
-            onClick={handleSettings}
-            className={`
-              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
-              ${isDarkMode
-                ? 'bg-gray-700 hover:bg-gray-600 text-white'
-                : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
-              }
-            `}
-            style={{
-              WebkitAppRegion: 'no-drag',
-              pointerEvents: 'auto',
-              cursor: 'pointer',
-              zIndex: 9999,
-              position: 'relative'
-            }}
-            title="Settings"
-          >
-            <Settings className="w-3 h-3" />
+            {isRecording && <span className="h-2 w-2 rounded-full bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.9)]" />}
+            {isRecording ? 'LIVE' : isFinalizing ? 'LOCKED' : 'RECORD'}
           </button>
         </div>
 
-        {/* Center Section - Timer */}
-        <div className={`
-          px-6 py-2 rounded-full font-mono text-lg font-semibold
-          ${isDarkMode
-            ? 'bg-gray-800/80 text-green-400'
-            : 'bg-gray-100 text-gray-900'
-          }
-          transition-all duration-300
-        `}>
-          {formatTime(time)}
+        <div className={`min-w-[172px] rounded-full px-5 py-2 text-center font-mono text-base font-semibold tracking-[0.06em] ${isDarkMode ? 'bg-white/7 text-emerald-300' : 'bg-neutral-100 text-neutral-950'} transition-all duration-300`}>
+          {isFinalizing ? (
+            <span className="inline-flex items-center justify-center gap-2 text-emerald-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+              SAVING
+            </span>
+          ) : (
+            formatTime(time)
+          )}
         </div>
 
-        {/* Right Section - Action Buttons */}
-        <div className="flex items-center space-x-2 mr-2">
+        <div className="flex items-center justify-end">
           <button
-            onClick={handleMaximize}
-            className={`
-              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
-              ${isDarkMode
-                ? 'bg-gray-700 hover:bg-gray-600 text-white'
-                : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
-              }
-            `}
-            style={{
-              WebkitAppRegion: 'no-drag',
-              pointerEvents: 'auto',
-              cursor: 'pointer',
-              zIndex: 9999,
-              position: 'relative'
-            }}
-            title="Maximize"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleFinish(); }}
+            onMouseDown={(e) => e.stopPropagation()}
+            disabled={isFinalizing}
+            className={`inline-flex h-10 min-w-[132px] items-center justify-center rounded-full px-5 text-sm font-semibold tracking-[0.1em] transition-[color,opacity,transform] duration-200 ${
+              isFinalizing
+                ? (isDarkMode ? 'text-white/35' : 'text-neutral-400')
+                : isRecording
+                  ? 'text-red-300 hover:text-red-200 active:scale-[0.98]'
+                  : (isDarkMode ? 'text-white/90 hover:text-white active:scale-[0.98]' : 'text-neutral-700 hover:text-neutral-950 active:scale-[0.98]')
+            }`}
+            style={{ pointerEvents: 'auto', cursor: isFinalizing ? 'wait' : 'pointer', WebkitAppRegion: 'no-drag' }}
           >
-            <Maximize2 className="w-3 h-3" />
-          </button>
-
-          <button
-            onClick={handleSparkles}
-            className={`
-              p-1.5 rounded-full transition-all duration-200 hover:scale-105 active:scale-95
-              ${isDarkMode
-                ? 'bg-purple-700 hover:bg-purple-600 text-white'
-                : 'bg-purple-200 hover:bg-purple-300 text-purple-700'
-              }
-            `}
-            style={{
-              WebkitAppRegion: 'no-drag',
-              pointerEvents: 'auto',
-              cursor: 'pointer',
-              zIndex: 9999,
-              position: 'relative'
-            }}
-            title="AI Enhancement"
-          >
-            <Sparkles className="w-3 h-3" />
-          </button>
-
-          <button
-            onClick={(e) => {
-              console.log('🟡 FINISH button onClick fired!', e.type);
-              e.preventDefault();
-              e.stopPropagation();
-              handleFinish();
-            }}
-            onMouseDown={(e) => {
-              console.log('🟡 FINISH button onMouseDown fired!');
-              e.stopPropagation();
-            }}
-            className={`
-              px-1.5 py-1 font-medium text-xs mr-1
-              transition-all duration-200 hover:scale-105 active:scale-95
-              ${isDarkMode
-                ? 'text-red-400 hover:text-red-300'
-                : 'text-red-600 hover:text-red-500'
-              }
-            `}
-            style={{
-              pointerEvents: 'auto',
-              cursor: 'pointer',
-              borderRadius: '4px',
-              background: 'transparent',
-              WebkitAppRegion: 'no-drag',
-              zIndex: 9999,
-              position: 'relative'
-            }}
-          >
-            FINISH
+            {isFinalizing ? 'SAVING' : isRecording ? 'FINISH' : 'CLOSE'}
           </button>
         </div>
       </div>
