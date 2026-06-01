@@ -246,7 +246,7 @@ impl DesktopAudioRecorder {
         let encode_sr = final_sr;
 
         if !sys_out.is_empty() && !mic_out.is_empty() {
-            let mut dsp = AudioDsp::new(4.0);
+            let mut dsp = AudioDsp::new(1.5);
             let mixed = dsp.process(&sys_out, &mic_out);
             if mixed.is_empty() {
                 return Err("DSP produced no output".into());
@@ -469,7 +469,7 @@ impl DesktopAudioRecorder {
         };
 
         if has_sys && has_mic {
-            let mut dsp = AudioDsp::new(4.0);
+            let mut dsp = AudioDsp::new(1.5);
             let mixed = dsp.process(&sys_data, &mic_stereo);
             Self::encode_i16_to_mp3(&mixed, mp3_path, sample_rate, channels)?;
         } else if has_sys {

@@ -1,10 +1,15 @@
 pub struct AudioDsp {
-    target_rms: f32,
+    target_sys_rms: f32,
+    target_mic_rms: f32,
     system_gain: f32,
     mic_gain: f32,
     mix_headroom: f32,
-    agc_state: f32,
+    sys_agc_state: f32,
+    mic_agc_state: f32,
     agc_smoothing: f32,
+    sys_rms_est: f32,
+    mic_rms_est: f32,
+    rms_smoothing: f32,
     noise_gate_threshold: f32,
     noise_gate_attack: f32,
     noise_gate_release: f32,
@@ -25,19 +30,22 @@ impl AudioDsp {
         let fs = 48000.0_f32;
 
         Self {
-            // Speech transcription works better with headroom than with loud mastered audio.
-            target_rms: 0.10,
+            target_sys_rms: 0.12,
+            target_mic_rms: 0.10,
             system_gain: db_to_linear(system_gain_db),
-            mic_gain: db_to_linear(-3.0),
-            mix_headroom: 0.58,
-            agc_state: 1.0,
-            agc_smoothing: 0.025,
-            // Soft expander: suppress idle-room hiss without chopping syllable tails.
+            mic_gain: db_to_linear(0.0),
+            mix_headroom: 0.62,
+            sys_agc_state: 1.0,
+            mic_agc_state: 1.0,
+            agc_smoothing: 0.020,
+            sys_rms_est: 0.0,
+            mic_rms_est: 0.0,
+            rms_smoothing: 0.05,
             noise_gate_threshold: 0.015,
             noise_gate_attack: 1.0 - (-1.0 / (0.003 * fs)).exp(),
             noise_gate_release: (-1.0 / (0.12 * fs)).exp(),
             gate_envelope: 0.0,
-            gate_floor: 0.06,
+            gate_floor: 0.10,
             mic_hp_coeff: highpass_coeff(120.0, fs),
             mic_hp_prev_in: [0.0; 2],
             mic_hp_prev_out: [0.0; 2],
@@ -58,31 +66,37 @@ impl AudioDsp {
             return Vec::new();
         }
 
+        let chunk_sys_rms = compute_rms(&sys_f[..min_len]);
+        let chunk_mic_rms = compute_rms(&mic_f[..min_len]);
+
+        self.sys_rms_est += (chunk_sys_rms - self.sys_rms_est) * self.rms_smoothing;
+        self.mic_rms_est += (chunk_mic_rms - self.mic_rms_est) * self.rms_smoothing;
+
+        if self.sys_rms_est > 0.001 {
+            let desired = self.target_sys_rms / self.sys_rms_est;
+            let clamped = desired.clamp(0.6, 2.4);
+            self.sys_agc_state += (clamped - self.sys_agc_state) * self.agc_smoothing;
+        }
+        if self.mic_rms_est > 0.001 {
+            let desired = self.target_mic_rms / self.mic_rms_est;
+            let clamped = desired.clamp(0.7, 2.0);
+            self.mic_agc_state += (clamped - self.mic_agc_state) * self.agc_smoothing;
+        }
+
         let mut mixed = Vec::with_capacity(min_len);
         for i in 0..min_len {
             let channel = i % 2;
             let mic = self.apply_mic_cleanup(mic_f[i], channel);
-            let mic = mic * self.noise_gate_gain(mic.abs()) * self.mic_gain;
-            let system = sys_f[i] * self.system_gain;
+            let mic = mic * self.noise_gate_gain(mic.abs()) * self.mic_gain * self.mic_agc_state;
+            let system = sys_f[i] * self.system_gain * self.sys_agc_state;
             let sum = (system + mic) * self.mix_headroom;
             let filtered = self.apply_mix_highpass(sum, channel);
             mixed.push(soft_limit(filtered));
         }
 
-        let rms = compute_rms(&mixed);
-        if rms > 0.001 {
-            let desired = self.target_rms / rms;
-            let clamped = desired.clamp(0.45, 1.8);
-            self.agc_state += (clamped - self.agc_state) * self.agc_smoothing;
-        }
-
-        let gain = self.agc_state;
         mixed
             .iter()
-            .map(|&s| {
-                let out = soft_limit(s * gain).clamp(-0.88, 0.88);
-                (out * 32767.0) as i16
-            })
+            .map(|&s| (s.clamp(-0.88, 0.88) * 32767.0) as i16)
             .collect()
     }
 
