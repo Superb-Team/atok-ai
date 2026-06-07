@@ -4,6 +4,7 @@ import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
 import { ArrowLeft, Star, Trash2, Edit, Calendar, Tag, Palette } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 
 class ErrorBoundary extends Component<{ fallback: React.ReactNode; children: React.ReactNode }, { hasError: boolean }> {
@@ -25,6 +26,8 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
   const [note, setNote] = useState<Note | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     loadNote();
@@ -63,22 +66,27 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
     }
   };
 
-  const handleDelete = async () => {
-    if (!note) return;
-    
-    if (!confirm("Are you sure you want to delete this note?")) {
-      return;
-    }
+  const handleDelete = () => {
+    if (!note || deleting) return;
+    setShowDeleteConfirm(true);
+  };
 
+  const confirmDelete = async () => {
+    if (!note) return;
+    setDeleting(true);
     try {
       const user = authService.getUser();
-      if (!user) return;
+      if (!user) {
+        setDeleting(false);
+        return;
+      }
 
       await noteService.deleteNote(note.id, user.id);
       onBack();
     } catch (error) {
       console.error("Failed to delete note:", error);
       setError("Failed to delete note");
+      setDeleting(false);
     }
   };
 
@@ -114,7 +122,21 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
   };
 
   return (
-    <div className="flex-1 flex flex-col h-screen overflow-hidden bg-white dark:bg-neutral-900">
+    <>
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        onOpenChange={(open) => {
+          if (!deleting) setShowDeleteConfirm(open);
+        }}
+        title="Delete note?"
+        description="Are you sure you want to delete this note? This action cannot be undone."
+        confirmText="Delete"
+        cancelText="Cancel"
+        variant="destructive"
+        loading={deleting}
+        onConfirm={confirmDelete}
+      />
+      <div className="flex-1 flex flex-col h-screen overflow-hidden bg-white dark:bg-neutral-900">
       {/* Header */}
       <div className="border-b border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900">
         <div className="max-w-4xl mx-auto px-6 py-4">
@@ -233,5 +255,6 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
         </div>
       </div>
     </div>
+    </>
   );
 }

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 
 const ExtensionsPage: React.FC = () => {
   const [connections, setConnections] = useState<McpAuthConnection[]>([]);
@@ -14,6 +15,8 @@ const ExtensionsPage: React.FC = () => {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [disconnectProvider, setDisconnectProvider] = useState<string | null>(null);
+  const [disconnecting, setDisconnecting] = useState(false);
 
   useEffect(() => {
     loadConnections();
@@ -67,15 +70,20 @@ const ExtensionsPage: React.FC = () => {
     }
   };
 
-  const handleDisconnect = async (provider: string) => {
-    if (!confirm(`Are you sure you want to disconnect ${provider}?`)) {
-      return;
-    }
+  const handleDisconnect = (provider: string) => {
+    if (disconnecting) return;
+    setDisconnectProvider(provider);
+  };
 
+  const confirmDisconnect = async () => {
+    if (!disconnectProvider) return;
+    const provider = disconnectProvider;
+    setDisconnecting(true);
     try {
       const user = authService.getUser();
       if (!user) {
         setError('User not authenticated');
+        setDisconnecting(false);
         return;
       }
 
@@ -85,6 +93,8 @@ const ExtensionsPage: React.FC = () => {
     } catch (err: any) {
       console.error(`Failed to disconnect ${provider}:`, err);
       setError(err.message || `Failed to disconnect ${provider}`);
+    } finally {
+      setDisconnecting(false);
     }
   };
 
@@ -108,7 +118,21 @@ const ExtensionsPage: React.FC = () => {
   }
 
   return (
-    <div className="flex-1 overflow-auto bg-neutral-50 dark:bg-neutral-900">
+    <>
+      <ConfirmDialog
+        open={disconnectProvider !== null}
+        onOpenChange={(open) => {
+          if (!open && !disconnecting) setDisconnectProvider(null);
+        }}
+        title={`Disconnect ${disconnectProvider ?? ''}?`}
+        description={`Are you sure you want to disconnect ${disconnectProvider ?? ''}? You'll need to re-authenticate to use it again.`}
+        confirmText="Disconnect"
+        cancelText="Cancel"
+        variant="destructive"
+        loading={disconnecting}
+        onConfirm={confirmDisconnect}
+      />
+      <div className="flex-1 overflow-auto bg-neutral-50 dark:bg-neutral-900">
       <div className="max-w-4xl mx-auto p-8">
         {/* Header */}
         <div className="mb-8">
@@ -247,6 +271,7 @@ const ExtensionsPage: React.FC = () => {
         </div>
       </div>
     </div>
+    </>
   );
 };
 

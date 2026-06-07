@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 
 declare module 'react' {
   interface CSSProperties {
@@ -14,6 +15,7 @@ const RecordingPopupApp: React.FC = () => {
   const [time, setTime] = useState(0);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const dragAreaRef = useRef<HTMLDivElement>(null);
 
   const formatTime = (seconds: number) => {
@@ -74,7 +76,7 @@ const RecordingPopupApp: React.FC = () => {
       setTime(0);
     } catch (err) {
       console.error("Failed to start recording:", err);
-      alert(`Failed to start recording: ${err}`);
+      setAlertMessage(`Failed to start recording: ${err}`);
     }
   };
 
@@ -98,7 +100,7 @@ const RecordingPopupApp: React.FC = () => {
       } catch (err) {
         setIsRecording(true);
         console.error("Failed to stop recording:", err);
-        alert(`Failed to stop recording: ${err}`);
+        setAlertMessage(`Failed to stop recording: ${err}`);
         return;
       } finally {
         setIsFinalizing(false);
@@ -131,7 +133,19 @@ const RecordingPopupApp: React.FC = () => {
   };
 
   return (
-    <div className="recording-popup-ui w-full h-full flex items-center justify-center" style={{ background: 'transparent' }}>
+    <>
+      <ConfirmDialog
+        open={alertMessage !== null}
+        onOpenChange={(open) => {
+          if (!open) setAlertMessage(null);
+        }}
+        title="Recording error"
+        description={alertMessage ?? ""}
+        confirmText="OK"
+        mode="alert"
+        variant="destructive"
+      />
+      <div className="recording-popup-ui w-full h-full flex items-center justify-center" style={{ background: 'transparent' }}>
       <div
         ref={dragAreaRef}
         className={`
@@ -190,6 +204,7 @@ const RecordingPopupApp: React.FC = () => {
         </div>
       </div>
     </div>
+    </>
   );
 };
 

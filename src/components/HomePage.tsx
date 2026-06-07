@@ -3,6 +3,7 @@ import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
 import { FileText, Star } from "lucide-react";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface HomePageProps {
   onNoteClick?: (noteId: number) => void;
@@ -13,6 +14,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [processingNotes, setProcessingNotes] = useState<Set<string>>(new Set());
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const loadRequestId = useRef(0);
 
   const loadNotes = useCallback(async () => {
@@ -159,7 +161,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       await loadNotes();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      alert(`Recording processing failed:\n${errorMessage}`);
+      setAlertMessage(`Recording processing failed:\n${errorMessage}`);
 
       setProcessingNotes(prev => {
         const next = new Set(prev);
@@ -190,7 +192,19 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-screen overflow-hidden bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-900 dark:to-neutral-950">
+    <>
+      <ConfirmDialog
+        open={alertMessage !== null}
+        onOpenChange={(open) => {
+          if (!open) setAlertMessage(null);
+        }}
+        title="Recording processing failed"
+        description={alertMessage ?? ""}
+        confirmText="OK"
+        mode="alert"
+        variant="destructive"
+      />
+      <div className="flex-1 flex flex-col h-screen overflow-hidden bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-900 dark:to-neutral-950">
       <div className="px-8 py-6 border-b border-neutral-200/50 dark:border-neutral-700/50 bg-white/80 dark:bg-neutral-900/80 backdrop-blur-sm">
         <div className="max-w-7xl mx-auto">
           <h1 className="text-3xl font-bold text-neutral-900 dark:text-white">
@@ -238,6 +252,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         </div>
       </div>
     </div>
+    </>
   );
 }
 
