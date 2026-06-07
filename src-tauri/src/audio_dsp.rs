@@ -28,7 +28,6 @@ pub struct AudioDsp {
 impl AudioDsp {
     pub fn new(system_gain_db: f32) -> Self {
         let fs = 48000.0_f32;
-
         Self {
             target_sys_rms: 0.12,
             target_mic_rms: 0.10,
@@ -165,6 +164,10 @@ fn lowpass_alpha(cutoff_hz: f32, sample_rate: f32) -> f32 {
     dt / (rc + dt)
 }
 
+fn db_to_linear(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
 fn compute_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -173,6 +176,48 @@ fn compute_rms(samples: &[f32]) -> f32 {
     (sum / samples.len() as f32).sqrt()
 }
 
-fn db_to_linear(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_does_not_panic_on_silence() {
+        let mut dsp = AudioDsp::new(4.0);
+        let sys = vec![0u8; 960 * 2 * 2];
+        let mic = vec![0u8; 480 * 2];
+        let out = dsp.process(&sys, &mic);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn process_does_not_panic_on_signal() {
+        let mut dsp = AudioDsp::new(4.0);
+        let sys: Vec<u8> = (0..960 * 2)
+            .map(|i| ((i as f32 * 0.01).sin() * 12_000.0) as i16)
+            .flat_map(|s| s.to_le_bytes().to_vec())
+            .collect();
+        let mic: Vec<u8> = (0..480)
+            .map(|i| ((i as f32 * 0.01).sin() * 8_000.0) as i16)
+            .flat_map(|s| s.to_le_bytes().to_vec())
+            .collect();
+        let out = dsp.process(&sys, &mic);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn process_output_stays_bounded() {
+        let mut dsp = AudioDsp::new(4.0);
+        let sys: Vec<u8> = (0..960 * 2)
+            .flat_map(|_| 30_000i16.to_le_bytes().to_vec())
+            .collect();
+        let mic: Vec<u8> = (0..480)
+            .flat_map(|_| 20_000i16.to_le_bytes().to_vec())
+            .collect();
+        for _ in 0..100 {
+            let out = dsp.process(&sys, &mic);
+            for &s in &out {
+                assert!(s.abs() < 30000, "output diverged: {}", s);
+            }
+        }
+    }
 }

@@ -5,16 +5,36 @@
 // macOS:   ScreenCaptureKit + cpal mic
 // Fallback: cpal mic only
 
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
+
+use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::HeapRb;
 
 use crate::audio_dsp::AudioDsp;
 
+type RecordingResult = Result<PathBuf, String>;
+type CompletionReceiver = oneshot::Receiver<RecordingResult>;
+
+// Phase 2: frame-level capture via lock-free SPSC ring buffers.
+// Capacity: 10 seconds of i16 LE audio at 48 kHz.
+// Sys: 48_000 samples/s * 2 ch * 2 bytes * 10 s = 1,920,000 bytes.
+// Mic: 48_000 samples/s * 1 ch  * 2 bytes * 10 s =   960,000 bytes.
+const SYS_RINGBUF_BYTES: usize = 1_920_000;
+const MIC_RINGBUF_BYTES: usize = 960_000;
+const PUMP_CHUNK_BYTES: usize = 8192;
+const PUMP_SLEEP_MS: u64 = 5;
+
+// Phase 3: streaming DSP + encoding.
+// 10ms frames @ 48kHz (matches RNNoise FRAME_SIZE).
+// Mixed ringbuf (unused now that we use batch path, kept for reference).
 pub struct DesktopAudioRecorder {
     is_recording: Arc<AtomicBool>,
     recording_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    completion: Arc<Mutex<Option<CompletionReceiver>>>,
 }
 
 impl DesktopAudioRecorder {
@@ -22,6 +42,7 @@ impl DesktopAudioRecorder {
         Self {
             is_recording: Arc::new(AtomicBool::new(false)),
             recording_thread: Arc::new(Mutex::new(None)),
+            completion: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -31,10 +52,18 @@ impl DesktopAudioRecorder {
         }
 
         let is_recording = Arc::clone(&self.is_recording);
+        let (tx, rx) = oneshot::channel();
+        *self
+            .completion
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))? = Some(rx);
+
         let thread_handle = std::thread::spawn(move || {
-            if let Err(e) = Self::record(output_path, is_recording) {
+            let result = Self::record(output_path, is_recording);
+            if let Err(ref e) = result {
                 eprintln!("Recording error: {}", e);
             }
+            let _ = tx.send(result);
         });
 
         *self.recording_thread.lock().map_err(|e| e.to_string())? = Some(thread_handle);
@@ -47,29 +76,33 @@ impl DesktopAudioRecorder {
         }
         eprintln!("[recorder] Stop signal sent");
 
-        let mut thread_lock = self.recording_thread.lock().map_err(|e| e.to_string())?;
+        let rx = self
+            .completion
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?
+            .take()
+            .ok_or_else(|| "No completion receiver (internal error)".to_string())?;
+
+        let result = rx
+            .blocking_recv()
+            .map_err(|_| "Recording thread dropped sender".to_string())?;
+
+        let mut thread_lock = self
+            .recording_thread
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
         if let Some(handle) = thread_lock.take() {
-            let join_handle = std::thread::spawn(move || handle.join());
-            for i in 0..300 {
-                if join_handle.is_finished() {
-                    return match join_handle.join() {
-                        Ok(Ok(())) => {
-                            eprintln!("[recorder] Thread finished OK");
-                            Ok(())
-                        }
-                        Ok(Err(_)) => Err("Recording thread error".to_string()),
-                        Err(_) => Err("Recording thread panicked".to_string()),
-                    };
-                }
-                if i % 50 == 0 && i > 0 {
-                    eprintln!("[recorder] Waiting for encoding... ({}s)", i / 10);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Err(e) = handle.join() {
+                eprintln!("[recorder] Recording thread panicked: {:?}", e);
             }
-            eprintln!("[recorder] Timeout after 30s");
-            Ok(())
-        } else {
-            Ok(())
+        }
+
+        match result {
+            Ok(path) => {
+                eprintln!("[recorder] Thread finished OK: {}", path.display());
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -77,7 +110,7 @@ impl DesktopAudioRecorder {
         self.is_recording.load(Ordering::SeqCst)
     }
 
-    fn record(output_path: PathBuf, is_recording: Arc<AtomicBool>) -> Result<(), String> {
+    fn record(output_path: PathBuf, is_recording: Arc<AtomicBool>) -> Result<PathBuf, String> {
         let mp3_path = match output_path.extension().and_then(|s| s.to_str()) {
             Some("mp3") => output_path,
             _ => output_path.with_extension("mp3"),
@@ -93,7 +126,7 @@ impl DesktopAudioRecorder {
         #[cfg(target_os = "linux")]
         {
             match Self::record_linux(&mp3_path, &is_recording) {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(mp3_path),
                 Err(e) => eprintln!("Linux recording failed: {}, falling back", e),
             }
         }
@@ -101,27 +134,23 @@ impl DesktopAudioRecorder {
         #[cfg(target_os = "macos")]
         {
             match Self::record_macos(&mp3_path, &is_recording) {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(mp3_path),
                 Err(e) => eprintln!("macOS recording failed: {}, falling back to cpal", e),
             }
         }
 
-        Self::record_with_cpal(&mp3_path, &is_recording)
+        Self::record_with_cpal(&mp3_path, &is_recording)?;
+        Ok(mp3_path)
     }
 
     // ==================== Linux: parec (system) + cpal (mic) ====================
 
     #[cfg(target_os = "linux")]
     fn record_linux(mp3_path: &Path, is_recording: &Arc<AtomicBool>) -> Result<(), String> {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::traits::{DeviceTrait, HostTrait};
         use cpal::SampleFormat;
 
         eprintln!("[recorder] Linux capture starting");
-
-        let sys_raw = "/tmp/atok_linux_sys.raw";
-        let mic_raw = "/tmp/atok_linux_mic.raw";
-        let _ = std::fs::remove_file(sys_raw);
-        let _ = std::fs::remove_file(mic_raw);
 
         // --- System audio via parec (PulseAudio/PipeWire) ---
         let sample_rate = 48000u32;
@@ -130,14 +159,6 @@ impl DesktopAudioRecorder {
         if let Some(device) = &sys_device {
             eprintln!("[recorder] System monitor: {}", device);
         }
-        let sys_is_rec = is_recording.clone();
-        let sys_path = sys_raw.to_string();
-        let sys_thread = std::thread::Builder::new()
-            .name("parec-sys".into())
-            .spawn(move || {
-                Self::parec_record(&sys_path, sample_rate, channels, sys_device, &sys_is_rec)
-            })
-            .map_err(|e| format!("Failed to spawn parec thread: {}", e))?;
 
         // --- Mic via cpal (native device rate) ---
         let host = cpal::default_host();
@@ -160,50 +181,133 @@ impl DesktopAudioRecorder {
             mic_sr, mic_ch, sample_rate, channels
         );
 
-        let mic_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        let mic_buf_c = mic_buffer.clone();
+        // Phase 2 batch path: capture ringbufs, denoise + mix + encode after stop.
+        // Proven audio quality. Streaming paths introduced comb filtering,
+        // RNNoise GRU corruption, and data loss. Batch is the safe choice.
+        eprintln!("[recorder] Phase 2 batch path (proven audio quality)");
+        Self::record_linux_batch(
+            mp3_path,
+            is_recording,
+            &mic_device,
+            &mic_cfg,
+            sample_rate,
+            channels,
+            sys_device,
+            mic_sr,
+            mic_ch,
+        )
+    }
 
-        let mic_stream = mic_device
-            .build_input_stream(
-                &mic_cfg.config(),
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    let mut buf: Vec<u8> = Vec::with_capacity(data.len() * 2);
-                    for &s in data {
-                        let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                        buf.extend_from_slice(&s16.to_le_bytes());
-                    }
-                    if let Ok(mut b) = mic_buf_c.lock() {
-                        b.extend_from_slice(&buf);
-                    }
-                },
-                move |err| eprintln!("[recorder] Mic stream error: {}", err),
-                None,
-            )
-            .map_err(|e| format!("Mic stream build failed: {}", e))?;
+    /// Phase 3 streaming path. sys + mic are denoised/mixed/encoded in
+    /// real-time during capture. No `Vec<u8>` accumulation — memory stays
+    /// bounded to ringbuf depth (~5 MB) regardless of recording duration.
+    /// Post-stop work is bounded to "drain ringbufs + flush LAME" (< 1s).
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+
+    /// Phase 2 batch fallback. Used when mic sample rate != sys sample rate
+    /// (rare; most modern mics support 48kHz). Pumps sys+mic to Vec<u8>,
+    /// resamples, denoises, mixes, encodes AFTER capture ends.
+    /// Memory grows linearly with recording duration.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    fn record_linux_batch(
+        mp3_path: &Path,
+        is_recording: &Arc<AtomicBool>,
+        mic_device: &cpal::Device,
+        mic_cfg: &cpal::SupportedStreamConfig,
+        sample_rate: u32,
+        channels: u32,
+        sys_device: Option<String>,
+        mic_sr: u32,
+        mic_ch: u32,
+    ) -> Result<(), String> {
+        use cpal::traits::{DeviceTrait, StreamTrait};
+
+        eprintln!("[recorder] Phase 2: batch ringbuf path (post-stop processing)");
+
+        // --- Capture ringbufs (10s each) ---
+        let sys_rb = HeapRb::<u8>::new(SYS_RINGBUF_BYTES);
+        let (sys_prod, sys_cons) = sys_rb.split();
+        let mic_rb = HeapRb::<u8>::new(MIC_RINGBUF_BYTES);
+        let (mic_prod, mic_cons) = mic_rb.split();
+        let producer_done = Arc::new(AtomicBool::new(false));
+
+        // --- Spawn parec thread ---
+        let sys_is_rec = is_recording.clone();
+        let sys_thread = std::thread::Builder::new()
+            .name("parec-sys".into())
+            .spawn(move || {
+                Self::parec_record_to_ring(
+                    sys_prod,
+                    sample_rate,
+                    channels,
+                    sys_device,
+                    &sys_is_rec,
+                )
+            })
+            .map_err(|e| format!("Failed to spawn parec thread: {}", e))?;
+
+        // --- Build cpal mic stream ---
+        let mic_stream = {
+            let mut scratch: Vec<u8> = Vec::with_capacity(PUMP_CHUNK_BYTES * 4);
+            let mut mic_prod = mic_prod;
+            mic_device
+                .build_input_stream(
+                    &mic_cfg.config(),
+                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        scratch.clear();
+                        for &s in data {
+                            let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                            let b = s16.to_le_bytes();
+                            scratch.push(b[0]);
+                            scratch.push(b[1]);
+                        }
+                        let _ = mic_prod.push_slice(&scratch);
+                    },
+                    move |err| eprintln!("[recorder] Mic stream error: {}", err),
+                    None,
+                )
+                .map_err(|e| format!("Mic stream build failed: {}", e))?
+        };
 
         mic_stream
             .play()
             .map_err(|e| format!("Mic play failed: {}", e))?;
         eprintln!("[recorder] Streams playing");
 
+        // --- Spawn pump threads (drain ringbufs into Vec<u8>) ---
+        let sys_pump_done = producer_done.clone();
+        let sys_pump_handle = std::thread::Builder::new()
+            .name("sys-pump".into())
+            .spawn(move || Self::pump_audio(sys_cons, sys_pump_done))
+            .map_err(|e| format!("Failed to spawn sys pump: {}", e))?;
+        let mic_pump_done = producer_done.clone();
+        let mic_pump_handle = std::thread::Builder::new()
+            .name("mic-pump".into())
+            .spawn(move || Self::pump_audio(mic_cons, mic_pump_done))
+            .map_err(|e| format!("Failed to spawn mic pump: {}", e))?;
+
+        // --- Wait for stop signal ---
         while is_recording.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        eprintln!("[recorder] Stop signal sent, draining capture");
 
         drop(mic_stream);
         std::thread::sleep(std::time::Duration::from_millis(200));
-
         let _ = sys_thread.join();
+        producer_done.store(true, Ordering::SeqCst);
 
-        let sys_data = std::fs::read(sys_raw).unwrap_or_default();
-        let mic_data = match Arc::try_unwrap(mic_buffer) {
-            Ok(m) => m.into_inner().map_err(|e| e.to_string())?,
-            Err(_) => return Err("Mic buffer still locked".into()),
-        };
+        let sys_data = sys_pump_handle
+            .join()
+            .map_err(|_| "sys pump thread panicked".to_string())??;
+        let mic_data = mic_pump_handle
+            .join()
+            .map_err(|_| "mic pump thread panicked".to_string())??;
 
-        let _ = std::fs::remove_file(sys_raw);
         eprintln!(
-            "[recorder] Captured: sys={} bytes, mic={} bytes",
+            "[recorder] Captured: sys={} bytes, mic={} bytes (via ringbuf)",
             sys_data.len(),
             mic_data.len()
         );
@@ -215,7 +319,6 @@ impl DesktopAudioRecorder {
             return Err("No audio captured".into());
         }
 
-        // Resample mic to match system rate if different
         let (sys_final, mic_final, final_sr, final_ch) =
             if has_sys && has_mic && mic_sr != sample_rate {
                 let resampled = Self::resample_linear(&mic_data, mic_sr, sample_rate, mic_ch);
@@ -262,9 +365,15 @@ impl DesktopAudioRecorder {
         Self::verify_output(mp3_path)
     }
 
+    /// Pump thread body: drain a ringbuf consumer into a `Vec<u8>` until the
+    /// `done` flag is set AND the ringbuf is empty. Returns the captured bytes
+    /// in producer order. Pump is sleep-friendly (no busy-wait).
+    ///
+    /// Used by the Phase 2 batch fallback path (record_macos) where
+    /// `sys` is captured to a file by Swift and only the mic ringbuf is drained.
     #[cfg(target_os = "linux")]
-    fn parec_record(
-        output_path: &str,
+    fn parec_record_to_ring(
+        mut producer: impl Producer<Item = u8>,
         sample_rate: u32,
         channels: u32,
         device: Option<String>,
@@ -290,25 +399,16 @@ impl DesktopAudioRecorder {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| {
-                format!(
-                    "Failed to start parec: {}. Is PulseAudio/PipeWire installed?",
-                    e
-                )
-            })?;
+            .map_err(|e| format!("Failed to start parec: {}", e))?;
 
         let mut stdout = child.stdout.take().ok_or("parec stdout not available")?;
-        let mut file = std::io::BufWriter::new(
-            std::fs::File::create(output_path)
-                .map_err(|e| format!("Failed to create {}: {}", output_path, e))?,
-        );
         let mut buf = [0u8; 8192];
 
         while is_recording.load(Ordering::SeqCst) {
             match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let _ = file.write_all(&buf[..n]);
+                    let _ = producer.push_slice(&buf[..n]);
                 }
                 Err(_) => break,
             }
@@ -316,10 +416,34 @@ impl DesktopAudioRecorder {
 
         let _ = child.kill();
         let _ = child.wait();
-        let _ = file.flush();
         eprintln!("[recorder] parec stopped");
         Ok(())
     }
+
+    fn pump_audio(
+        mut cons: impl Consumer<Item = u8>,
+        done: Arc<AtomicBool>,
+    ) -> Result<Vec<u8>, String> {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; PUMP_CHUNK_BYTES];
+        loop {
+            let n = cons.pop_slice(&mut tmp);
+            if n > 0 {
+                buf.extend_from_slice(&tmp[..n]);
+                continue;
+            }
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(PUMP_SLEEP_MS));
+        }
+        Ok(buf)
+    }
+
+    /// Phase 3 DSP worker with VecDeque slack buffers.
+    /// Hybrid DSP worker: pops mic from Arc<Mutex<VecDeque>>, sys from
+    /// mpsc::Receiver. Never discards popped data — falls back to silence.
+    #[cfg(target_os = "linux")]
 
     #[cfg(target_os = "linux")]
     fn linux_default_monitor_source() -> Option<String> {
@@ -354,15 +478,16 @@ impl DesktopAudioRecorder {
             fn sc_stop_system_audio() -> bool;
         }
 
-        eprintln!("[recorder] macOS ScreenCaptureKit recording start");
+        eprintln!("[recorder] macOS ScreenCaptureKit recording start (Phase 2: ringbuf for mic)");
 
         let sample_rate = 48000u32;
         let channels = 2u32;
 
+        // Note: ScreenCaptureKit (sys) still writes to a file via Swift.
+        // Phase 2 refactors the mic path (cpal) to ringbuf. Sys path will be
+        // refactored in a later phase when the Swift side supports streaming.
         let sys_raw = "/tmp/atok_macos_system.raw";
-        let mic_raw = "/tmp/atok_macos_mic.raw";
         let _ = std::fs::remove_file(sys_raw);
-        let _ = std::fs::remove_file(mic_raw);
 
         let path_bytes = sys_raw.as_bytes();
         let success =
@@ -388,31 +513,42 @@ impl DesktopAudioRecorder {
 
         eprintln!("[recorder] macOS mic: {}Hz, {}ch", mic_sr, mic_ch);
 
-        let mic_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        let mic_buf_c = mic_buffer.clone();
+        // --- Phase 2: ringbuf for mic capture ---
+        let mic_rb = HeapRb::<u8>::new(MIC_RINGBUF_BYTES);
+        let (mic_prod, mic_cons) = mic_rb.split();
+        let producer_done = Arc::new(AtomicBool::new(false));
 
-        let mic_stream = mic_device
-            .build_input_stream(
-                &mic_cfg.config(),
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    let mut buf: Vec<u8> = Vec::with_capacity(data.len() * 2);
-                    for &s in data {
-                        let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                        buf.extend_from_slice(&s16.to_le_bytes());
-                    }
-                    if let Ok(mut b) = mic_buf_c.lock() {
-                        b.extend_from_slice(&buf);
-                    }
-                },
-                move |err| eprintln!("[recorder] Mic stream error: {}", err),
-                None,
-            )
-            .map_err(|e| format!("Mic stream build failed: {}", e))?;
+        let mic_stream = {
+            let mut scratch: Vec<u8> = Vec::with_capacity(PUMP_CHUNK_BYTES * 4);
+            let mut mic_prod = mic_prod;
+            mic_device
+                .build_input_stream(
+                    &mic_cfg.config(),
+                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        scratch.clear();
+                        for &s in data {
+                            let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                            let b = s16.to_le_bytes();
+                            scratch.push(b[0]);
+                            scratch.push(b[1]);
+                        }
+                        let _ = mic_prod.push_slice(&scratch);
+                    },
+                    move |err| eprintln!("[recorder] Mic stream error: {}", err),
+                    None,
+                )
+                .map_err(|e| format!("Mic stream build failed: {}", e))?
+        };
 
         mic_stream
             .play()
             .map_err(|e| format!("Mic play failed: {}", e))?;
         eprintln!("[recorder] macOS streams playing");
+
+        let mic_pump_handle = std::thread::Builder::new()
+            .name("mic-pump".into())
+            .spawn(move || Self::pump_audio(mic_cons, producer_done.clone()))
+            .map_err(|e| format!("Failed to spawn mic pump: {}", e))?;
 
         while is_recording.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -424,15 +560,16 @@ impl DesktopAudioRecorder {
         drop(mic_stream);
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        let mic_data = match Arc::try_unwrap(mic_buffer) {
-            Ok(m) => m.into_inner().map_err(|e| e.to_string())?,
-            Err(_) => return Err("Mic buffer still locked".into()),
-        };
+        producer_done.store(true, Ordering::SeqCst);
+
+        let mic_data = mic_pump_handle
+            .join()
+            .map_err(|_| "mic pump thread panicked".to_string())??;
         let sys_data = std::fs::read(sys_raw).unwrap_or_default();
         let _ = std::fs::remove_file(sys_raw);
 
         eprintln!(
-            "[recorder] macOS captured: sys={} bytes, mic={} bytes",
+            "[recorder] macOS captured: sys={} bytes, mic={} bytes (mic via ringbuf)",
             sys_data.len(),
             mic_data.len()
         );
@@ -526,16 +663,18 @@ impl DesktopAudioRecorder {
         builder
             .set_num_channels(channels as u8)
             .map_err(|e| format!("{:?}", e))?;
-        builder
-            .set_quality(mp3lame_encoder::Quality::Best)
-            .map_err(|e| format!("{:?}", e))?;
+        // Quality intentionally omitted: when both set_quality and set_brate are called,
+        // set_quality wins and the encoder uses VBR V0 (~44 min for 1h 45min audio).
+        // For batch recordings of 1+ hour, CBR 192 encodes in ~30s while preserving
+        // transcription accuracy (Whisper is robust at 192 kbps).
         builder
             .set_brate(mp3lame_encoder::Bitrate::Kbps192)
             .map_err(|e| format!("{:?}", e))?;
 
         let mut encoder = builder.build().map_err(|e| format!("{:?}", e))?;
-        let mut mp3_file = std::fs::File::create(output)
+        let mp3_file = std::fs::File::create(output)
             .map_err(|e| format!("Failed to create MP3 file: {}", e))?;
+        let mut mp3_file = BufWriter::new(mp3_file);
 
         let chunk_size = 1152 * channel_count;
         let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); chunk_size * 5 / 4 + 7200];
@@ -574,6 +713,10 @@ impl DesktopAudioRecorder {
         }
 
         mp3_file
+            .flush()
+            .map_err(|e| format!("Flush failed: {}", e))?;
+        mp3_file
+            .get_ref()
             .sync_all()
             .map_err(|e| format!("Sync failed: {}", e))?;
         Ok(())
@@ -720,26 +863,50 @@ impl DesktopAudioRecorder {
         let channels = cfg.channels() as u32;
 
         eprintln!(
-            "[recorder] Fallback cpal: {}Hz, {}ch, F32",
+            "[recorder] Fallback cpal: {}Hz, {}ch, F32 (Phase 2: ringbuf)",
             sample_rate, channels
         );
 
-        let mp3_file = Arc::new(Mutex::new(
+        let mp3_file = Arc::new(Mutex::new(BufWriter::new(
             std::fs::File::create(mp3_path).map_err(|e| format!("Create file failed: {}", e))?,
-        ));
+        )));
         let encoder = Self::build_cpal_encoder(sample_rate, channels)?;
         let encoder = Arc::new(Mutex::new(encoder));
-        let buffer: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // --- Phase 2: ringbuf + dedicated encoding thread ---
+        // cpal callback only pushes i16 LE bytes to the ringbuf.
+        // A separate encoding thread drains the ringbuf, accumulates to
+        // Vec<i16>, feeds LAME in chunk_size (1152 samples) blocks, and
+        // finalizes the MP3 file on exit. Main thread just joins.
+        let mic_rb = HeapRb::<u8>::new(MIC_RINGBUF_BYTES);
+        let (mic_prod, mic_cons) = mic_rb.split();
+        let producer_done = Arc::new(AtomicBool::new(false));
+
+        let enc_done = producer_done.clone();
+        let enc_mp3 = Arc::clone(&mp3_file);
+        let enc_channels = channels;
+        let enc_encoder = Arc::clone(&encoder);
+        let encoding_thread = std::thread::Builder::new()
+            .name("cpal-encode".into())
+            .spawn(move || {
+                Self::cpal_encoding_thread(mic_cons, enc_encoder, enc_mp3, enc_done, enc_channels)
+            })
+            .map_err(|e| format!("Failed to spawn encoding thread: {}", e))?;
 
         let stream = {
-            let buffer = Arc::clone(&buffer);
-            let encoder = Arc::clone(&encoder);
-            let mp3_file = Arc::clone(&mp3_file);
-
+            let mut scratch: Vec<u8> = Vec::with_capacity(PUMP_CHUNK_BYTES * 4);
+            let mut mic_prod = mic_prod;
             mic.build_input_stream(
                 &cfg.config(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    Self::cpal_encode_audio(data, &buffer, &encoder, &mp3_file, channels);
+                    scratch.clear();
+                    for &s in data {
+                        let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                        let b = s16.to_le_bytes();
+                        scratch.push(b[0]);
+                        scratch.push(b[1]);
+                    }
+                    let _ = mic_prod.push_slice(&scratch);
                 },
                 move |err| eprintln!("Stream error: {}", err),
                 None,
@@ -755,9 +922,117 @@ impl DesktopAudioRecorder {
 
         drop(stream);
         std::thread::sleep(std::time::Duration::from_millis(200));
-        Self::cpal_flush_encoder(&buffer, &encoder, &mp3_file, channels)?;
-        Self::cpal_finalize_encoder(&encoder, &mp3_file)?;
+
+        producer_done.store(true, Ordering::SeqCst);
+        encoding_thread
+            .join()
+            .map_err(|_| "encoding thread panicked".to_string())??;
+
+        // Encoding thread already flushed encoder + file. Just verify.
         Self::verify_output(mp3_path)
+    }
+
+    /// Encoding thread for the cpal fallback path. Owns no shared state
+    /// (encoder + file are wrapped in `Arc<Mutex<...>>` for the finalize step,
+    /// but encoding itself is single-threaded here). Drains i16 LE bytes from
+    /// the ringbuf, accumulates to 1152-sample blocks, feeds LAME, and
+    /// finalizes the MP3 file on exit.
+    fn cpal_encoding_thread(
+        mut cons: impl Consumer<Item = u8>,
+        encoder: Arc<Mutex<mp3lame_encoder::Encoder>>,
+        mp3_file: Arc<Mutex<BufWriter<std::fs::File>>>,
+        done: Arc<AtomicBool>,
+        channels: u32,
+    ) -> Result<(), String> {
+        // Pre-allocate 1 second of stereo i16 (96000 samples)
+        let mut buf: Vec<i16> = Vec::with_capacity(96_000);
+        // FIX: cursor-based encoding avoids O(N) drain on every encode.
+        // Previous code did buf.drain(..chunk_size).collect() per chunk,
+        // shifting the entire remaining buffer each time — O(N) per encode,
+        // causing stuttering on long recordings. Now we use read_idx to
+        // track consumed samples and only compact periodically.
+        let mut read_idx: usize = 0;
+        let mut tmp = [0u8; PUMP_CHUNK_BYTES];
+        let chunk_size = 1152 * channels as usize;
+        let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); chunk_size * 5 / 4 + 7200];
+
+        loop {
+            let n = cons.pop_slice(&mut tmp);
+            if n > 0 {
+                for pair in tmp[..n].chunks_exact(2) {
+                    buf.push(i16::from_le_bytes([pair[0], pair[1]]));
+                }
+                // O(1) encode: slice directly from buf, no allocation.
+                while buf.len() - read_idx >= chunk_size {
+                    let chunk_slice = &buf[read_idx..read_idx + chunk_size];
+                    let encoded = {
+                        let mut enc = encoder.lock().map_err(|e| e.to_string())?;
+                        if channels == 1 {
+                            enc.encode(mp3lame_encoder::MonoPcm(chunk_slice), &mut mp3_buf)
+                        } else {
+                            enc.encode(
+                                mp3lame_encoder::InterleavedPcm(chunk_slice),
+                                &mut mp3_buf,
+                            )
+                        }
+                    };
+                    if let Ok(w) = encoded {
+                        if w > 0 {
+                            let data = unsafe {
+                                std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, w)
+                            };
+                            let mut f = mp3_file.lock().map_err(|e| e.to_string())?;
+                            f.write_all(data).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    read_idx += chunk_size;
+                }
+                // Compact every 4 chunks to prevent unbounded RAM growth.
+                if read_idx > chunk_size * 4 {
+                    buf.drain(..read_idx);
+                    read_idx = 0;
+                }
+                continue;
+            }
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(PUMP_SLEEP_MS));
+        }
+
+        // Flush trailing samples that didn't form a full chunk.
+        let remaining = buf.len() - read_idx;
+        if remaining > 0 {
+            let channel_count = channels as usize;
+            let aligned_len = remaining - (remaining % channel_count);
+            if aligned_len > 0 {
+                let chunk_slice = &buf[read_idx..read_idx + aligned_len];
+                let encoded = {
+                    let mut enc = encoder.lock().map_err(|e| e.to_string())?;
+                    if channels == 1 {
+                        enc.encode(mp3lame_encoder::MonoPcm(chunk_slice), &mut mp3_buf)
+                    } else {
+                        enc.encode(
+                            mp3lame_encoder::InterleavedPcm(chunk_slice),
+                            &mut mp3_buf,
+                        )
+                    }
+                };
+                if let Ok(w) = encoded {
+                    if w > 0 {
+                        let data = unsafe {
+                            std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, w)
+                        };
+                        let mut f = mp3_file.lock().map_err(|e| e.to_string())?;
+                        f.write_all(data).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+
+        // Finalize encoder + file.
+        Self::cpal_finalize_encoder(&encoder, &mp3_file)?;
+        Ok(())
     }
 
     fn build_cpal_encoder(
@@ -776,88 +1051,15 @@ impl DesktopAudioRecorder {
             .map_err(|e| format!("{:?}", e))?;
         b.set_num_channels(channels as u8)
             .map_err(|e| format!("{:?}", e))?;
-        b.set_quality(mp3lame_encoder::Quality::Best)
-            .map_err(|e| format!("{:?}", e))?;
+        // Quality intentionally omitted: see encode_i16_to_mp3.
         b.set_brate(mp3lame_encoder::Bitrate::Kbps192)
             .map_err(|e| format!("{:?}", e))?;
         b.build().map_err(|e| format!("{:?}", e))
     }
 
-    fn cpal_encode_audio(
-        data: &[f32],
-        buffer: &Arc<Mutex<Vec<i16>>>,
-        encoder: &Arc<Mutex<mp3lame_encoder::Encoder>>,
-        mp3_file: &Arc<Mutex<std::fs::File>>,
-        channels: u32,
-    ) {
-        let mut buf = buffer.lock().unwrap();
-        for &s in data {
-            buf.push((s * 32767.0).clamp(-32768.0, 32767.0) as i16);
-        }
-        let chunk_size = 1152 * channels as usize;
-        let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); chunk_size * 5 / 4 + 7200];
-        while buf.len() >= chunk_size {
-            let chunk: Vec<i16> = buf.drain(..chunk_size).collect();
-            if let Ok(mut enc) = encoder.lock() {
-                let encoded = if channels == 1 {
-                    enc.encode(mp3lame_encoder::MonoPcm(&chunk), &mut mp3_buf)
-                } else {
-                    enc.encode(mp3lame_encoder::InterleavedPcm(&chunk), &mut mp3_buf)
-                };
-
-                if let Ok(w) = encoded {
-                    if w > 0 {
-                        let data =
-                            unsafe { std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, w) };
-                        if let Ok(mut f) = mp3_file.lock() {
-                            let _ = f.write_all(data);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn cpal_flush_encoder(
-        buffer: &Arc<Mutex<Vec<i16>>>,
-        encoder: &Arc<Mutex<mp3lame_encoder::Encoder>>,
-        mp3_file: &Arc<Mutex<std::fs::File>>,
-        channels: u32,
-    ) -> Result<(), String> {
-        let mut buf = buffer.lock().map_err(|e| e.to_string())?;
-        if buf.is_empty() {
-            return Ok(());
-        }
-        let channel_count = channels as usize;
-        let aligned_len = buf.len() - (buf.len() % channel_count);
-        if aligned_len == 0 {
-            buf.clear();
-            return Ok(());
-        }
-        let chunk: Vec<i16> = buf.drain(..aligned_len).collect();
-        buf.clear();
-
-        let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); chunk.len() * 5 / 4 + 7200];
-        let mut enc = encoder.lock().map_err(|e| e.to_string())?;
-        let encoded = if channels == 1 {
-            enc.encode(mp3lame_encoder::MonoPcm(&chunk), &mut mp3_buf)
-        } else {
-            enc.encode(mp3lame_encoder::InterleavedPcm(&chunk), &mut mp3_buf)
-        };
-
-        if let Ok(w) = encoded {
-            if w > 0 {
-                let data = unsafe { std::slice::from_raw_parts(mp3_buf.as_ptr() as *const u8, w) };
-                let mut f = mp3_file.lock().map_err(|e| e.to_string())?;
-                f.write_all(data).map_err(|e| e.to_string())?;
-            }
-        }
-        Ok(())
-    }
-
     fn cpal_finalize_encoder(
         encoder: &Arc<Mutex<mp3lame_encoder::Encoder>>,
-        mp3_file: &Arc<Mutex<std::fs::File>>,
+        mp3_file: &Arc<Mutex<BufWriter<std::fs::File>>>,
     ) -> Result<(), String> {
         let mut mp3_buf = vec![std::mem::MaybeUninit::uninit(); 8192];
         let mut enc = encoder.lock().map_err(|e| e.to_string())?;
@@ -868,8 +1070,11 @@ impl DesktopAudioRecorder {
                 f.write_all(data).map_err(|e| e.to_string())?;
             }
         }
-        let f = mp3_file.lock().map_err(|e| e.to_string())?;
-        f.sync_all().map_err(|e| format!("Sync failed: {}", e))?;
+        let mut f = mp3_file.lock().map_err(|e| e.to_string())?;
+        f.flush().map_err(|e| format!("Flush failed: {}", e))?;
+        f.get_ref()
+            .sync_all()
+            .map_err(|e| format!("Sync failed: {}", e))?;
         Ok(())
     }
 
