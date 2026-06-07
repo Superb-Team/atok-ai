@@ -29,11 +29,13 @@ impl AudioDsp {
     pub fn new(system_gain_db: f32) -> Self {
         let fs = 48000.0_f32;
         Self {
-            target_sys_rms: 0.12,
-            target_mic_rms: 0.10,
+            target_sys_rms: 0.10,
+            target_mic_rms: 0.11,
             system_gain: db_to_linear(system_gain_db),
-            mic_gain: db_to_linear(0.0),
-            mix_headroom: 0.62,
+            // +3dB mic boost balances the lower system_gain and adds
+            // vocal presence. AGC compensates so overall loudness unchanged.
+            mic_gain: db_to_linear(3.0),
+            mix_headroom: 0.66,
             sys_agc_state: 1.0,
             mic_agc_state: 1.0,
             agc_smoothing: 0.020,
@@ -41,16 +43,24 @@ impl AudioDsp {
             mic_rms_est: 0.0,
             rms_smoothing: 0.05,
             noise_gate_threshold: 0.015,
-            noise_gate_attack: 1.0 - (-1.0 / (0.003 * fs)).exp(),
-            noise_gate_release: (-1.0 / (0.12 * fs)).exp(),
+            // 20ms attack prevents audible click/pop ("set set set") on speech onset.
+            // Was 3ms which caused 10x gain jump in 3ms.
+            noise_gate_attack: 1.0 - (-1.0 / (0.020 * fs)).exp(),
+            // 400ms release keeps gate open through brief pauses, avoiding
+            // choppy gating mid-sentence.
+            noise_gate_release: (-1.0 / (0.400 * fs)).exp(),
             gate_envelope: 0.0,
-            gate_floor: 0.10,
-            mic_hp_coeff: highpass_coeff(120.0, fs),
+            // 0.02 (was 0.10): gate floor near-silence avoids the
+            // 10%->100% gain jump that caused onset clicks.
+            gate_floor: 0.02,
+            // 100Hz (was 120Hz) preserves more vocal body (100-200Hz chest resonance).
+            mic_hp_coeff: highpass_coeff(100.0, fs),
             mic_hp_prev_in: [0.0; 2],
             mic_hp_prev_out: [0.0; 2],
             mic_lp_alpha: lowpass_alpha(8_500.0, fs),
             mic_lp_prev_out: [0.0; 2],
-            mix_hp_coeff: highpass_coeff(70.0, fs),
+            // 50Hz (was 70Hz) keeps more low-frequency body in the mix.
+            mix_hp_coeff: highpass_coeff(50.0, fs),
             mix_hp_prev_in: [0.0; 2],
             mix_hp_prev_out: [0.0; 2],
         }
