@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
-import { FileText, Star } from "lucide-react";
+import { FileText, Search, SlidersHorizontal, Star, X } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface HomePageProps {
@@ -15,7 +15,34 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   const [error, setError] = useState("");
   const [processingNotes, setProcessingNotes] = useState<Set<string>>(new Set());
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
   const loadRequestId = useRef(0);
+
+  const filteredNotes = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    return notes.filter((note) => {
+      if (note.is_archived) return false;
+
+      const matchesQuery =
+        !query ||
+        note.title.toLowerCase().includes(query) ||
+        (note.content ?? "").toLowerCase().includes(query) ||
+        (note.tags ?? []).some((tag) => tag.toLowerCase().includes(query));
+
+      const matchesFavorite = !favoriteOnly || note.is_favorite;
+
+      return matchesQuery && matchesFavorite;
+    });
+  }, [notes, searchQuery, favoriteOnly]);
+
+  const hasActiveFilters = searchQuery.trim().length > 0 || favoriteOnly;
+
+  const clearFilters = () => {
+    setSearchQuery("");
+    setFavoriteOnly(false);
+  };
 
   const loadNotes = useCallback(async () => {
     const requestId = ++loadRequestId.current;
@@ -51,58 +78,26 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     loadNotes();
 
     let unlisten1: (() => void) | undefined;
-    let unlisten2: (() => void) | undefined;
     let storageInterval: NodeJS.Timeout | undefined;
 
     let lastRecordingCheck = 0;
-    let lastNoteCheck = 0;
 
+    // The recording popup hands off the finished take via the 'audio_to_process'
+    // localStorage key; this component picks it up, transcribes + saves the note,
+    // and clears its own processing indicator inline in processAudioRecording.
     storageInterval = setInterval(() => {
       const audioData = localStorage.getItem('audio_to_process');
       if (audioData) {
         try {
-          const { audioPath, noteTitle, timestamp } = JSON.parse(audioData);
+          const { audioPath, noteTitle, language, timestamp } = JSON.parse(audioData);
           if (timestamp > lastRecordingCheck) {
             lastRecordingCheck = timestamp;
             setProcessingNotes(prev => new Set(prev).add(noteTitle));
             localStorage.removeItem('audio_to_process');
-            processAudioRecording(audioPath, noteTitle);
+            processAudioRecording(audioPath, noteTitle, language);
           }
         } catch {
           localStorage.removeItem('audio_to_process');
-        }
-      }
-
-      const recordingData = localStorage.getItem('recording_started');
-      if (recordingData) {
-        try {
-          const { noteTitle, timestamp } = JSON.parse(recordingData);
-          if (timestamp > lastRecordingCheck) {
-            lastRecordingCheck = timestamp;
-            setProcessingNotes(prev => new Set(prev).add(noteTitle));
-            localStorage.removeItem('recording_started');
-          }
-        } catch {
-          localStorage.removeItem('recording_started');
-        }
-      }
-
-      const noteCreatedData = localStorage.getItem('note_created');
-      if (noteCreatedData) {
-        try {
-          const { noteTitle, timestamp } = JSON.parse(noteCreatedData);
-          if (timestamp > lastNoteCheck) {
-            lastNoteCheck = timestamp;
-            setProcessingNotes(prev => {
-              const next = new Set(prev);
-              next.delete(noteTitle);
-              return next;
-            });
-            loadNotes();
-            localStorage.removeItem('note_created');
-          }
-        } catch {
-          localStorage.removeItem('note_created');
         }
       }
     }, 500);
@@ -117,18 +112,6 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
             setProcessingNotes(prev => new Set(prev).add(noteTitle));
           }
         });
-
-        unlisten2 = await listen('note-created', (event: any) => {
-          const noteTitle = event.payload?.noteTitle;
-          if (noteTitle) {
-            setProcessingNotes(prev => {
-              const next = new Set(prev);
-              next.delete(noteTitle);
-              return next;
-            });
-            loadNotes();
-          }
-        });
       } catch (err) {
         console.error("Failed to set up Tauri event listeners:", err);
       }
@@ -139,14 +122,13 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     return () => {
       if (storageInterval) clearInterval(storageInterval);
       unlisten1?.();
-      unlisten2?.();
     };
   }, [loadNotes]);
 
-  const processAudioRecording = async (audioPath: string, noteTitle: string) => {
+  const processAudioRecording = async (audioPath: string, noteTitle: string, language?: string) => {
     try {
       const { processAudioRecording: processAudio } = await import('@/services/audio-processor.service');
-      const result = await processAudio(audioPath, noteTitle);
+      const result = await processAudio(audioPath, noteTitle, language);
 
       if (!result.success) {
         throw new Error(result.error || 'Processing failed');
@@ -204,42 +186,94 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         mode="alert"
         variant="destructive"
       />
-      <div className="flex-1 flex flex-col h-screen overflow-hidden bg-gradient-to-br from-neutral-50 to-neutral-100 dark:from-neutral-900 dark:to-neutral-950">
-      <div className="px-8 py-6 border-b border-neutral-200/50 dark:border-neutral-700/50 bg-white/80 dark:bg-neutral-900/80 backdrop-blur-sm">
-        <div className="max-w-7xl mx-auto">
-          <h1 className="text-3xl font-bold text-neutral-900 dark:text-white">
+      <div className="flex-1 flex flex-col h-screen overflow-hidden bg-neutral-950">
+      <div className="px-8 py-6 border-b border-white/10 bg-neutral-950/85 backdrop-blur-sm">
+        <div className="max-w-7xl mx-auto flex flex-col gap-1">
+          <h1 className="text-3xl font-bold tracking-tight text-white">
             My Notes
           </h1>
+          <p className="text-sm text-neutral-400">
+            Search, organize, and revisit your workspace knowledge.
+          </p>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-8">
         <div className="max-w-7xl mx-auto">
           {error && (
-            <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-600 dark:text-red-400">
+            <div className="mb-6 rounded-2xl border border-red-500/30 bg-red-950/30 p-4 text-sm text-red-200">
               {error}
             </div>
           )}
 
-          {notes.length === 0 && processingNotes.size === 0 ? (
-            <div className="text-center py-20">
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800 mb-4">
-                <FileText className="w-8 h-8 text-neutral-400 dark:text-neutral-500" />
+          <div className="mb-6 rounded-[1.75rem] border border-white/10 bg-[#111111]/90 p-4 shadow-xl shadow-black/20 backdrop-blur">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div className="flex h-12 flex-1 items-center gap-3 rounded-2xl border border-white/[0.08] bg-black/25 px-4 transition focus-within:border-white/20 focus-within:bg-black/35 focus-within:ring-2 focus-within:ring-white/[0.06]">
+                <Search className="h-4 w-4 shrink-0 text-neutral-500" />
+                <input
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Search notes by title, content, or tag..."
+                  className="min-w-0 flex-1 bg-transparent text-sm text-neutral-100 outline-none placeholder:text-neutral-500"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    className="shrink-0 rounded-lg p-1 text-neutral-500 transition hover:bg-white/10 hover:text-neutral-200"
+                    aria-label="Clear search"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
               </div>
-              <p className="text-neutral-600 dark:text-neutral-400 text-lg font-medium">
-                No notes yet
-              </p>
-              <p className="text-neutral-500 dark:text-neutral-500 text-sm mt-2">
-                Click the + button to create your first note!
-              </p>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFavoriteOnly((value) => !value)}
+                  className={`inline-flex h-11 items-center gap-2 rounded-2xl border px-4 text-sm font-medium transition ${
+                    favoriteOnly
+                      ? "border-white/20 bg-white/[0.09] text-white"
+                      : "border-white/[0.08] bg-black/25 text-neutral-300 hover:border-white/15 hover:bg-white/[0.06]"
+                  }`}
+                >
+                  <Star className={`h-4 w-4 ${favoriteOnly ? "fill-current" : ""}`} />
+                  Favorites
+                </button>
+                {hasActiveFilters && (
+                  <button
+                    type="button"
+                    onClick={clearFilters}
+                    className="inline-flex h-11 items-center gap-2 rounded-2xl border border-white/[0.08] bg-black/25 px-4 text-sm font-medium text-neutral-400 transition hover:border-white/15 hover:bg-white/[0.06] hover:text-neutral-200"
+                  >
+                    <SlidersHorizontal className="h-4 w-4" />
+                    Clear
+                  </button>
+                )}
+              </div>
             </div>
+          </div>
+
+          {notes.length === 0 && processingNotes.size === 0 ? (
+            <EmptyState
+              title="No notes yet"
+              description="Create your first note or record audio to start building your workspace."
+            />
+          ) : filteredNotes.length === 0 && processingNotes.size === 0 ? (
+            <EmptyState
+              title="No matching notes"
+              description="Try another keyword or clear the active filters."
+              actionLabel="Clear filters"
+              onAction={clearFilters}
+            />
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
               {Array.from(processingNotes).map((noteTitle) => (
                 <LoadingNoteCard key={noteTitle} title={noteTitle} />
               ))}
 
-              {notes.map((note) => (
+              {filteredNotes.map((note) => (
                 <NoteCard
                   key={note.id}
                   note={note}
@@ -262,26 +296,59 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function EmptyState({
+  title,
+  description,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center rounded-3xl border border-white/10 bg-neutral-900/60 px-6 py-20 text-center shadow-2xl shadow-black/20">
+      <div className="mb-5 inline-flex h-16 w-16 items-center justify-center rounded-2xl border border-white/10 bg-neutral-950/80">
+        <FileText className="h-8 w-8 text-neutral-500" />
+      </div>
+      <h2 className="text-xl font-semibold text-white">{title}</h2>
+      <p className="mt-2 max-w-md text-sm leading-6 text-neutral-400">{description}</p>
+      {actionLabel && onAction && (
+        <button
+          type="button"
+          onClick={onAction}
+          className="mt-6 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-neutral-200 transition hover:bg-white/10"
+        >
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function LoadingNoteCard({ title }: { title: string }) {
   return (
-    <div className="rounded-xl p-5 shadow-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 animate-pulse">
-      <h3 className="text-lg font-semibold mb-3 text-neutral-900 dark:text-white">
-        {title}
-      </h3>
-      <div className="mb-4 min-h-[60px] space-y-2">
-        <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-          <div className="flex space-x-1">
-            <div className="w-2 h-2 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-            <div className="w-2 h-2 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-            <div className="w-2 h-2 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce"></div>
-          </div>
-          <span className="text-sm">Generating notes...</span>
+    <div className="min-h-[250px] rounded-[1.75rem] border border-white/[0.08] bg-[#151515] p-5 shadow-xl shadow-black/20 animate-pulse">
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">Processing</p>
+          <h3 className="mt-2 line-clamp-2 text-lg font-semibold text-neutral-50">{title}</h3>
         </div>
+        <div className="h-9 w-9 rounded-2xl bg-white/5" />
       </div>
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        <span className="px-2 py-0.5 bg-neutral-200 dark:bg-neutral-700 rounded text-xs text-neutral-600 dark:text-neutral-400">
-          voice-recording
-        </span>
+      <div className="space-y-2">
+        <div className="h-2 rounded-full bg-white/10" />
+        <div className="h-2 w-5/6 rounded-full bg-white/10" />
+        <div className="h-2 w-2/3 rounded-full bg-white/10" />
+      </div>
+      <div className="mt-6 flex items-center gap-2 text-sm text-neutral-500">
+        <div className="flex space-x-1">
+          <div className="h-1.5 w-1.5 rounded-full bg-neutral-500 animate-bounce [animation-delay:-0.3s]" />
+          <div className="h-1.5 w-1.5 rounded-full bg-neutral-500 animate-bounce [animation-delay:-0.15s]" />
+          <div className="h-1.5 w-1.5 rounded-full bg-neutral-500 animate-bounce" />
+        </div>
+        Generating notes
       </div>
     </div>
   );
@@ -294,74 +361,85 @@ interface NoteCardProps {
 }
 
 function NoteCard({ note, onToggleFavorite, onClick }: NoteCardProps) {
-  const backgroundColor = note.color || "#FFFFFF";
-  const isDark = note.color && note.color !== "#FFFFFF";
+  const tags = note.tags ?? [];
+  const preview = cleanNotePreview(note.content);
 
   return (
-    <div
+    <article
       onClick={onClick}
-      className="rounded-xl p-5 shadow-sm hover:shadow-lg transition-all duration-200 relative group cursor-pointer border border-neutral-200 dark:border-neutral-700 hover:scale-[1.02]"
-      style={{ backgroundColor, color: isDark ? "#1F2937" : undefined }}
+      className="group relative flex min-h-[250px] cursor-pointer flex-col overflow-hidden rounded-[1.75rem] border border-white/[0.08] bg-[#151515] p-5 shadow-xl shadow-black/20 transition-all duration-200 hover:-translate-y-0.5 hover:border-white/15 hover:bg-[#191919]"
     >
-      {note.is_favorite && (
-        <div className="absolute top-3 right-3">
-          <Star className="w-4 h-4 fill-current text-yellow-500" />
-        </div>
-      )}
 
-      <h3 className="text-lg font-semibold mb-3 pr-6 line-clamp-2" style={{ color: isDark ? "#1F2937" : undefined }}>
-        {note.title}
-      </h3>
-
-      <div className="mb-4 min-h-[60px]">
-        {note.content ? (
-          <p className="text-sm line-clamp-3 opacity-80" style={{ color: isDark ? "#374151" : undefined }}>
-            {note.content}
+      <div className="relative mb-4 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h3 className="line-clamp-2 text-lg font-semibold leading-snug text-white">
+            {note.title}
+          </h3>
+          <p className="mt-2 text-xs text-neutral-500">
+            Updated {formatNoteDate(note.updated_at)}
           </p>
-        ) : (
-          <div className="space-y-2">
-            <div className="h-2 bg-neutral-300/40 dark:bg-neutral-600/40 rounded-full w-full"></div>
-            <div className="h-2 bg-neutral-300/40 dark:bg-neutral-600/40 rounded-full w-5/6"></div>
-          </div>
-        )}
-      </div>
-
-      {note.tags && note.tags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mb-3">
-          {note.tags.slice(0, 2).map((tag, index) => (
-            <span
-              key={index}
-              className="px-2 py-0.5 bg-neutral-200/60 dark:bg-neutral-700/60 rounded text-xs"
-              style={{ color: isDark ? "#4B5563" : undefined }}
-            >
-              {tag}
-            </span>
-          ))}
-          {note.tags.length > 2 && (
-            <span className="px-2 py-0.5 text-xs opacity-60">
-              +{note.tags.length - 2}
-            </span>
-          )}
         </div>
-      )}
-
-      <div className="flex items-center justify-between pt-3 border-t border-neutral-300/40 dark:border-neutral-600/40">
-        <span className="text-xs opacity-60">
-          {new Date(note.updated_at).toLocaleDateString()}
-        </span>
         <button
           onClick={(e) => {
             e.stopPropagation();
             onToggleFavorite(note.id);
           }}
-          className="p-1.5 hover:bg-black/10 dark:hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+          className={`rounded-2xl border p-2 transition ${
+            note.is_favorite
+              ? "border-amber-400/30 bg-amber-400/10 text-amber-300"
+              : "border-white/10 bg-white/[0.03] text-neutral-500 hover:bg-white/10 hover:text-neutral-200"
+          }`}
+          aria-label={note.is_favorite ? "Remove from favorites" : "Add to favorites"}
         >
-          <Star
-            className={`w-4 h-4 ${note.is_favorite ? "fill-current text-yellow-500" : ""}`}
-            style={{ color: isDark && !note.is_favorite ? "#4B5563" : undefined }}
-          />
+          <Star className={`h-4 w-4 ${note.is_favorite ? "fill-current" : ""}`} />
         </button>
       </div>
-    </div>
+
+      <p className="relative line-clamp-4 flex-1 text-sm leading-6 text-neutral-300/85">
+        {preview || "No content yet."}
+      </p>
+
+      <div className="relative mt-5 border-t border-white/10 pt-4">
+        <div className="flex flex-wrap gap-2">
+          {tags.length > 0 ? (
+            <>
+              {tags.slice(0, 3).map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-full border border-white/10 bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-neutral-300"
+                >
+                  {tag}
+                </span>
+              ))}
+              {tags.length > 3 && (
+                <span className="rounded-full px-2.5 py-1 text-[11px] font-medium text-neutral-500">
+                  +{tags.length - 3}
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium text-neutral-500">
+              note
+            </span>
+          )}
+        </div>
+      </div>
+    </article>
   );
+}
+
+function cleanNotePreview(content?: string) {
+  return (content ?? "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\*\*/g, "")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+
+function formatNoteDate(value: string) {
+  return new Date(value).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }

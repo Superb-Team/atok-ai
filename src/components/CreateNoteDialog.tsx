@@ -69,7 +69,7 @@ export default function CreateNoteDialog({ open, onOpenChange, onNoteCreated }: 
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-[500px]">
+            <DialogContent className="sm:max-w-lg overflow-hidden">
                 <DialogHeader>
                     <DialogTitle>Create New Note</DialogTitle>
                 </DialogHeader>
@@ -102,6 +102,7 @@ export default function CreateNoteDialog({ open, onOpenChange, onNoteCreated }: 
                             placeholder="Enter note content (optional)"
                             disabled={loading}
                             rows={5}
+                            className="resize-none max-h-40"
                         />
                     </div>
 

@@ -18,6 +18,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 swift-rs = { version = "1.0", features = ["build"] }
 
+[features]
+default = ["aec"]
+aec = ["dep:webrtc-audio-processing"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
@@ -40,17 +44,24 @@ nnnoiseless = { version = "0.5", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ringbuf = "0.4"
+webrtc-audio-processing = { version = "~0.5", features = ["bundled"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = "0.15"
+# Native PulseAudio/PipeWire client so the app needs no external CLI tools
+# (parec/pactl). libpulse.so.0 is present wherever the audio server runs.
+libpulse-binding = "2"
+libpulse-simple-binding = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "0.15"

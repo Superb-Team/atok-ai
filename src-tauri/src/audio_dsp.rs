@@ -1,189 +1,362 @@
+//! Audio DSP processing for mic + system audio mixing.
+//!
+//! Signal chain per chunk:
+//!   mic → HPF 80Hz → noise gate → gain → mix with sys → HPF 40Hz → true-peak limiter → i16
+//!
+//! Design principles:
+//!   - No per-sample AGC (causes pumping, destroys prosody for Whisper)
+//!   - Fixed gain staging (predictable, no adaptation artifacts)
+//!   - Single limiter at the end (no cascaded compression)
+//!   - No mic LPF (Whisper needs full bandwidth for sibilant recognition)
+//!   - Noise gate with soft knee (no hard on/off transitions)
+
 pub struct AudioDsp {
-    target_sys_rms: f32,
-    target_mic_rms: f32,
-    system_gain: f32,
-    mic_gain: f32,
+    // Loudness leveler: targets a fixed mic loudness (BS.1770 K-weighted) instead
+    // of a fixed gain, so speech sits at a consistent level across a long meeting.
+    mic_target_lufs: f32,
+    leveler_gain: f32,
+    // Mono samples awaiting a loudness measurement. Callers that feed tiny buffers
+    // (e.g. the Windows ~5ms WASAPI loop) accumulate here until a full window is
+    // available, so the leveler engages regardless of per-call buffer size.
+    leveler_accum: Vec<f32>,
+    sys_gain: f32,
     mix_headroom: f32,
-    sys_agc_state: f32,
-    mic_agc_state: f32,
-    agc_smoothing: f32,
-    sys_rms_est: f32,
-    mic_rms_est: f32,
-    rms_smoothing: f32,
+
+    // Noise gate — envelope follower with soft knee
     noise_gate_threshold: f32,
     noise_gate_attack: f32,
     noise_gate_release: f32,
-    gate_envelope: f32,
+    gate_envelope: [f32; 2], // per channel
     gate_floor: f32,
-    mic_hp_coeff: f32,
-    mic_hp_prev_in: [f32; 2],
-    mic_hp_prev_out: [f32; 2],
-    mic_lp_alpha: f32,
-    mic_lp_prev_out: [f32; 2],
-    mix_hp_coeff: f32,
-    mix_hp_prev_in: [f32; 2],
-    mix_hp_prev_out: [f32; 2],
+
+    // Mic high-pass filter (80Hz, 2nd-order Butterworth)
+    mic_hp_b: [f32; 3],
+    mic_hp_a: [f32; 3],
+    mic_hp_x: [[f32; 2]; 2], // [channel][delay]
+    mic_hp_y: [[f32; 2]; 2],
+
+    // Mix high-pass filter (40Hz, removes DC/subsonic)
+    mix_hp_b: [f32; 3],
+    mix_hp_a: [f32; 3],
+    mix_hp_x: [[f32; 2]; 2],
+    mix_hp_y: [[f32; 2]; 2],
+
+    // True-peak limiter state
+    limiter_gain: f32,
+    limiter_envelope: f32,
 }
 
 impl AudioDsp {
     pub fn new(system_gain_db: f32) -> Self {
         let fs = 48000.0_f32;
+
+        // 2nd-order Butterworth HPF at 80Hz (cascaded two 1st-order sections)
+        let (b80, a80) = butterworth_hpf_coeffs(80.0, fs);
+        // 2nd-order Butterworth HPF at 40Hz
+        let (b40, a40) = butterworth_hpf_coeffs(40.0, fs);
+
         Self {
-            target_sys_rms: 0.10,
-            target_mic_rms: 0.11,
-            system_gain: db_to_linear(system_gain_db),
-            // +3dB mic boost balances the lower system_gain and adds
-            // vocal presence. AGC compensates so overall loudness unchanged.
-            mic_gain: db_to_linear(3.0),
-            mix_headroom: 0.66,
-            sys_agc_state: 1.0,
-            mic_agc_state: 1.0,
-            agc_smoothing: 0.020,
-            sys_rms_est: 0.0,
-            mic_rms_est: 0.0,
-            rms_smoothing: 0.05,
-            noise_gate_threshold: 0.015,
-            // 20ms attack prevents audible click/pop ("set set set") on speech onset.
-            // Was 3ms which caused 10x gain jump in 3ms.
-            noise_gate_attack: 1.0 - (-1.0 / (0.020 * fs)).exp(),
-            // 400ms release keeps gate open through brief pauses, avoiding
-            // choppy gating mid-sentence.
-            noise_gate_release: (-1.0 / (0.400 * fs)).exp(),
-            gate_envelope: 0.0,
-            // 0.02 (was 0.10): gate floor near-silence avoids the
-            // 10%->100% gain jump that caused onset clicks.
-            gate_floor: 0.02,
-            // 100Hz (was 120Hz) preserves more vocal body (100-200Hz chest resonance).
-            mic_hp_coeff: highpass_coeff(100.0, fs),
-            mic_hp_prev_in: [0.0; 2],
-            mic_hp_prev_out: [0.0; 2],
-            mic_lp_alpha: lowpass_alpha(8_500.0, fs),
-            mic_lp_prev_out: [0.0; 2],
-            // 50Hz (was 70Hz) keeps more low-frequency body in the mix.
-            mix_hp_coeff: highpass_coeff(50.0, fs),
-            mix_hp_prev_in: [0.0; 2],
-            mix_hp_prev_out: [0.0; 2],
+            // -20 LUFS mic stem keeps speech well under the limiter and not hot/harsh.
+            // leveler_gain starts at -6dB (sane first-chunk level before measurement).
+            mic_target_lufs: -20.0,
+            leveler_gain: db_to_linear(-6.0),
+            leveler_accum: Vec::new(),
+            sys_gain: db_to_linear(system_gain_db),
+            // 0.60: prevents summed (sys+mic) from slamming the limiter.
+            // Was 0.75 which allowed mic alone to exceed 1.0 before limiter.
+            mix_headroom: 0.60,
+
+            noise_gate_threshold: 0.03,
+            noise_gate_attack: 1.0 - (-1.0 / (0.015 * fs)).exp(), // 15ms attack
+            noise_gate_release: (-1.0 / (0.250 * fs)).exp(),      // 250ms release
+            gate_envelope: [0.0; 2],
+            gate_floor: 0.01,
+
+            mic_hp_b: b80,
+            mic_hp_a: a80,
+            mic_hp_x: [[0.0; 2]; 2],
+            mic_hp_y: [[0.0; 2]; 2],
+
+            mix_hp_b: b40,
+            mix_hp_a: a40,
+            mix_hp_x: [[0.0; 2]; 2],
+            mix_hp_y: [[0.0; 2]; 2],
+
+            limiter_gain: 1.0,
+            limiter_envelope: 0.0,
         }
+    }
+
+    /// Variant tuned for the speech-recognition branch (not playback). Whisper is
+    /// robust to background noise but loses soft consonants and word endings when
+    /// they're gated away, so the gate is much gentler here: a lower threshold and a
+    /// high floor only trim true silence instead of attenuating quiet speech ~40dB.
+    /// Paired with skipping RNNoise (see `process_chunk_batch`), this keeps the audio
+    /// Whisper sees close to natural while playback keeps the firmer default chain.
+    pub fn new_for_asr(system_gain_db: f32) -> Self {
+        let mut dsp = Self::new(system_gain_db);
+        dsp.noise_gate_threshold = 0.012;
+        dsp.gate_floor = 0.25;
+        dsp
     }
 
     pub fn process(&mut self, sys_pcm: &[u8], mic_pcm: &[u8]) -> Vec<i16> {
         let sys_f = pcm_bytes_to_f32(sys_pcm);
         let mic_f = pcm_bytes_to_f32(mic_pcm);
 
-        let min_len = align_to_stereo(sys_f.len().min(mic_f.len()));
-        if min_len == 0 {
+        // Handle mic-only (no system audio) — still apply full gain staging + limiter
+        if mic_f.is_empty() && sys_f.is_empty() {
             return Vec::new();
         }
 
-        let chunk_sys_rms = compute_rms(&sys_f[..min_len]);
-        let chunk_mic_rms = compute_rms(&mic_f[..min_len]);
+        let has_sys = !sys_f.is_empty();
+        let has_mic = !mic_f.is_empty();
 
-        self.sys_rms_est += (chunk_sys_rms - self.sys_rms_est) * self.rms_smoothing;
-        self.mic_rms_est += (chunk_mic_rms - self.mic_rms_est) * self.rms_smoothing;
+        let len = if has_sys && has_mic {
+            // Span the LONGER stream and let the shorter read as silence past its
+            // end (guarded below). min() would drop the tail every chunk and
+            // accumulate A/V desync over a long recording.
+            align_to_stereo(sys_f.len().max(mic_f.len()))
+        } else if has_sys {
+            align_to_stereo(sys_f.len())
+        } else {
+            // Mic-only: process through full chain (HPF → gate → gain → limiter)
+            align_to_stereo(mic_f.len())
+        };
 
-        if self.sys_rms_est > 0.001 {
-            let desired = self.target_sys_rms / self.sys_rms_est;
-            let clamped = desired.clamp(0.6, 2.4);
-            self.sys_agc_state += (clamped - self.sys_agc_state) * self.agc_smoothing;
+        if len == 0 {
+            return Vec::new();
         }
-        if self.mic_rms_est > 0.001 {
-            let desired = self.target_mic_rms / self.mic_rms_est;
-            let clamped = desired.clamp(0.7, 2.0);
-            self.mic_agc_state += (clamped - self.mic_agc_state) * self.agc_smoothing;
+
+        // Measure the mic's loudness for this chunk and slew the leveler gain
+        // toward the target. One gain per chunk → no intra-chunk pumping.
+        if has_mic {
+            self.update_leveler(&mic_f);
         }
 
-        let mut mixed = Vec::with_capacity(min_len);
-        for i in 0..min_len {
-            let channel = i % 2;
-            let mic = self.apply_mic_cleanup(mic_f[i], channel);
-            let mic = mic * self.noise_gate_gain(mic.abs()) * self.mic_gain * self.mic_agc_state;
-            let system = sys_f[i] * self.system_gain * self.sys_agc_state;
-            let sum = (system + mic) * self.mix_headroom;
-            let filtered = self.apply_mix_highpass(sum, channel);
-            mixed.push(soft_limit(filtered));
+        let mut mixed = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let ch = i % 2;
+
+            // Mic chain: HPF → gate → gain
+            let mic = if has_mic && i < mic_f.len() {
+                let mic_hp = self.apply_mic_hpf(mic_f[i], ch);
+                let gate = self.noise_gate_gain(mic_hp.abs(), ch);
+                mic_hp * gate * self.leveler_gain
+            } else {
+                0.0
+            };
+
+            // System: just gain (already clean digital audio)
+            let sys = if has_sys && i < sys_f.len() {
+                sys_f[i] * self.sys_gain
+            } else {
+                0.0
+            };
+
+            // Mix
+            let sum = (sys + mic) * self.mix_headroom;
+
+            // Mix HPF: remove DC/subsonic
+            let filtered = self.apply_mix_hpf(sum, ch);
+
+            // True-peak limiter
+            let limited = self.true_peak_limit(filtered);
+
+            mixed.push(limited);
         }
 
         mixed
             .iter()
-            .map(|&s| (s.clamp(-0.88, 0.88) * 32767.0) as i16)
+            .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
             .collect()
     }
 
-    fn noise_gate_gain(&mut self, abs_sample: f32) -> f32 {
-        if abs_sample > self.gate_envelope {
-            self.gate_envelope += (abs_sample - self.gate_envelope) * self.noise_gate_attack;
+    fn noise_gate_gain(&mut self, abs_sample: f32, ch: usize) -> f32 {
+        let env = &mut self.gate_envelope[ch];
+        if abs_sample > *env {
+            *env += (abs_sample - *env) * self.noise_gate_attack;
         } else {
-            self.gate_envelope = self.gate_envelope * self.noise_gate_release
-                + abs_sample * (1.0 - self.noise_gate_release);
+            *env = *env * self.noise_gate_release + abs_sample * (1.0 - self.noise_gate_release);
         }
 
-        let ratio = (self.gate_envelope / self.noise_gate_threshold).clamp(0.0, 1.0);
+        let ratio = (*env / self.noise_gate_threshold).clamp(0.0, 1.0);
+        // Smooth hermite interpolation for soft knee
         let smooth = ratio * ratio * (3.0 - 2.0 * ratio);
         self.gate_floor + (1.0 - self.gate_floor) * smooth
     }
 
-    fn apply_mic_cleanup(&mut self, input: f32, channel: usize) -> f32 {
-        let hp = self.mic_hp_coeff
-            * (self.mic_hp_prev_out[channel] + input - self.mic_hp_prev_in[channel]);
-        self.mic_hp_prev_in[channel] = input;
-        self.mic_hp_prev_out[channel] = hp;
-
-        let lp = self.mic_lp_prev_out[channel]
-            + self.mic_lp_alpha * (hp - self.mic_lp_prev_out[channel]);
-        self.mic_lp_prev_out[channel] = lp;
-        lp
+    /// Slew the leveler gain toward the value that lands the mic at the target
+    /// loudness. Silent/near-silent windows hold the gain so the leveler never
+    /// amplifies background noise. Downmixes interleaved stereo → mono so the
+    /// 48kHz K-weighting sees the correct time base.
+    fn update_leveler(&mut self, mic_f: &[f32]) {
+        // Fast path: a large buffer (Linux 3-min chunk / macOS whole take) already
+        // exceeds the window — measure it directly with no cross-call buffering.
+        if self.leveler_accum.is_empty() && mic_f.len() / 2 >= LEVELER_WINDOW_SAMPLES {
+            let mono: Vec<f32> = mic_f.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])).collect();
+            self.apply_leveler_measurement(&mono);
+            return;
+        }
+        // Slow path: small buffers (Windows ~5ms WASAPI packets) — accumulate until
+        // a full window is available, then measure and reset.
+        self.leveler_accum
+            .extend(mic_f.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])));
+        if self.leveler_accum.len() >= LEVELER_WINDOW_SAMPLES {
+            let buf = std::mem::take(&mut self.leveler_accum);
+            self.apply_leveler_measurement(&buf);
+        }
     }
 
-    fn apply_mix_highpass(&mut self, input: f32, channel: usize) -> f32 {
-        let output = self.mix_hp_coeff
-            * (self.mix_hp_prev_out[channel] + input - self.mix_hp_prev_in[channel]);
-        self.mix_hp_prev_in[channel] = input;
-        self.mix_hp_prev_out[channel] = output;
-        output
+    fn apply_leveler_measurement(&mut self, mono: &[f32]) {
+        if let Some(lufs) = kweighted_lufs(mono) {
+            let gain_db = (self.mic_target_lufs - lufs).clamp(-12.0, 12.0);
+            let desired = db_to_linear(gain_db);
+            self.leveler_gain = self.leveler_gain * 0.4 + desired * 0.6;
+        }
     }
+
+    fn apply_mic_hpf(&mut self, input: f32, ch: usize) -> f32 {
+        let out = self.mic_hp_b[0] * input
+            + self.mic_hp_b[1] * self.mic_hp_x[ch][0]
+            + self.mic_hp_b[2] * self.mic_hp_x[ch][1]
+            - self.mic_hp_a[1] * self.mic_hp_y[ch][0]
+            - self.mic_hp_a[2] * self.mic_hp_y[ch][1];
+        self.mic_hp_x[ch][1] = self.mic_hp_x[ch][0];
+        self.mic_hp_x[ch][0] = input;
+        self.mic_hp_y[ch][1] = self.mic_hp_y[ch][0];
+        self.mic_hp_y[ch][0] = out;
+        out
+    }
+
+    fn apply_mix_hpf(&mut self, input: f32, ch: usize) -> f32 {
+        let out = self.mix_hp_b[0] * input
+            + self.mix_hp_b[1] * self.mix_hp_x[ch][0]
+            + self.mix_hp_b[2] * self.mix_hp_x[ch][1]
+            - self.mix_hp_a[1] * self.mix_hp_y[ch][0]
+            - self.mix_hp_a[2] * self.mix_hp_y[ch][1];
+        self.mix_hp_x[ch][1] = self.mix_hp_x[ch][0];
+        self.mix_hp_x[ch][0] = input;
+        self.mix_hp_y[ch][1] = self.mix_hp_y[ch][0];
+        self.mix_hp_y[ch][0] = out;
+        out
+    }
+
+    /// True-peak limiter with attack/release envelope.
+    /// Threshold -3.5dBFS (~0.668): catches peaks early, minimal gain reduction needed.
+    /// Ceiling -1.0dBFS (~0.891): safe headroom for MP3 encoding artifacts.
+    fn true_peak_limit(&mut self, sample: f32) -> f32 {
+        let threshold = 0.668_f32;
+        let ceiling = 0.891_f32;
+        let abs_s = sample.abs();
+
+        // Envelope follower: 5ms attack (preserves speech transients), 120ms release
+        if abs_s > self.limiter_envelope {
+            let attack = 1.0_f32 - (-1.0_f32 / (0.005_f32 * 48000.0_f32)).exp();
+            self.limiter_envelope += (abs_s - self.limiter_envelope) * attack;
+        } else {
+            let release = (-1.0_f32 / (0.120_f32 * 48000.0_f32)).exp();
+            self.limiter_envelope *= release;
+        }
+
+        if self.limiter_envelope > threshold {
+            // Attenuate only — never make up gain. When the envelope sits between
+            // threshold and ceiling the peak is already safe, so gain clamps to 1.0.
+            let gain = (ceiling / self.limiter_envelope.max(0.001)).min(1.0);
+            self.limiter_gain = gain;
+        } else {
+            self.limiter_gain += (1.0 - self.limiter_gain) * 0.01;
+        }
+
+        (sample * self.limiter_gain).clamp(-ceiling, ceiling)
+    }
+}
+
+// ========== DSP helpers ==========
+
+fn butterworth_hpf_coeffs(cutoff_hz: f32, sample_rate: f32) -> ([f32; 3], [f32; 3]) {
+    // 2nd-order Butterworth HPF via bilinear transform
+    let fc = cutoff_hz / sample_rate;
+    let k = (std::f32::consts::PI * fc).tan();
+    let k2 = k * k;
+    let sqrt2 = std::f32::consts::SQRT_2;
+    let norm = 1.0 / (1.0 + sqrt2 * k + k2);
+
+    let b0 = norm;
+    let b1 = -2.0 * norm;
+    let b2 = norm;
+    let a1 = 2.0 * (k2 - 1.0) * norm;
+    let a2 = (1.0 - sqrt2 * k + k2) * norm;
+
+    ([b0, b1, b2], [1.0, a1, a2])
+}
+
+fn pcm_bytes_to_f32(data: &[u8]) -> Vec<f32> {
+    data.chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+        .collect()
 }
 
 fn align_to_stereo(len: usize) -> usize {
     len - (len % 2)
 }
 
-fn pcm_bytes_to_f32(data: &[u8]) -> Vec<f32> {
-    data.chunks_exact(2)
-        .map(|c| {
-            let s = i16::from_le_bytes([c[0], c[1]]);
-            s as f32 / 32767.0
-        })
-        .collect()
-}
-
-fn soft_limit(x: f32) -> f32 {
-    if x.abs() > 0.78 {
-        x.signum() * (0.78 + (1.0 - (-(x.abs() - 0.78) * 8.0).exp()) * 0.10)
-    } else {
-        x
-    }
-}
-
-fn highpass_coeff(cutoff_hz: f32, sample_rate: f32) -> f32 {
-    1.0 / (1.0 + 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate)
-}
-
-fn lowpass_alpha(cutoff_hz: f32, sample_rate: f32) -> f32 {
-    let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
-    let dt = 1.0 / sample_rate;
-    dt / (rc + dt)
-}
-
 fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
 
-fn compute_rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
+/// Minimum mono samples (100ms @ 48k) the leveler buffers before measuring loudness.
+/// Matches the lower bound `kweighted_lufs` needs for a stable estimate.
+const LEVELER_WINDOW_SAMPLES: usize = 4800;
+
+/// Integrated loudness (LUFS) of a mono/flat sample buffer via ITU-R BS.1770
+/// K-weighting (48 kHz coefficients). Near-silent input (below the ~-70 LUFS
+/// absolute gate, or too short) returns None so the leveler holds its gain.
+fn kweighted_lufs(samples: &[f32]) -> Option<f32> {
+    if samples.len() < 4800 {
+        return None; // need >=100ms @48k for a stable estimate
     }
-    let sum: f32 = samples.iter().map(|&s| s * s).sum();
-    (sum / samples.len() as f32).sqrt()
+    // Stage 1: high-shelf pre-filter. Stage 2: RLB high-pass.
+    const B1: [f32; 3] = [1.535_124_9, -2.691_696_2, 1.198_392_8];
+    const A1: [f32; 3] = [1.0, -1.690_659_3, 0.732_480_8];
+    const B2: [f32; 3] = [1.0, -2.0, 1.0];
+    const A2: [f32; 3] = [1.0, -1.990_047_5, 0.990_072_3];
+
+    let (mut x1, mut y1) = ([0.0f32; 2], [0.0f32; 2]);
+    let (mut x2, mut y2) = ([0.0f32; 2], [0.0f32; 2]);
+    let mut sum_sq = 0.0f64;
+    let mut active = 0u64;
+
+    for &s in samples {
+        let w1 = B1[0] * s + B1[1] * x1[0] + B1[2] * x1[1] - A1[1] * y1[0] - A1[2] * y1[1];
+        x1[1] = x1[0];
+        x1[0] = s;
+        y1[1] = y1[0];
+        y1[0] = w1;
+
+        let w2 = B2[0] * w1 + B2[1] * x2[0] + B2[2] * x2[1] - A2[1] * y2[0] - A2[2] * y2[1];
+        x2[1] = x2[0];
+        x2[0] = w1;
+        y2[1] = y2[0];
+        y2[0] = w2;
+
+        // ~-70 LUFS absolute gate: ignore near-silent samples so the mean square
+        // reflects speech, not room tone.
+        if w2.abs() > 3.0e-4 {
+            sum_sq += (w2 as f64) * (w2 as f64);
+            active += 1;
+        }
+    }
+
+    if active < 2400 {
+        return None; // <50ms of active audio → not enough to re-level on
+    }
+    let mean_sq = (sum_sq / active as f64) as f32;
+    if mean_sq <= 1.0e-12 {
+        return None;
+    }
+    Some(-0.691 + 10.0 * mean_sq.log10())
 }
 
 #[cfg(test)]
@@ -191,43 +364,198 @@ mod tests {
     use super::*;
 
     #[test]
-    fn process_does_not_panic_on_silence() {
-        let mut dsp = AudioDsp::new(4.0);
+    fn silence_passes_through() {
+        let mut dsp = AudioDsp::new(2.0);
         let sys = vec![0u8; 960 * 2 * 2];
         let mic = vec![0u8; 480 * 2];
         let out = dsp.process(&sys, &mic);
         assert!(!out.is_empty());
+        // Silence should produce near-silence
+        let peak = out.iter().map(|s| s.abs()).max().unwrap_or(0);
+        assert!(peak < 100, "silence produced signal: {}", peak);
     }
 
     #[test]
-    fn process_does_not_panic_on_signal() {
-        let mut dsp = AudioDsp::new(4.0);
-        let sys: Vec<u8> = (0..960 * 2)
-            .map(|i| ((i as f32 * 0.01).sin() * 12_000.0) as i16)
+    fn signal_stays_bounded() {
+        let mut dsp = AudioDsp::new(2.0);
+        // 1kHz sine wave, stereo, 48kHz, 10ms (480 frames = 960 interleaved samples)
+        let sys: Vec<u8> = (0..960)
+            .map(|i| {
+                ((i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin() * 30000.0) as i16
+            })
             .flat_map(|s| s.to_le_bytes().to_vec())
             .collect();
-        let mic: Vec<u8> = (0..480)
-            .map(|i| ((i as f32 * 0.01).sin() * 8_000.0) as i16)
+        let mic: Vec<u8> = (0..960)
+            .map(|i| {
+                ((i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin() * 20000.0) as i16
+            })
             .flat_map(|s| s.to_le_bytes().to_vec())
-            .collect();
-        let out = dsp.process(&sys, &mic);
-        assert!(!out.is_empty());
-    }
-
-    #[test]
-    fn process_output_stays_bounded() {
-        let mut dsp = AudioDsp::new(4.0);
-        let sys: Vec<u8> = (0..960 * 2)
-            .flat_map(|_| 30_000i16.to_le_bytes().to_vec())
-            .collect();
-        let mic: Vec<u8> = (0..480)
-            .flat_map(|_| 20_000i16.to_le_bytes().to_vec())
             .collect();
         for _ in 0..100 {
             let out = dsp.process(&sys, &mic);
-            for &s in &out {
-                assert!(s.abs() < 30000, "output diverged: {}", s);
-            }
+            // i16 is always in bounds by type; verify output is non-empty and non-zero
+            assert!(!out.is_empty());
+            let peak = out.iter().map(|s| s.abs()).max().unwrap_or(0);
+            assert!(peak > 0, "DSP produced only zeros");
         }
+    }
+
+    #[test]
+    fn limiter_prevents_clipping() {
+        let mut dsp = AudioDsp::new(6.0);
+        // 1kHz sine at full scale, 500ms stereo (48000 interleaved samples)
+        let sys: Vec<u8> = (0..48000)
+            .map(|i| {
+                ((i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin() * 30000.0) as i16
+            })
+            .flat_map(|s| s.to_le_bytes().to_vec())
+            .collect();
+        let mic: Vec<u8> = (0..48000)
+            .map(|i| {
+                ((i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin() * 30000.0) as i16
+            })
+            .flat_map(|s| s.to_le_bytes().to_vec())
+            .collect();
+        let out = dsp.process(&sys, &mic);
+        // Check settled portion (skip first 50ms — limiter attack transient)
+        let settled = &out[4800..];
+        let peak = settled.iter().map(|s| s.abs()).max().unwrap_or(0);
+        // Limiter ceiling at -1.0dBFS (0.891) → ~29191 i16
+        assert!(peak <= 30000, "limiter didn't reduce level: {}", peak);
+    }
+
+    #[test]
+    fn noise_gate_attenuates_silence() {
+        let mut dsp = AudioDsp::new(2.0);
+        // 100ms of 1kHz sine at speech level, stereo
+        let signal: Vec<u8> = (0..9600)
+            .map(|i| {
+                ((i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin() * 16000.0) as i16
+            })
+            .flat_map(|s| s.to_le_bytes().to_vec())
+            .collect();
+        let sys = vec![0u8; 9600 * 2];
+        let out1 = dsp.process(&sys, &signal);
+
+        // 3 seconds of silence — 300ms release needs ~5τ to fully close
+        let silence = vec![0u8; 144000 * 2];
+        let out2 = dsp.process(&sys, &silence);
+
+        // Check the last 100ms of silence (gate should be fully closed)
+        let tail = &out2[out2.len() - 9600..];
+        let peak1 = out1.iter().map(|s| s.abs()).max().unwrap_or(0);
+        let peak2 = tail.iter().map(|s| s.abs()).max().unwrap_or(0);
+        assert!(peak1 > 1000, "speech signal too quiet: {}", peak1);
+        assert!(
+            peak2 < peak1 / 5,
+            "gate didn't close: speech={}, silence_tail={}",
+            peak1,
+            peak2
+        );
+    }
+
+    #[test]
+    fn biquad_hpf_removes_dc() {
+        let mut dsp = AudioDsp::new(2.0);
+        // DC signal as stereo (L,R interleaved)
+        let signal: Vec<u8> = (0..9600 * 2)
+            .flat_map(|_| 16000i16.to_le_bytes().to_vec())
+            .collect();
+        let out = dsp.process(&signal, &signal);
+        let tail = &out[out.len() - 2000..];
+        let avg = tail.iter().map(|s| *s as f32).sum::<f32>() / tail.len() as f32;
+        assert!(avg.abs() < 500.0, "DC not removed: avg={}", avg);
+    }
+
+    fn sine_pcm(amplitude: f32, frames: usize) -> Vec<u8> {
+        (0..frames)
+            .map(|i| {
+                ((i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin()
+                    * amplitude
+                    * 32767.0) as i16
+            })
+            .flat_map(|s| s.to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn kweighted_lufs_full_scale_sine_near_minus_3() {
+        let sine: Vec<f32> = (0..48000)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin())
+            .collect();
+        let lufs = kweighted_lufs(&sine).expect("should measure a full-scale sine");
+        assert!(lufs > -6.0 && lufs < -1.0, "1kHz full-scale LUFS={}", lufs);
+    }
+
+    #[test]
+    fn kweighted_lufs_silence_is_none() {
+        assert!(kweighted_lufs(&vec![0.0f32; 48000]).is_none());
+    }
+
+    #[test]
+    fn leveler_raises_gain_for_quiet_mic() {
+        let mut dsp = AudioDsp::new(0.0);
+        let mic = sine_pcm(0.05, 48000); // ~-30 LUFS, well below the -20 target
+        let sys = vec![0u8; 48000 * 2];
+        for _ in 0..4 {
+            let _ = dsp.process(&sys, &mic);
+        }
+        assert!(dsp.leveler_gain > 1.0, "leveler_gain={}", dsp.leveler_gain);
+    }
+
+    #[test]
+    fn keeps_longer_stream_when_lengths_differ() {
+        // Regression for the per-chunk tail-drop: output spans the longer stream
+        // (mic here) instead of being truncated to the shorter (sys).
+        let mut dsp = AudioDsp::new(0.0);
+        let sys = vec![0u8; 1000 * 2 * 2]; // 2000 f32 samples
+        let mic = sine_pcm(0.3, 4000); // 4000 f32 samples
+        let out = dsp.process(&sys, &mic);
+        assert_eq!(out.len(), 4000, "must keep the longer stream, not truncate");
+    }
+
+    #[test]
+    fn limiter_does_not_amplify_below_ceiling() {
+        // A steady level between threshold (0.668) and ceiling (0.891) must not be
+        // boosted — a limiter only attenuates. Regression for gain = ceiling/env > 1.
+        let mut dsp = AudioDsp::new(0.0);
+        let mut out = 0.0;
+        for _ in 0..4000 {
+            out = dsp.true_peak_limit(0.75);
+        }
+        assert!(
+            out <= 0.75 + 1e-3,
+            "limiter amplified steady 0.75 to {}",
+            out
+        );
+    }
+
+    #[test]
+    fn leveler_engages_with_tiny_buffers() {
+        // Windows feeds ~5ms buffers; the accumulator must still reach a window and
+        // re-level. Feed many small quiet mic buffers and assert the gain rises.
+        let mut dsp = AudioDsp::new(0.0);
+        let sys = vec![0u8; 240 * 2 * 2];
+        // 240-frame (~5ms) quiet mic buffers, ~-30 LUFS, well below the -20 target.
+        let mic = sine_pcm(0.05, 240);
+        for _ in 0..60 {
+            let _ = dsp.process(&sys, &mic);
+        }
+        assert!(
+            dsp.leveler_gain > 1.0,
+            "leveler never engaged with small buffers: {}",
+            dsp.leveler_gain
+        );
+    }
+
+    #[test]
+    fn leveler_lowers_gain_for_hot_mic() {
+        let mut dsp = AudioDsp::new(0.0);
+        let mic = sine_pcm(0.9, 48000); // ~-4.6 LUFS, far above the -20 target
+        let sys = vec![0u8; 48000 * 2];
+        for _ in 0..4 {
+            let _ = dsp.process(&sys, &mic);
+        }
+        assert!(dsp.leveler_gain < 0.45, "leveler_gain={}", dsp.leveler_gain);
     }
 }

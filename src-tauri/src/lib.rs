@@ -3,7 +3,30 @@
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
+// ==================== Shared types ====================
+
+#[derive(serde::Serialize, Clone)]
+pub struct DeviceStatus {
+    pub mic_available: bool,
+    pub mic_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mic_display_name: Option<String>,
+    pub system_audio_available: bool,
+    pub system_audio_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_audio_display_name: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct AudioDeviceInfo {
+    pub raw_name: String,
+    pub display_name: String,
+    pub device_type: String,
+    pub is_default: bool,
+}
+
 mod agent;
+mod audio_aec;
 mod audio_dsp;
 mod auth;
 mod database;
@@ -22,6 +45,9 @@ mod windows_audio;
 #[cfg(not(windows))]
 mod audio_recorder;
 
+#[cfg(target_os = "linux")]
+mod linux_pulse;
+
 #[cfg(windows)]
 use windows_audio::DesktopAudioRecorder;
 
@@ -34,10 +60,58 @@ lazy_static::lazy_static! {
 }
 
 #[tauri::command]
-async fn start_desktop_recording(output_path: String) -> Result<String, String> {
+async fn start_desktop_recording(
+    output_path: String,
+    mic_device: Option<String>,
+    language: Option<String>,
+) -> Result<String, String> {
+    let aec = AEC_ENABLED.load(AtomicOrdering::Relaxed);
+    let language = language.unwrap_or_else(|| "id".to_string());
+
+    // Build the transcript sidecar path alongside the final MP3. The chunked
+    // Linux pipeline sends each per-chunk MP3 path on this channel, and
+    // transcribe_chunks_live uploads + stitches them while recording continues.
+    // transcribe_audio checks for this file first and returns it instantly.
+    let mp3_path = {
+        let p = std::path::PathBuf::from(&output_path);
+        if p.extension().map(|e| e == "mp3").unwrap_or(false) {
+            p
+        } else {
+            p.with_extension("mp3")
+        }
+    };
+    let transcript_path = mp3_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(format!(
+            "{}.transcript.txt",
+            mp3_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("recording")
+        ));
+
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::unbounded_channel::<std::path::PathBuf>();
+
+    let api_key = std::env::var("DEEPINFRA_API_KEY").unwrap_or_default();
+    let handle = tokio::spawn(agent::transcribe_chunks_live(
+        chunk_rx,
+        api_key,
+        transcript_path,
+        language,
+    ));
+    // Register so transcribe_audio awaits this live job instead of racing it into
+    // a redundant second full-file split (double Whisper cost / 429 risk).
+    agent::register_live_job(&mp3_path, handle);
+
     let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
     recorder
-        .start_recording(std::path::PathBuf::from(output_path))
+        .start_recording_with_aec(
+            std::path::PathBuf::from(output_path),
+            aec,
+            mic_device,
+            Some(chunk_tx),
+        )
         .map_err(|e| format!("Failed to start recording: {}", e))?;
     Ok("Desktop recording started".to_string())
 }
@@ -59,41 +133,23 @@ async fn stop_desktop_recording() -> Result<String, String> {
     }
 }
 
+// ==================== Cross-window settings (in-memory) ====================
+
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+// On by default: the mic must not re-record speaker playback. WebRTC AEC degrades
+// to near-passthrough when there is no echo, so default-on is safe.
+static AEC_ENABLED: AtomicBool = AtomicBool::new(true);
+
 #[tauri::command]
-async fn is_recording() -> Result<bool, String> {
-    let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
-    Ok(recorder.is_recording())
+async fn get_aec_enabled() -> Result<bool, String> {
+    Ok(AEC_ENABLED.load(AtomicOrdering::Relaxed))
 }
 
 #[tauri::command]
-async fn read_audio_file(path: String) -> Result<String, String> {
-    use base64::{engine::general_purpose, Engine as _};
-    use std::fs;
-
-    let bytes =
-        fs::read(&path).map_err(|e| format!("Failed to read audio file '{}': {}", path, e))?;
-
-    Ok(general_purpose::STANDARD.encode(&bytes))
-}
-
-#[tauri::command]
-async fn write_temp_audio(path: String, data: String) -> Result<(), String> {
-    use base64::{engine::general_purpose, Engine as _};
-
-    let bytes = general_purpose::STANDARD
-        .decode(&data)
-        .map_err(|e| format!("Failed to decode base64 audio data: {}", e))?;
-
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory '{}': {}", parent.display(), e))?;
-        }
-    }
-
-    std::fs::write(&path, &bytes)
-        .map_err(|e| format!("Failed to write audio file '{}': {}", path, e))?;
-
+async fn set_aec_enabled(enabled: bool) -> Result<(), String> {
+    AEC_ENABLED.store(enabled, AtomicOrdering::Relaxed);
+    eprintln!("[settings] AEC enabled = {}", enabled);
     Ok(())
 }
 
@@ -109,16 +165,18 @@ async fn notify_recording_started(app: tauri::AppHandle, note_title: String) -> 
     Ok(())
 }
 
+// ==================== Device enumeration ====================
+
 #[tauri::command]
-async fn notify_note_created(app: tauri::AppHandle, note_title: String) -> Result<(), String> {
-    app.emit(
-        "note-created",
-        serde_json::json!({
-            "noteTitle": note_title
-        }),
-    )
-    .map_err(|e| format!("Failed to emit note-created event: {}", e))?;
-    Ok(())
+async fn list_audio_input_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+    let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
+    recorder.list_input_devices()
+}
+
+#[tauri::command]
+async fn get_audio_device_status() -> Result<DeviceStatus, String> {
+    let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
+    recorder.check_device_status()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -183,35 +241,12 @@ pub fn run() {
             agent::agent_ensure_collection,
             start_desktop_recording,
             stop_desktop_recording,
-            is_recording,
-            read_audio_file,
-            write_temp_audio,
+            get_aec_enabled,
+            set_aec_enabled,
             notify_recording_started,
-            notify_note_created,
+            list_audio_input_devices,
+            get_audio_device_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-// ==================== Tests ====================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ─── read_audio_file path validation ──────────────────
-
-    #[tokio::test]
-    async fn test_read_audio_file_nonexistent_path_returns_error() {
-        let result = read_audio_file("/nonexistent/path/audio.mp3".to_string()).await;
-        assert!(result.is_err(), "should error on nonexistent file");
-        let err = result.unwrap_err();
-        assert!(err.contains("Failed to read audio file"), "error: {}", err);
-    }
-
-    #[tokio::test]
-    async fn test_read_audio_file_empty_path() {
-        let result = read_audio_file("".to_string()).await;
-        assert!(result.is_err(), "should error on empty path");
-    }
 }

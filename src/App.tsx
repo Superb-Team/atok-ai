@@ -13,6 +13,7 @@ import AIChatInterface from "@/searchAI/page";
 import { agentService } from "@/services/agent.service";
 import { authService } from "@/services/auth.service";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { invoke } from "@tauri-apps/api/core";
 import { motion } from "framer-motion";
 import {
   CheckSquare,
@@ -39,6 +40,12 @@ function App() {
     // Set dark mode by default
     document.documentElement.classList.add('dark');
     checkAuth();
+    // The backend AEC_ENABLED static defaults to ON every launch; push the user's
+    // persisted preference back into it so a disabled setting survives restarts.
+    const persistedAec = localStorage.getItem('aec_enabled');
+    if (persistedAec !== null) {
+      invoke('set_aec_enabled', { enabled: persistedAec === 'true' }).catch(() => {});
+    }
   }, []);
 
   const checkAuth = async () => {
@@ -87,14 +94,14 @@ function App() {
       const webview = new WebviewWindow('recording-popup', {
         url: 'recording-popup.html',
         title: 'Atok.ai Recording Studio',
-        width: 750,
-        height: 85,
+        width: 960,
+        height: 100,
         x: 100,
         y: 50,
-        minWidth: 700,
-        minHeight: 80,
-        maxWidth: 900,
-        maxHeight: 100,
+        minWidth: 850,
+        minHeight: 100,
+        maxWidth: 1200,
+        maxHeight: 120,
         center: false,
         resizable: false,
         decorations: false,
@@ -284,7 +291,7 @@ const Logo = () => {
       href="#"
       className="font-normal flex space-x-2 items-center text-sm text-black py-1 relative z-20"
     >
-      <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-8 flex-shrink-0 rounded-lg" />
+      <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-auto flex-shrink-0 rounded-lg object-contain" />
       <motion.span
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -302,7 +309,7 @@ const LogoIcon = () => {
       href="#"
       className="font-normal flex space-x-2 items-center text-sm text-black py-1 relative z-20"
     >
-      <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-8 flex-shrink-0 rounded-lg" />
+      <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-auto flex-shrink-0 rounded-lg object-contain" />
     </a>
   );
 };
