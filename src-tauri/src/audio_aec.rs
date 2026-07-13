@@ -46,7 +46,11 @@ impl Default for AecConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            suppression_level: EchoCancellationSuppressionLevel::Moderate,
+            // High: the primary use case is speakerphone capture (no earphones),
+            // where the mic hears the speakers directly. Moderate leaves audible
+            // residual echo there; High costs a little near-end dampening during
+            // double-talk, which Whisper tolerates far better than echo.
+            suppression_level: EchoCancellationSuppressionLevel::High,
             enable_extended_filter: true,
             enable_delay_agnostic: true,
             capture_channels: 1,
@@ -217,6 +221,33 @@ impl AudioAec {
                 .map_err(|e| format!("process_capture_frame: {:?}", e))?;
 
             output[mic_offset..mic_offset + capture_frame_size].copy_from_slice(&capture_frame);
+        }
+
+        // Partial tail: the last <10ms of a chunk falls outside the full-frame loop
+        // and would pass through with its echo intact. Zero-pad it to one frame,
+        // run it through the canceller, and keep only the real samples.
+        let mic_tail_start = frame_count * capture_frame_size;
+        let tail_len = output.len() - mic_tail_start;
+        if tail_len > 0 && tail_len < capture_frame_size {
+            let mut capture_frame = vec![0.0f32; capture_frame_size];
+            capture_frame[..tail_len].copy_from_slice(&output[mic_tail_start..]);
+
+            let mut render_frame = vec![0.0f32; render_frame_size];
+            let sys_tail_start = frame_count * render_frame_size;
+            if sys_tail_start < sys_f32.len() {
+                let sys_tail = (sys_f32.len() - sys_tail_start).min(render_frame_size);
+                render_frame[..sys_tail]
+                    .copy_from_slice(&sys_f32[sys_tail_start..sys_tail_start + sys_tail]);
+            }
+
+            processor
+                .process_render_frame(&mut render_frame)
+                .map_err(|e| format!("process_render_frame (tail): {:?}", e))?;
+            processor
+                .process_capture_frame(&mut capture_frame)
+                .map_err(|e| format!("process_capture_frame (tail): {:?}", e))?;
+
+            output[mic_tail_start..].copy_from_slice(&capture_frame[..tail_len]);
         }
 
         let mut result = Vec::with_capacity(mic_pcm.len());

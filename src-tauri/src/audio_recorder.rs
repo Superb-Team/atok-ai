@@ -136,7 +136,6 @@ impl DesktopAudioRecorder {
             match Self::record_linux(&mp3_path, &is_recording, aec_enabled, mic_name, chunk_tx) {
                 Ok(()) => return Ok(mp3_path),
                 Err(e) => eprintln!("Linux recording failed: {}, falling back", e),
-                // chunk_tx consumed by record_linux; cpal fallback has no live transcription
             }
         }
 
@@ -149,8 +148,6 @@ impl DesktopAudioRecorder {
             }
         }
 
-        // cpal fallback: chunk_tx already consumed above (Linux/macOS cfg blocks) or
-        // dropped here on other platforms. Suppress unused-variable warning.
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         drop(chunk_tx);
 
@@ -173,7 +170,6 @@ impl DesktopAudioRecorder {
 
         eprintln!("[recorder] Linux capture starting");
 
-        // --- System audio via parec (PulseAudio/PipeWire) ---
         let sample_rate = AEC_SAMPLE_RATE;
         let channels = 2u32;
         let sys_device = Self::linux_default_monitor_source();
@@ -181,18 +177,31 @@ impl DesktopAudioRecorder {
             eprintln!("[recorder] System monitor: {}", device);
         }
 
-        // --- Mic via cpal (native device rate) ---
         let host = cpal::default_host();
-        // The picker shows PulseAudio/PipeWire source names, which don't map to
-        // cpal/ALSA device names; routing the default capture through PULSE_SOURCE
-        // is how the selection actually takes effect. (parec uses an explicit
-        // --device for system audio, so it is unaffected.) PULSE_SOURCE is a
-        // process-global, so clear it when no mic is selected — otherwise a later
-        // default recording would inherit a previously-selected source.
+        // The picker shows PulseAudio source names, which don't map to cpal/ALSA
+        // device names; routing the default capture through PULSE_SOURCE is how
+        // the selection takes effect. Process-global, so clear it when unset or a
+        // later default recording inherits a previously-selected source.
         match mic_name.filter(|n| !n.is_empty()) {
             Some(name) => std::env::set_var("PULSE_SOURCE", name),
             None => std::env::remove_var("PULSE_SOURCE"),
         }
+
+        // Mic boost above 100% is a device-level digital pre-gain that clips loud
+        // speech before capture; cap it so the DSP leveler receives a clean signal.
+        let mic_source = mic_name
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+            .or_else(|| crate::linux_pulse::default_sink_and_source().map(|(_, src)| src));
+        if let Some(source) = mic_source {
+            if crate::linux_pulse::clamp_source_volume_to_norm(&source) == Some(true) {
+                eprintln!(
+                    "[recorder] Mic source '{}' volume was >100% — clamped to 100% to prevent clipping",
+                    source
+                );
+            }
+        }
+
         let mic_device = Self::resolve_input_device(&host, mic_name)?;
 
         let mic_cfg_range = mic_device
@@ -210,7 +219,6 @@ impl DesktopAudioRecorder {
             mic_sr, mic_ch, sample_rate, channels
         );
 
-        // Disk-backed chunked pipeline: progressive processing, <3s stop latency.
         eprintln!("[recorder] Chunked capture path (progressive processing)");
         Self::record_linux_chunked(
             mp3_path,
@@ -229,9 +237,8 @@ impl DesktopAudioRecorder {
 
     // ==================== Disk-Backed Chunked Pipeline ====================
 
-    /// System-audio capture via libpulse (no external `parec`). Writes the sink
-    /// monitor to chunk files with 3-minute rotation at the same sample spec, so
-    /// the captured PCM matches the previous `parec` path byte-for-byte.
+    /// System-audio capture via libpulse. Writes the sink monitor to chunk files
+    /// with 3-minute rotation at the same sample spec.
     #[cfg(target_os = "linux")]
     fn pulse_record_chunked(
         session_dir: &Path,
@@ -242,10 +249,9 @@ impl DesktopAudioRecorder {
     ) -> Result<(), String> {
         use std::io::Write;
 
-        // No default sink monitor (server unreachable / no sink) → skip system
-        // audio and let the mic-only path proceed. Opening with None would capture
-        // the default *source* (mic), not system audio. Signal the worker so it
-        // doesn't wait on a sys stream that will never arrive.
+        // No default sink monitor → skip system audio and let mic-only proceed.
+        // Opening with None would capture the default *source* (mic), not system
+        // audio. Signal the worker so it doesn't wait on a sys stream that never arrives.
         let Some(device) = device else {
             eprintln!("[recorder] No sink monitor; recording mic only");
             let _ = std::fs::File::create(session_dir.join("sys_done.flag"));
@@ -257,8 +263,10 @@ impl DesktopAudioRecorder {
         let mut capture = crate::linux_pulse::MonitorCapture::open(Some(&device))
             .map_err(|e| format!("Failed to open pulse monitor: {}", e))?;
 
-        // 8192 bytes = 2048 frames (S16LE stereo); pa_simple blocks until full
-        // (~43ms @ 48kHz), so the is_recording flag is re-checked promptly on stop.
+        // The server starts buffering at open, so this is when byte 0 of the sys
+        // stream happened. The worker uses it to time-align sys against mic.
+        Self::write_start_meta(session_dir, "sys_start.meta");
+
         let mut buf = [0u8; 8192];
         let mut bytes_written = 0u64;
         let mut chunk_idx = 0u32;
@@ -344,7 +352,10 @@ impl DesktopAudioRecorder {
             .play()
             .map_err(|e| format!("Mic play failed: {}", e))?;
 
-        // Drain thread: rotating chunk-file writer.
+        // Byte 0 of the mic stream corresponds to when the stream went live; the
+        // worker uses this to time-align mic against the sys capture for AEC.
+        Self::write_start_meta(&session_dir, "mic_start.meta");
+
         let drain_done = producer_done.clone();
         let drain_dir = session_dir.clone();
         let drain = std::thread::Builder::new()
@@ -459,10 +470,8 @@ impl DesktopAudioRecorder {
         if !sys_out.is_empty() && !mic_out.is_empty() {
             dsp.process(&sys_out, &mic_out)
         } else if !sys_out.is_empty() {
-            // System-only: route through DSP for HPF + limiter
             dsp.process(&sys_out, &[])
         } else if !mic_out.is_empty() {
-            // Mic-only: route through DSP for full gain staging + limiter
             dsp.process(&[], &mic_out)
         } else {
             Vec::new()
@@ -483,7 +492,6 @@ impl DesktopAudioRecorder {
             return pcm.to_vec();
         }
 
-        // Resize denoiser pool if channel count changed (shouldn't, but safe).
         while denoisers.len() < channel_count {
             denoisers.push(nnnoiseless::DenoiseState::new());
         }
@@ -525,6 +533,95 @@ impl DesktopAudioRecorder {
         denoised
     }
 
+    /// Write the current wall-clock (epoch millis) to `session_dir/{name}` so the
+    /// chunk worker can compute the start offset between the sys and mic streams.
+    fn write_start_meta(session_dir: &Path, name: &str) {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let _ = std::fs::write(session_dir.join(name), millis.to_string());
+    }
+
+    /// Bytes of S16LE PCM covering `offset_ms` at the given format, rounded down
+    /// to a whole interleaved frame so a trim never splits a sample pair.
+    fn trim_lead_bytes(offset_ms: u64, sample_rate: u32, channels: u32) -> usize {
+        let frames = (offset_ms * sample_rate as u64) / 1000;
+        frames as usize * channels as usize * 2
+    }
+
+    /// Compute how many leading bytes to drop from the sys and mic streams so both
+    /// start at the same wall-clock instant. The captures start in separate threads
+    /// at different times (pulse open vs cpal play, often 100ms+ apart); pairing
+    /// chunk files by index without this trim feeds the AEC misaligned
+    /// render/capture, which its delay-agnostic filter converges on slowly or not
+    /// at all — echo then leaks into the transcript. Returns (sys_trim, mic_trim).
+    fn compute_start_trims(
+        session_dir: &Path,
+        sample_rate: u32,
+        channels: u32,
+        mic_sr: u32,
+        mic_ch: u32,
+        done: &Arc<AtomicBool>,
+    ) -> (usize, usize) {
+        let sys_meta = session_dir.join("sys_start.meta");
+        let mic_meta = session_dir.join("mic_start.meta");
+        let sys_flag = session_dir.join("sys_done.flag");
+        let mic_flag = session_dir.join("mic_done.flag");
+
+        // The metas appear within milliseconds of the capture threads starting;
+        // the done-flags cover streams that never start (e.g. mic-only sessions).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let sys_known = sys_meta.exists() || sys_flag.exists();
+            let mic_known = mic_meta.exists() || mic_flag.exists();
+            if (sys_known && mic_known) || done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let read_millis = |p: &Path| -> Option<u64> {
+            std::fs::read_to_string(p).ok()?.trim().parse().ok()
+        };
+        let (Some(sys_start), Some(mic_start)) = (read_millis(&sys_meta), read_millis(&mic_meta))
+        else {
+            return (0, 0);
+        };
+
+        if sys_start < mic_start {
+            let offset = mic_start - sys_start;
+            let trim = Self::trim_lead_bytes(offset, sample_rate, channels);
+            eprintln!(
+                "[Worker] Stream alignment: sys leads by {}ms, trimming {} bytes from sys",
+                offset, trim
+            );
+            (trim, 0)
+        } else {
+            let offset = sys_start - mic_start;
+            let trim = Self::trim_lead_bytes(offset, mic_sr, mic_ch);
+            eprintln!(
+                "[Worker] Stream alignment: mic leads by {}ms, trimming {} bytes from mic",
+                offset, trim
+            );
+            (0, trim)
+        }
+    }
+
+    /// Fraction of S16LE samples at (or within a hair of) full scale. A clipped
+    /// capture cannot be repaired downstream, so the worker only reports it.
+    fn clipped_ratio(pcm: &[u8]) -> f32 {
+        let total = pcm.len() / 2;
+        if total == 0 {
+            return 0.0;
+        }
+        let clipped = pcm
+            .chunks_exact(2)
+            .filter(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs() >= 32700)
+            .count();
+        clipped as f32 / total as f32
+    }
+
     /// Background worker: reads chunk files, processes, encodes to MP3.
     /// DSP state (HPF filters, noise gate, limiter) and RNNoise DenoiseState are
     /// persistent across chunks to avoid settling transients at chunk boundaries.
@@ -560,7 +657,6 @@ impl DesktopAudioRecorder {
                 return;
             }
         };
-        // Persistent DSP + denoise state across all chunks in this session.
         let mut dsp = AudioDsp::new(0.0);
         let mut denoisers: Vec<Box<nnnoiseless::DenoiseState>> = Vec::new();
 
@@ -573,20 +669,21 @@ impl DesktopAudioRecorder {
         let overlap_samples =
             sample_rate as usize * channels as usize * LIVE_OVERLAP_SECONDS as usize;
 
-        // Stem for live-transcription chunk filenames, computed once.
         let live_stem: String = mp3_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("recording")
             .to_string();
 
-        // AEC: persistent across all chunks for continuous echo path estimation.
         let mut aec = AudioAec::new(AecConfig {
             enabled: aec_enabled,
             capture_channels: mic_ch as i32,
             render_channels: channels as i32,
             ..Default::default()
         });
+
+        let (mut pending_sys_trim, mut pending_mic_trim) =
+            Self::compute_start_trims(&session_dir, sample_rate, channels, mic_sr, mic_ch, &done);
 
         loop {
             let sys_path = session_dir.join(format!("sys_{:04}.raw", current_chunk));
@@ -607,9 +704,28 @@ impl DesktopAudioRecorder {
 
                 eprintln!("[Worker] Processing chunk {:04}...", current_chunk);
 
-                let sys_data = std::fs::read(&sys_path).unwrap_or_default();
+                let mut sys_data = std::fs::read(&sys_path).unwrap_or_default();
                 let mut mic_data = std::fs::read(&mic_path).unwrap_or_default();
                 let mut effective_mic_sr = mic_sr;
+
+                if pending_sys_trim > 0 && !sys_data.is_empty() {
+                    let n = pending_sys_trim.min(sys_data.len());
+                    sys_data.drain(..n);
+                    pending_sys_trim -= n;
+                }
+                if pending_mic_trim > 0 && !mic_data.is_empty() {
+                    let n = pending_mic_trim.min(mic_data.len());
+                    mic_data.drain(..n);
+                    pending_mic_trim -= n;
+                }
+
+                let clip = Self::clipped_ratio(&mic_data);
+                if clip > 0.005 {
+                    eprintln!(
+                        "[Worker] Mic input clipping ({:.1}% of samples) — audio may sound distorted; lower the mic input gain",
+                        clip * 100.0
+                    );
+                }
 
                 if !sys_data.is_empty() && !mic_data.is_empty() && effective_mic_sr != sample_rate {
                     mic_data =
@@ -623,7 +739,6 @@ impl DesktopAudioRecorder {
                     mic_data = aec.process_chunk(&sys_data, &mic_data);
                 }
 
-                // Playback branch: full chain (RNNoise + firm gate), one continuous MP3.
                 let mixed = Self::process_chunk_batch(
                     &sys_data,
                     &mic_data,
@@ -640,10 +755,9 @@ impl DesktopAudioRecorder {
                     Self::encode_chunk_to_mp3(&mut encoder, &mut mp3_file, &mixed, channels);
                 }
 
-                // Live ASR branch: gentle chain (no RNNoise, soft gate) + a prepended
-                // overlap of the previous chunk so the 3-min cut never drops a word.
-                // Written to temp (not session_dir, removed at stop while uploads may
-                // still read; not recordings dir, to stay clean); the live pipeline
+                // Live ASR: prepend the previous chunk's overlap tail so the 3-min
+                // cut never drops a word. Written to temp (not session_dir, which
+                // may be removed while uploads still read); the live pipeline
                 // deletes each file once uploaded.
                 if let Some(tx) = &chunk_tx {
                     let mixed_asr = Self::process_chunk_batch(
@@ -701,7 +815,6 @@ impl DesktopAudioRecorder {
             }
         }
 
-        // Flush encoder
         Self::finalize_chunk_encoder(&mut encoder, &mut mp3_file);
         eprintln!(
             "[Worker] All chunks processed. MP3 ready: {}",
@@ -789,7 +902,6 @@ impl DesktopAudioRecorder {
         aec_enabled: bool,
         chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
     ) -> Result<(), String> {
-        // Create session directory
         let session_id = format!(
             "session_{}",
             std::time::SystemTime::now()
@@ -807,7 +919,6 @@ impl DesktopAudioRecorder {
 
         let producer_done = Arc::new(AtomicBool::new(false));
 
-        // Spawn parec thread (sys → files)
         let sys_is_rec = is_recording.clone();
         let sys_dir = session_dir.clone();
         let sys_thread = std::thread::Builder::new()
@@ -817,7 +928,6 @@ impl DesktopAudioRecorder {
             })
             .map_err(|e| format!("Failed to spawn pulse capture: {}", e))?;
 
-        // Spawn mic capture thread (mic → files)
         let mic_is_rec = is_recording.clone();
         let mic_dir = session_dir.clone();
         let mic_device_c = mic_device.clone();
@@ -827,7 +937,6 @@ impl DesktopAudioRecorder {
             .spawn(move || Self::cpal_record_chunked(mic_dir, mic_device_c, mic_cfg_c, mic_is_rec))
             .map_err(|e| format!("Failed to spawn mic: {}", e))?;
 
-        // Spawn chunk worker (background processing)
         let worker_done = producer_done.clone();
         let worker_dir = session_dir.clone();
         let worker_mp3 = mp3_path.to_path_buf();
@@ -850,20 +959,16 @@ impl DesktopAudioRecorder {
 
         eprintln!("[recorder] Streams playing (chunked)");
 
-        // Wait for stop
         while is_recording.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         eprintln!("[recorder] Stop signal sent");
 
-        // Wait for capture threads
         let _ = sys_thread.join();
         let _ = mic_thread.join();
 
-        // Signal worker to finish
         producer_done.store(true, Ordering::SeqCst);
 
-        // Wait for worker (with timeout)
         let worker_result = Self::spawn_blocking_with_timeout(
             move || worker_thread.join(),
             std::time::Duration::from_secs(300),
@@ -953,9 +1058,8 @@ impl DesktopAudioRecorder {
         let sample_rate = AEC_SAMPLE_RATE;
         let channels = 2u32;
 
-        // ScreenCaptureKit (sys) writes to a file via Swift; the mic (cpal) is
-        // captured through a ringbuf. Sys streaming can be added later when the
-        // Swift side supports it.
+        // ScreenCaptureKit writes sys audio to a file via Swift; mic is captured
+        // through a ringbuf.
         let sys_raw = "/tmp/atok_macos_system.raw";
         let _ = std::fs::remove_file(sys_raw);
 
@@ -981,7 +1085,6 @@ impl DesktopAudioRecorder {
 
         eprintln!("[recorder] macOS mic: {}Hz, {}ch", mic_sr, mic_ch);
 
-        // --- Mic capture via ringbuf ---
         let mic_rb = HeapRb::<u8>::new(MIC_RINGBUF_BYTES);
         let (mic_prod, mic_cons) = mic_rb.split();
         let producer_done = Arc::new(AtomicBool::new(false));
@@ -1049,15 +1152,13 @@ impl DesktopAudioRecorder {
             return Err("No audio captured on macOS".into());
         }
 
-        // Resample mic if sample rates differ
         let mic_final = if has_sys && has_mic && mic_sr != sample_rate {
             Self::resample_linear(&mic_data, mic_sr, sample_rate, mic_ch)
         } else {
             mic_data.clone()
         };
 
-        // AEC: remove echo from mic using sys as reference.
-        // Must run BEFORE denoising, after resample. Both at 48kHz s16le now.
+        // AEC must run before denoising, after resample (both at 48kHz s16le here).
         let mic_final =
             if aec_enabled && has_sys && has_mic && !mic_final.is_empty() && !sys_data.is_empty() {
                 let mut aec = AudioAec::new(AecConfig {
@@ -1354,17 +1455,14 @@ impl DesktopAudioRecorder {
     fn clean_device_name(raw: &str) -> String {
         let lower = raw.to_lowercase();
 
-        // Generic PulseAudio/PipeWire placeholders
         if lower == "default" || lower == "pulse" || lower == "pipewire" {
             return "Default Mic".to_string();
         }
 
-        // Monitor sources (system audio capture) — should not appear in mic list
         if lower.ends_with(".monitor") {
             return "System Audio".to_string();
         }
 
-        // ALSA PCI/internal audio — extract the card description
         if let Some(rest) = lower.strip_prefix("alsa_input.") {
             if rest.contains("pci") {
                 return "Built-in Mic".to_string();
@@ -1374,7 +1472,6 @@ impl DesktopAudioRecorder {
             }
         }
 
-        // Also handle alsa_output.*.monitor that slipped through
         if lower.starts_with("alsa_output.") {
             if lower.contains("usb") {
                 return "USB Audio".to_string();
@@ -1382,17 +1479,14 @@ impl DesktopAudioRecorder {
             return "Built-in Audio".to_string();
         }
 
-        // Bluetooth devices
         if lower.starts_with("bluez_source.") {
             return Self::extract_bluetooth_device_name(raw);
         }
 
-        // HDMI/DisplayPort audio
         if lower.contains("hdmi") || lower.contains("dp") {
             return "Display Audio".to_string();
         }
 
-        // Fallback: truncate long names but keep readable
         if raw.len() > 25 {
             format!("{}…", &raw[..23])
         } else {
@@ -1402,7 +1496,6 @@ impl DesktopAudioRecorder {
 
     #[cfg(target_os = "linux")]
     fn extract_usb_device_name(raw: &str) -> String {
-        // alsa_input.usb-0600_USBFC1-A-00.analog-stereo → "USB Mic"
         let lower = raw.to_lowercase();
         if lower.contains("headset") || lower.contains("headphone") {
             return "USB Headset".to_string();
@@ -1432,7 +1525,7 @@ impl DesktopAudioRecorder {
 
         crate::linux_pulse::list_sources()
             .into_iter()
-            .filter(|s| !s.is_monitor) // mic picker excludes monitor (system-audio) sources
+            .filter(|s| !s.is_monitor)
             .map(|s| {
                 let is_default = s.name == default_source;
                 let display = Self::clean_device_name(&s.name);
@@ -1451,12 +1544,10 @@ impl DesktopAudioRecorder {
             .and_then(|d| d.name().ok())
             .unwrap_or_default();
 
-        // On Linux, try pactl first for better names
         #[cfg(target_os = "linux")]
         {
             let pa_devices = Self::pulse_list_sources();
             if !pa_devices.is_empty() {
-                // Filter out monitor sources (system audio capture, not mic input)
                 let mut seen_display = std::collections::HashSet::new();
                 let mut devices: Vec<crate::AudioDeviceInfo> = pa_devices
                     .into_iter()
@@ -1483,7 +1574,6 @@ impl DesktopAudioRecorder {
             }
         }
 
-        // Fallback: cpal enumeration (also deduplicate by display name)
         let mut seen_display = std::collections::HashSet::new();
         let mut devices: Vec<crate::AudioDeviceInfo> = host
             .input_devices()
@@ -1523,7 +1613,6 @@ impl DesktopAudioRecorder {
 
         let host = cpal::default_host();
 
-        // Mic detection via cpal
         let mic_raw = host
             .default_input_device()
             .and_then(|d| d.name().ok().map(|n| n.to_string()));
@@ -1590,11 +1679,6 @@ impl DesktopAudioRecorder {
         let encoder = Self::build_cpal_encoder(sample_rate, channels)?;
         let encoder = Arc::new(Mutex::new(encoder));
 
-        // --- Ringbuf + dedicated encoding thread ---
-        // cpal callback only pushes i16 LE bytes to the ringbuf.
-        // A separate encoding thread drains the ringbuf, accumulates to
-        // Vec<i16>, feeds LAME in chunk_size (1152 samples) blocks, and
-        // finalizes the MP3 file on exit. Main thread just joins.
         let mic_rb = HeapRb::<u8>::new(MIC_RINGBUF_BYTES);
         let (mic_prod, mic_cons) = mic_rb.split();
         let producer_done = Arc::new(AtomicBool::new(false));
@@ -1661,13 +1745,10 @@ impl DesktopAudioRecorder {
         done: Arc<AtomicBool>,
         channels: u32,
     ) -> Result<(), String> {
-        // Pre-allocate 1 second of stereo i16 (96000 samples)
         let mut buf: Vec<i16> = Vec::with_capacity(96_000);
-        // FIX: cursor-based encoding avoids O(N) drain on every encode.
-        // Previous code did buf.drain(..chunk_size).collect() per chunk,
-        // shifting the entire remaining buffer each time — O(N) per encode,
-        // causing stuttering on long recordings. Now we use read_idx to
-        // track consumed samples and only compact periodically.
+        // Cursor-based encoding avoids an O(N) buf.drain(..chunk_size) per chunk,
+        // which shifted the whole remaining buffer each time and caused
+        // stuttering on long recordings.
         let mut read_idx: usize = 0;
         let mut tmp = [0u8; PUMP_CHUNK_BYTES];
         let chunk_size = 1152 * channels as usize;
@@ -1679,7 +1760,6 @@ impl DesktopAudioRecorder {
                 for pair in tmp[..n].chunks_exact(2) {
                     buf.push(i16::from_le_bytes([pair[0], pair[1]]));
                 }
-                // O(1) encode: slice directly from buf, no allocation.
                 while buf.len() - read_idx >= chunk_size {
                     let chunk_slice = &buf[read_idx..read_idx + chunk_size];
                     let encoded = {
@@ -1714,7 +1794,6 @@ impl DesktopAudioRecorder {
             std::thread::sleep(std::time::Duration::from_millis(PUMP_SLEEP_MS));
         }
 
-        // Flush trailing samples that didn't form a full chunk.
         let remaining = buf.len() - read_idx;
         if remaining > 0 {
             let channel_count = channels as usize;
@@ -1740,7 +1819,6 @@ impl DesktopAudioRecorder {
             }
         }
 
-        // Finalize encoder + file.
         Self::cpal_finalize_encoder(&encoder, &mp3_file)?;
         Ok(())
     }
@@ -1817,6 +1895,65 @@ mod tests {
         (0..count)
             .map(|i| ((i as f32 * 0.01).sin() * 12_000.0) as i16)
             .collect()
+    }
+
+    #[test]
+    fn trim_lead_bytes_covers_offset_in_whole_frames() {
+        // 250ms @ 48kHz stereo S16 = 12_000 frames * 4 bytes.
+        assert_eq!(DesktopAudioRecorder::trim_lead_bytes(250, 48_000, 2), 48_000);
+        assert_eq!(DesktopAudioRecorder::trim_lead_bytes(0, 48_000, 2), 0);
+        // 1ms @ 44.1kHz mono rounds down to 44 frames * 2 bytes.
+        assert_eq!(DesktopAudioRecorder::trim_lead_bytes(1, 44_100, 1), 88);
+        // Result is always a multiple of the frame size.
+        assert_eq!(DesktopAudioRecorder::trim_lead_bytes(7, 48_000, 2) % 4, 0);
+    }
+
+    #[test]
+    fn clipped_ratio_flags_full_scale_samples() {
+        let clean: Vec<u8> = test_pcm_samples(1000)
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        assert_eq!(DesktopAudioRecorder::clipped_ratio(&clean), 0.0);
+
+        let half_clipped: Vec<u8> = (0..1000)
+            .map(|i| if i % 2 == 0 { i16::MAX } else { 100 })
+            .flat_map(|s: i16| s.to_le_bytes())
+            .collect();
+        let ratio = DesktopAudioRecorder::clipped_ratio(&half_clipped);
+        assert!((ratio - 0.5).abs() < 1e-6, "ratio={}", ratio);
+
+        assert_eq!(DesktopAudioRecorder::clipped_ratio(&[]), 0.0);
+    }
+
+    #[test]
+    fn compute_start_trims_prefers_meta_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "atok-align-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // sys started 100ms before mic → trim sys head, leave mic alone.
+        std::fs::write(dir.join("sys_start.meta"), "1000").unwrap();
+        std::fs::write(dir.join("mic_start.meta"), "1100").unwrap();
+
+        let done = Arc::new(AtomicBool::new(false));
+        let (sys_trim, mic_trim) =
+            DesktopAudioRecorder::compute_start_trims(&dir, 48_000, 2, 44_100, 1, &done);
+        assert_eq!(sys_trim, DesktopAudioRecorder::trim_lead_bytes(100, 48_000, 2));
+        assert_eq!(mic_trim, 0);
+
+        // Missing metas (e.g. mic-only session) → no trim, no waiting forever.
+        std::fs::remove_file(dir.join("sys_start.meta")).unwrap();
+        std::fs::write(dir.join("sys_done.flag"), "").unwrap();
+        let (sys_trim, mic_trim) =
+            DesktopAudioRecorder::compute_start_trims(&dir, 48_000, 2, 44_100, 1, &done);
+        assert_eq!((sys_trim, mic_trim), (0, 0));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

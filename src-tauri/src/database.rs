@@ -94,7 +94,6 @@ async fn connect_with_timeout(database_url: &str) -> Result<PgPool, String> {
         .await
         .map_err(|e| format!("{}", e))?;
 
-    // Verify connection works
     sqlx::query("SELECT 1")
         .execute(&pool)
         .await
@@ -118,18 +117,14 @@ mod tests {
 
     #[test]
     fn test_get_pool_returns_ok_when_some() {
-        // Create a dummy pool reference test — just verify the Some path works
-        // We can't easily create a real PgPool in unit tests without a DB,
-        // but we can test the None path thoroughly
+        // Can't easily create a real PgPool in unit tests without a DB, so this
+        // only exercises the None path.
         let db = Database(None);
         assert!(db.get_pool().is_err());
     }
 
     #[test]
     fn test_init_database_respects_env() {
-        // init_database behavior depends on DATABASE_URL env var
-        // If set and valid, it should try to connect
-        // If not set, it should return None gracefully
         let has_db_url = std::env::var("DATABASE_URL")
             .map(|v| !v.is_empty() && v != "DB_URL")
             .unwrap_or(false);

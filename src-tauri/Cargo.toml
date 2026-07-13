@@ -23,9 +23,10 @@ default = ["aec"]
 aec = ["dep:webrtc-audio-processing"]
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-mic-recorder = "2.0.0"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -45,6 +46,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ringbuf = "0.4"
 webrtc-audio-processing = { version = "~0.5", features = ["bundled"], optional = true }
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "wav", "flac"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -62,6 +64,10 @@ cpal = "0.15"
 # (parec/pactl). libpulse.so.0 is present wherever the audio server runs.
 libpulse-binding = "2"
 libpulse-simple-binding = "2"
+# XDG desktop portal (D-Bus) for screenshots — works on Wayland and X11 with no
+# external CLI tools, matching the repo's zero-subprocess posture.
+ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+url = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "0.15"

@@ -1,5 +1,3 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -28,10 +26,12 @@ pub struct AudioDeviceInfo {
 mod agent;
 mod audio_aec;
 mod audio_dsp;
+mod audio_import;
 mod auth;
 mod database;
 mod mcp_auth;
 mod models;
+mod note_assets;
 mod notes;
 mod tasks;
 
@@ -54,7 +54,6 @@ use windows_audio::DesktopAudioRecorder;
 #[cfg(not(windows))]
 use audio_recorder::DesktopAudioRecorder;
 
-// Global recorder instance
 lazy_static::lazy_static! {
     static ref RECORDER: Arc<Mutex<DesktopAudioRecorder>> = Arc::new(Mutex::new(DesktopAudioRecorder::new()));
 }
@@ -118,7 +117,6 @@ async fn start_desktop_recording(
 
 #[tauri::command]
 async fn stop_desktop_recording() -> Result<String, String> {
-    // Do the blocking work on a dedicated thread to avoid blocking the async runtime
     let result = tokio::task::spawn_blocking(move || {
         let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
         recorder
@@ -154,11 +152,23 @@ async fn set_aec_enabled(enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn notify_recording_started(app: tauri::AppHandle, note_title: String) -> Result<(), String> {
+async fn notify_recording_started(
+    app: tauri::AppHandle,
+    note_title: String,
+    audio_path: Option<String>,
+    language: Option<String>,
+    timestamp: Option<i64>,
+) -> Result<(), String> {
+    // audio_path lets the main window start processing immediately off this
+    // event; without it the listener can only show the loading card and the
+    // actual work waits for the 500ms localStorage poll.
     app.emit(
         "recording-started",
         serde_json::json!({
-            "noteTitle": note_title
+            "noteTitle": note_title,
+            "audioPath": audio_path,
+            "language": language,
+            "timestamp": timestamp,
         }),
     )
     .map_err(|e| format!("Failed to emit recording-started event: {}", e))?;
@@ -181,7 +191,6 @@ async fn get_audio_device_status() -> Result<DeviceStatus, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Muat env variables dari file .env, cari dari CWD dan parent directories
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut path = cwd.clone();
     loop {
@@ -199,12 +208,29 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_mic_recorder::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // Initialize database asynchronously — never fails setup
-            // If DB is unreachable, commands will return clear error messages
+            // If DB is unreachable, commands return clear errors rather than failing setup.
             let db = tauri::async_runtime::block_on(database::init_database());
             app.handle().manage(db);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // The recording popup is alwaysOnTop + skipTaskbar + undecorated: if the
+            // main window goes away while it's still alive, it becomes an unclosable
+            // floating pill and keeps the whole app running. Tear it down with main,
+            // finalizing any in-flight recording first so the MP3 isn't corrupt.
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label() == "main" {
+                    if let Ok(recorder) = RECORDER.lock() {
+                        let _ = recorder.stop_recording();
+                    }
+                    if let Some(popup) = window.app_handle().get_webview_window("recording-popup")
+                    {
+                        let _ = popup.destroy();
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             auth::register,
@@ -239,6 +265,12 @@ pub fn run() {
             agent::agent_check_collection,
             agent::agent_create_collection,
             agent::agent_ensure_collection,
+            audio_import::import_audio_file,
+            agent::describe_image,
+            note_assets::import_note_asset,
+            note_assets::capture_screenshot,
+            note_assets::record_screenshot_asset,
+            note_assets::take_recording_assets,
             start_desktop_recording,
             stop_desktop_recording,
             get_aec_enabled,

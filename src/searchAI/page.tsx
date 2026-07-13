@@ -14,30 +14,46 @@ import {
 import { agentService, type AgentMessage } from "@/services/agent.service";
 import { authService } from "@/services/auth.service";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
-import { User as UserIcon } from "lucide-react";
+import { Check, Sparkle, Wrench } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 
-// Status untuk chat
 type ChatStatus = "ready" | "submitted" | "streaming" | "error";
+
+/** One entry in an assistant turn's activity trail (thinking, tool calls). */
+interface ActivityStep {
+  id: string;
+  kind: "thinking" | "tool";
+  label: string;
+  status: "running" | "done";
+}
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   timestamp: Date;
+  steps?: ActivityStep[];
 }
 
-// Start with empty conversation
-const initialMessages: ChatMessage[] = [];
+const SUGGESTIONS = [
+  "Summarize this week's notes",
+  "Which tasks are still open?",
+  "What did we decide in the last meeting?",
+];
+
+// Turns backend tool identifiers like "search_notes" into readable labels.
+function toolLabel(event: { tool_name?: string; content?: string }) {
+  const raw = event.tool_name || event.content;
+  if (!raw) return "Running a tool";
+  return raw.replace(/[_-]+/g, " ").trim();
+}
 
 export default function AIChatInterface() {
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<ChatStatus>("ready");
-  const [isUsingTool, setIsUsingTool] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -51,14 +67,12 @@ export default function AIChatInterface() {
 
     if (!input.trim() || status !== "ready") return;
 
-    // Get user info
     const user = authService.getUser();
     if (!user) {
       console.error("User not authenticated");
       return;
     }
 
-    // Add user message
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: "user",
@@ -66,84 +80,89 @@ export default function AIChatInterface() {
       timestamp: new Date(),
     };
 
-    const updatedMessages = [...messages, userMessage];
-    setMessages(updatedMessages);
-    setStatus("submitted");
+    const aiMessageId = (Date.now() + 1).toString();
+    let stepCounter = 0;
 
+    const updatedMessages = [...messages, userMessage];
+    // The assistant turn exists from the start, opening with a thinking step;
+    // stream events then rewrite it in place.
+    setMessages([
+      ...updatedMessages,
+      {
+        id: aiMessageId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+        steps: [{ id: "s0", kind: "thinking", label: "Thinking", status: "running" }],
+      },
+    ]);
+    setStatus("submitted");
     setInput("");
 
-    // Create abort controller for this request
+    const updateAssistant = (patch: (msg: ChatMessage) => ChatMessage) => {
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === aiMessageId ? patch({ ...msg }) : msg))
+      );
+    };
+
+    const settleSteps = (msg: ChatMessage): ActivityStep[] =>
+      (msg.steps ?? []).map((s) => ({ ...s, status: "done" as const }));
+
     abortControllerRef.current = new AbortController();
 
     try {
-      // Start streaming
       setStatus("streaming");
 
-      // Prepare for AI response
-      const aiMessageId = (Date.now() + 1).toString();
       let accumulatedContent = "";
 
-      // Prepare conversation history for agent
-      const conversationHistory: AgentMessage[] = updatedMessages.map(msg => ({
+      const conversationHistory: AgentMessage[] = updatedMessages.map((msg) => ({
         role: msg.role,
         content: msg.content,
       }));
 
-      // Stream the response from agent
-      let hasReceivedContent = false;
       for await (const event of agentService.streamAgent({
         prompt: userMessage.content,
         user_id: user.id,
         conversation_history: conversationHistory.slice(0, -1), // Exclude current message
-        system_prompt: 'You are Atok AI, an intelligent assistant integrated into the Atok.ai workspace. You help users manage their notes, tasks, and answer questions based on their stored knowledge. Be helpful, concise, and accurate. When referencing notes or tasks, provide specific details.',
+        system_prompt:
+          "You are Atok AI, an intelligent assistant integrated into the Atok.ai workspace. You help users manage their notes, tasks, and answer questions based on their stored knowledge. Be helpful, concise, and accurate. When referencing notes or tasks, provide specific details.",
       })) {
-        // Check if aborted
         if (abortControllerRef.current?.signal.aborted) {
           break;
         }
 
-        // Handle different event types
-        if (event.type === 'tool') {
-          setIsUsingTool(true);
-        } else if (event.type === 'content') {
-          hasReceivedContent = true;
-          setIsUsingTool(false);
-          accumulatedContent += event.content || '';
-
-          // Update the AI message
-          setMessages((prev) => {
-            const newMessages = [...prev];
-            const lastMessage = newMessages[newMessages.length - 1];
-
-            // If last message is from assistant with same ID, update it
-            if (lastMessage && lastMessage.role === 'assistant' && lastMessage.id === aiMessageId) {
-              lastMessage.content = accumulatedContent;
-              return newMessages;
-            } else {
-              // Otherwise, add new message
-              return [...prev, {
-                id: aiMessageId,
-                role: "assistant",
-                content: accumulatedContent,
-                timestamp: new Date(),
-              }];
-            }
-          });
-        } else if (event.type === 'error') {
-          throw new Error(event.content || 'Unknown error');
+        if (event.type === "thinking") {
+          updateAssistant((msg) => ({
+            ...msg,
+            steps: [
+              ...settleSteps(msg),
+              { id: `s${++stepCounter}`, kind: "thinking", label: "Thinking", status: "running" },
+            ],
+          }));
+        } else if (event.type === "tool") {
+          updateAssistant((msg) => ({
+            ...msg,
+            steps: [
+              ...settleSteps(msg),
+              { id: `s${++stepCounter}`, kind: "tool", label: toolLabel(event), status: "running" },
+            ],
+          }));
+        } else if (event.type === "content") {
+          accumulatedContent += event.content || "";
+          const content = accumulatedContent;
+          updateAssistant((msg) => ({ ...msg, content, steps: settleSteps(msg) }));
+        } else if (event.type === "error") {
+          throw new Error(event.content || "Unknown error");
         }
       }
 
-      setIsUsingTool(false);
-
-      // If no content was received, add a fallback message
-      if (!hasReceivedContent && accumulatedContent === '') {
-        setMessages((prev) => [...prev, {
-          id: aiMessageId,
-          role: "assistant",
-          content: "I processed your request but didn't generate a response. Please try rephrasing your question.",
-          timestamp: new Date(),
-        }]);
+      if (accumulatedContent === "") {
+        updateAssistant((msg) => ({
+          ...msg,
+          content:
+            "I processed your request but didn't generate a response. Please try rephrasing your question.",
+          steps: settleSteps(msg),
+        }));
       }
 
       setStatus("ready");
@@ -153,16 +172,12 @@ export default function AIChatInterface() {
 
       const errorMsg = error instanceof Error ? error.message : "An unknown error occurred";
 
-      // Add error message to chat
-      const errorChatMessage: ChatMessage = {
-        id: (Date.now() + 2).toString(),
-        role: "assistant",
-        content: `⚠️ Error: ${errorMsg}\n\nPlease make sure the agent API is running at base_url`,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorChatMessage]);
+      updateAssistant((msg) => ({
+        ...msg,
+        content: `Something went wrong: ${errorMsg}\n\nMake sure the agent API is running, then try again.`,
+        steps: settleSteps(msg),
+      }));
 
-      // Reset to ready after showing error
       setTimeout(() => {
         setStatus("ready");
       }, 3000);
@@ -172,33 +187,31 @@ export default function AIChatInterface() {
   };
 
   return (
-    <div className="flex flex-col h-full flex-1 bg-neutral-50 dark:bg-neutral-900">
+    <div className="flex flex-col h-full flex-1 bg-background">
       {/* Chat Container */}
       <div className="flex-1 overflow-hidden flex flex-col">
         <Conversation className="h-full">
           <ConversationContent className="h-full flex flex-col">
             {messages.length === 0 ? (
               /* Empty State - Centered Search */
-              <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 pb-32">
-                <div className="text-center mb-8 space-y-4">
-                  <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl mb-4">
-                    <img src="/logo-atok.png" alt="Atok.ai" className="w-20 h-20 rounded-2xl" />
-                  </div>
-                  <h1 className="text-4xl font-bold text-neutral-900 dark:text-white mb-2">
-                    Atok Agents
+              <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 pb-24">
+                <div className="text-center mb-10">
+                  <img src="/logo-atok.png" alt="Atok.ai" className="mx-auto h-14 w-14 rounded-xl" />
+                  <h1 className="mt-6 font-display text-3xl font-semibold tracking-tight text-foreground">
+                    Ask your workspace
                   </h1>
-                  <p className="text-lg text-neutral-600 dark:text-neutral-400 max-w-md">
-                    Ask me anything about your notes, tasks, or let me help you organize your thoughts
+                  <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+                    The agent reads your notes and tasks, so ask about anything you have captured.
                   </p>
                 </div>
 
                 {/* Centered Search Input */}
                 <div className="w-full max-w-3xl">
-                  <PromptInput onSubmit={handleSubmit} className="max-w-none shadow-xl">
+                  <PromptInput onSubmit={handleSubmit} className="max-w-none shadow-lg">
                     <PromptInputTextarea
                       value={input}
                       onChange={(e) => setInput(e.currentTarget.value)}
-                      placeholder="What would you like to know about your notes?"
+                      placeholder="Ask about your notes or tasks"
                       minHeight={56}
                       maxHeight={200}
                       className="resize-none text-base"
@@ -208,82 +221,63 @@ export default function AIChatInterface() {
                       <PromptInputSubmit
                         disabled={!input.trim() || status !== "ready"}
                         status={status}
-                        className="bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:hover:bg-neutral-200 text-white dark:text-neutral-900"
                       />
                     </PromptInputToolbar>
                   </PromptInput>
 
-                  <p className="text-center text-xs text-neutral-500 dark:text-neutral-500 mt-3">
-                    Press Enter to send • Shift+Enter for new line
-                  </p>
+                  <div className="mt-4 flex flex-wrap justify-center gap-2">
+                    {SUGGESTIONS.map((suggestion) => (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        onClick={() => setInput(suggestion)}
+                        className="rounded-full border border-border bg-card px-3.5 py-1.5 text-[13px] text-muted-foreground transition-colors hover:border-ring/40 hover:text-foreground active:scale-[0.98]"
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             ) : (
               /* Chat Messages */
               <div className="flex-1 overflow-y-auto">
-                <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+                <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 space-y-7">
                   {messages.map((message) => (
                     <div
                       key={message.id}
-                      className={`flex gap-4 ${message.role === "user" ? "justify-end" : "justify-start"
-                        }`}
+                      className={`flex gap-4 ${
+                        message.role === "user" ? "justify-end" : "justify-start"
+                      }`}
                     >
-                      {message.role === "assistant" && (
-                        <div className="flex-shrink-0">
-                          <div className="w-10 h-10 rounded-full overflow-hidden">
-                            <img src="/logo-atok.png" alt="Atok.ai" className="w-full h-full object-cover" />
+                      {message.role === "assistant" ? (
+                        <>
+                          <div className="flex-shrink-0">
+                            <img
+                              src="/logo-atok.png"
+                              alt="Atok.ai"
+                              className="h-8 w-8 rounded-lg object-cover"
+                            />
                           </div>
-                        </div>
-                      )}
-
-                      <div
-                        className={`max-w-[80%] rounded-2xl px-5 py-3 ${message.role === "user"
-                          ? "bg-neutral-900 dark:bg-white text-white dark:text-neutral-900"
-                          : "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white border border-neutral-200 dark:border-neutral-700"
-                          }`}
-                      >
-                        <div className="prose prose-sm dark:prose-invert max-w-none">
-                          {message.role === 'assistant' ? (
-                            <MarkdownRenderer content={message.content} />
-                          ) : (
-                            <p className="whitespace-pre-wrap m-0">{message.content}</p>
-                          )}
-                        </div>
-                      </div>
-
-                      {message.role === "user" && (
-                        <div className="flex-shrink-0">
-                          <div className="w-10 h-10 rounded-full bg-neutral-300 dark:bg-neutral-700 flex items-center justify-center">
-                            <UserIcon className="w-5 h-5 text-neutral-700 dark:text-neutral-300" />
+                          <div className="min-w-0 flex-1 pt-0.5">
+                            {(message.steps?.length ?? 0) > 0 && (
+                              <ActivityTrail steps={message.steps!} />
+                            )}
+                            {message.content && (
+                              /* Assistant replies read as document text, not a boxed bubble. */
+                              <div className="text-sm">
+                                <MarkdownRenderer content={message.content} />
+                              </div>
+                            )}
                           </div>
+                        </>
+                      ) : (
+                        <div className="max-w-[75%] rounded-xl rounded-br-sm bg-foreground px-4 py-2.5 text-background shadow-xs">
+                          <p className="m-0 whitespace-pre-wrap text-sm leading-6">{message.content}</p>
                         </div>
                       )}
                     </div>
                   ))}
-
-                  {/* Loading state - hide if last message is assistant (content already showing) */}
-                  {(status === "submitted" || status === "streaming") &&
-                    !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && messages[messages.length - 1].content) && (
-                      <div className="flex gap-4 justify-start">
-                        <div className="flex-shrink-0">
-                          <div className="w-10 h-10 rounded-full overflow-hidden">
-                            <img src="/logo-atok.png" alt="Atok.ai" className="w-full h-full object-cover" />
-                          </div>
-                        </div>
-                        <div className="max-w-[80%] rounded-2xl px-5 py-3 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
-                          <div className="flex items-center space-x-3">
-                            <div className="flex space-x-1">
-                              <div className="w-2 h-2 bg-neutral-500 dark:bg-neutral-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                              <div className="w-2 h-2 bg-neutral-500 dark:bg-neutral-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                              <div className="w-2 h-2 bg-neutral-500 dark:bg-neutral-400 rounded-full animate-bounce"></div>
-                            </div>
-                            <span className="text-neutral-600 dark:text-neutral-400 text-sm font-medium">
-                              {isUsingTool ? "Using tools..." : "Thinking..."}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    )}
                 </div>
               </div>
             )}
@@ -294,13 +288,13 @@ export default function AIChatInterface() {
 
         {/* Input Section - Only show when there are messages */}
         {messages.length > 0 && (
-          <div className="border-t border-neutral-200 dark:border-neutral-700 bg-white/80 dark:bg-neutral-900/80 backdrop-blur-sm">
+          <div className="border-t border-border bg-background/90 backdrop-blur-sm">
             <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-4">
-              <PromptInput onSubmit={handleSubmit} className="max-w-none shadow-lg">
+              <PromptInput onSubmit={handleSubmit} className="max-w-none shadow-md">
                 <PromptInputTextarea
                   value={input}
                   onChange={(e) => setInput(e.currentTarget.value)}
-                  placeholder="Type your message..."
+                  placeholder="Reply to the agent"
                   minHeight={48}
                   maxHeight={200}
                   className="resize-none"
@@ -310,18 +304,16 @@ export default function AIChatInterface() {
                   <PromptInputSubmit
                     disabled={!input.trim() || status !== "ready"}
                     status={status}
-                    className="bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:hover:bg-neutral-200 text-white dark:text-neutral-900"
                   />
                 </PromptInputToolbar>
               </PromptInput>
 
-              {/* Status Footer */}
-              <div className="flex justify-between items-center mt-2 text-xs text-neutral-500 dark:text-neutral-500">
-                <span>Press Enter to send • Shift+Enter for new line</span>
+              <div className="flex justify-between items-center mt-2 font-mono text-[11px] text-muted-foreground/70">
+                <span>Enter to send, Shift+Enter for a new line</span>
                 {status !== "ready" && (
-                  <span className="flex items-center space-x-1">
-                    <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
-                    <span>AI is {status === "submitted" ? "thinking" : "typing"}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary"></span>
+                    {status === "submitted" ? "thinking" : "working"}
                   </span>
                 )}
               </div>
@@ -329,6 +321,41 @@ export default function AIChatInterface() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The agent's visible reasoning trail: thinking phases and tool calls, in
+ * order. Running steps shimmer; finished steps settle into quiet mono rows.
+ */
+function ActivityTrail({ steps }: { steps: ActivityStep[] }) {
+  const allDone = steps.every((s) => s.status === "done");
+
+  return (
+    <div className={`mb-3 flex flex-col gap-1.5 border-l-2 border-border pl-3.5 ${allDone ? "opacity-70" : ""}`}>
+      {steps.map((step) => {
+        const Icon = step.kind === "tool" ? Wrench : Sparkle;
+        const running = step.status === "running";
+        return (
+          <div key={step.id} className="flex items-center gap-2">
+            <Icon
+              className={`h-3.5 w-3.5 shrink-0 ${running ? "animate-pulse text-primary" : "text-muted-foreground/60"}`}
+              strokeWidth={1.75}
+            />
+            <span
+              className={`font-mono text-[11.5px] capitalize ${
+                running ? "shimmer-text" : "text-muted-foreground"
+              }`}
+            >
+              {step.label}
+            </span>
+            {!running && (
+              <Check className="h-3 w-3 shrink-0 text-primary/70" strokeWidth={2} />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { noteAssetService } from "@/services/note-asset.service";
+import { Paperclip } from "lucide-react";
 
 interface CreateNoteDialogProps {
     open: boolean;
@@ -29,7 +31,23 @@ export default function CreateNoteDialog({ open, onOpenChange, onNoteCreated }: 
     const [content, setContent] = useState("");
     const [selectedColor, setSelectedColor] = useState(COLORS[0].value);
     const [loading, setLoading] = useState(false);
+    const [attaching, setAttaching] = useState(false);
     const [error, setError] = useState("");
+
+    const handleAttach = async () => {
+        if (attaching || loading) return;
+        try {
+            const sourcePath = await noteAssetService.pickAssetFile();
+            if (!sourcePath) return;
+            setAttaching(true);
+            const asset = await noteAssetService.importAsset(sourcePath);
+            setContent((prev) => noteAssetService.appendAssetToContent(prev, asset));
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Failed to attach file");
+        } finally {
+            setAttaching(false);
+        }
+    };
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -71,7 +89,7 @@ export default function CreateNoteDialog({ open, onOpenChange, onNoteCreated }: 
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent className="sm:max-w-lg overflow-hidden">
                 <DialogHeader>
-                    <DialogTitle>Create New Note</DialogTitle>
+                    <DialogTitle>Create a note</DialogTitle>
                 </DialogHeader>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
@@ -82,7 +100,7 @@ export default function CreateNoteDialog({ open, onOpenChange, onNoteCreated }: 
                     )}
 
                     <div className="space-y-2">
-                        <Label htmlFor="title">Title *</Label>
+                        <Label htmlFor="title">Title</Label>
                         <Input
                             id="title"
                             value={title}
@@ -94,7 +112,18 @@ export default function CreateNoteDialog({ open, onOpenChange, onNoteCreated }: 
                     </div>
 
                     <div className="space-y-2">
-                        <Label htmlFor="content">Content</Label>
+                        <div className="flex items-center justify-between">
+                            <Label htmlFor="content">Content</Label>
+                            <button
+                                type="button"
+                                onClick={handleAttach}
+                                disabled={loading || attaching}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-800 dark:hover:bg-neutral-800 dark:hover:text-neutral-200 disabled:opacity-50"
+                            >
+                                <Paperclip className="h-3.5 w-3.5" />
+                                {attaching ? "Attaching..." : "Attach file"}
+                            </button>
+                        </div>
                         <Textarea
                             id="content"
                             value={content}
@@ -136,7 +165,7 @@ export default function CreateNoteDialog({ open, onOpenChange, onNoteCreated }: 
                             Cancel
                         </Button>
                         <Button type="submit" disabled={loading}>
-                            {loading ? "Creating..." : "Create Note"}
+                            {loading ? "Creating…" : "Create note"}
                         </Button>
                     </div>
                 </form>

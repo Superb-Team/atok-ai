@@ -2,7 +2,6 @@
 
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -25,64 +24,51 @@ const FloatingActionMenu = ({
     setIsOpen(!isOpen);
   };
 
+  const handleOptionClick = (onClick: () => void) => {
+    setIsOpen(false);
+    onClick();
+  };
+
   return (
-    <div className={cn("fixed bottom-8 right-8", className)}>
-      <Button
+    <div className={cn("fixed bottom-7 right-7 z-40", className)}>
+      <button
+        type="button"
         onClick={toggleMenu}
-        className="w-10 h-10 rounded-full bg-[#11111198] hover:bg-[#111111d1] shadow-[0_0_20px_rgba(0,0,0,0.2)] "
+        aria-expanded={isOpen}
+        aria-label={isOpen ? "Close quick actions" : "Open quick actions"}
+        className="flex h-11 w-11 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       >
         <motion.div
           animate={{ rotate: isOpen ? 45 : 0 }}
-          transition={{
-            duration: 0.3,
-            ease: "easeInOut",
-            type: "spring",
-            stiffness: 300,
-            damping: 20,
-          }}
+          transition={{ type: "spring", stiffness: 320, damping: 22 }}
         >
-          <Plus className="w-6 h-6" />
+          <Plus className="h-5 w-5" strokeWidth={2} />
         </motion.div>
-      </Button>
+      </button>
 
       <AnimatePresence>
         {isOpen && (
           <motion.div
-            initial={{ opacity: 0, x: 10, y: 10, filter: "blur(10px)" }}
-            animate={{ opacity: 1, x: 0, y: 0, filter: "blur(0px)" }}
-            exit={{ opacity: 0, x: 10, y: 10, filter: "blur(10px)" }}
-            transition={{
-              duration: 0.6,
-              type: "spring",
-              stiffness: 300,
-              damping: 20,
-              delay: 0.1,
-            }}
-            className="absolute bottom-10 right-0 mb-2"
+            initial={{ opacity: 0, y: 8, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.97 }}
+            transition={{ type: "spring", stiffness: 380, damping: 28 }}
+            className="absolute bottom-14 right-0 mb-1 w-52 overflow-hidden rounded-xl border border-border bg-popover p-1.5 shadow-xl"
           >
-            <div className="flex flex-col items-end gap-2">
-              {options.map((option, index) => (
-                <motion.div
-                  key={index}
-                  initial={{ opacity: 0, x: 20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 20 }}
-                  transition={{
-                    duration: 0.3,
-                    delay: index * 0.05,
-                  }}
-                >
-                  <Button
-                    onClick={option.onClick}
-                    size="sm"
-                    className="flex items-center gap-2 bg-[#11111198] hover:bg-[#111111d1] shadow-[0_0_20px_rgba(0,0,0,0.2)] border-none rounded-xl backdrop-blur-sm"
-                  >
-                    {option.Icon}
-                    <span>{option.label}</span>
-                  </Button>
-                </motion.div>
-              ))}
-            </div>
+            {options.map((option, index) => (
+              <motion.button
+                key={option.label}
+                type="button"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.18, delay: index * 0.04 }}
+                onClick={() => handleOptionClick(option.onClick)}
+                className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] font-medium text-popover-foreground transition-colors hover:bg-accent active:scale-[0.98]"
+              >
+                <span className="text-muted-foreground">{option.Icon}</span>
+                {option.label}
+              </motion.button>
+            ))}
           </motion.div>
         )}
       </AnimatePresence>

@@ -35,128 +35,116 @@ export default function LoginPage({ onLoginSuccess, onSwitchToSignup }: LoginPag
   };
 
   return (
-    <div className="min-h-screen flex bg-gradient-to-br from-neutral-50 via-neutral-100 to-neutral-200 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-800">
-      {/* Left Side - Branding */}
-      <div className="hidden lg:flex lg:w-1/2 bg-gradient-to-br from-neutral-900 to-neutral-800 dark:from-black dark:to-neutral-900 p-12 flex-col justify-between relative overflow-hidden">
-        {/* Background Pattern */}
-        <div className="absolute inset-0 opacity-10">
-          <div className="absolute inset-0" style={{
-            backgroundImage: `radial-gradient(circle at 2px 2px, white 1px, transparent 0)`,
-            backgroundSize: '40px 40px'
-          }}></div>
+    <div className="flex min-h-screen bg-background">
+      {/* Brand panel: always ink-dark, independent of the app theme. */}
+      <div className="relative hidden flex-col justify-between overflow-hidden bg-[oklch(0.19_0.0095_55)] p-12 lg:flex lg:w-[44%]">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.05]"
+          style={{
+            backgroundImage: `radial-gradient(circle at 1px 1px, white 1px, transparent 0)`,
+            backgroundSize: "28px 28px",
+          }}
+        />
+
+        <div className="relative flex items-center gap-3">
+          <img src="/logo-atok.png" alt="Atok.ai" className="h-9 w-9 rounded-lg" />
+          <span className="font-display text-lg font-semibold text-[oklch(0.93_0.0075_78)]">
+            Atok.ai
+          </span>
         </div>
 
-        <div className="relative z-10">
-          <div className="flex items-center gap-3 mb-8">
-            <img src="/logo-atok.png" alt="Atok.ai" className="w-12 h-12 rounded-xl" />
-            <span className="text-3xl font-bold text-white">Atok.ai</span>
-          </div>
-          
-          <div className="mt-16">
-            <h2 className="text-4xl font-bold text-white mb-4">
-              Welcome back to your
-              <br />
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-400">
-                AI-powered workspace
-              </span>
-            </h2>
-            <p className="text-neutral-300 text-lg">
-              Manage your notes, tasks, and ideas with intelligent assistance.
-            </p>
-          </div>
+        <div className="relative">
+          <h2 className="font-display text-[2.6rem] font-semibold leading-[1.12] tracking-tight text-[oklch(0.93_0.0075_78)]">
+            Speak it once.
+            <br />
+            Keep it <span className="text-[oklch(0.7050_0.1280_48)]">forever.</span>
+          </h2>
+          <p className="mt-5 max-w-sm text-[15px] leading-7 text-[oklch(0.72_0.009_65)]">
+            Atok records, transcribes, and turns your voice into notes you can search, tag, and ask questions about.
+          </p>
         </div>
 
-        <div className="relative z-10 text-neutral-400 text-sm">
-          © 2025 Atok.ai. All rights reserved.
-        </div>
+        <p className="relative font-mono text-xs text-[oklch(0.55_0.009_60)]">
+          © 2025 Atok.ai
+        </p>
       </div>
 
-      {/* Right Side - Login Form */}
-      <div className="flex-1 flex items-center justify-center p-8">
-        <div className="w-full max-w-md">
-          {/* Mobile Logo */}
-          <div className="lg:hidden flex items-center justify-center gap-3 mb-8">
-            <img src="/logo-atok.png" alt="Atok.ai" className="w-10 h-10 rounded-xl" />
-            <span className="text-2xl font-bold text-neutral-900 dark:text-white">Atok.ai</span>
+      {/* Form */}
+      <div className="flex flex-1 items-center justify-center p-8">
+        <div className="w-full max-w-sm">
+          <div className="mb-10 flex items-center gap-3 lg:hidden">
+            <img src="/logo-atok.png" alt="Atok.ai" className="h-9 w-9 rounded-lg" />
+            <span className="font-display text-lg font-semibold text-foreground">Atok.ai</span>
           </div>
 
-          <div className="bg-white dark:bg-neutral-800 rounded-2xl shadow-xl p-8 border border-neutral-200 dark:border-neutral-700">
-            <div className="mb-8">
-              <h1 className="text-3xl font-bold text-neutral-900 dark:text-white mb-2">
-                Sign In
-              </h1>
-              <p className="text-neutral-600 dark:text-neutral-400">
-                Enter your credentials to access your account
-              </p>
-            </div>
+          <h1 className="font-display text-[1.7rem] font-semibold tracking-tight text-foreground">
+            Welcome back
+          </h1>
+          <p className="mt-1.5 text-sm text-muted-foreground">
+            Sign in to open your workspace.
+          </p>
 
-            <form onSubmit={handleSubmit} className="space-y-5">
-              {error && (
-                <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-600 dark:text-red-400 text-sm">
-                  {error}
-                </div>
-              )}
-
-              <div className="space-y-2">
-                <Label htmlFor="email" className="text-neutral-700 dark:text-neutral-300">
-                  Email or Username
-                </Label>
-                <Input
-                  id="email"
-                  type="text"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="Enter your email or username"
-                  required
-                  disabled={loading}
-                  className="h-12 bg-neutral-50 dark:bg-neutral-900 border-neutral-300 dark:border-neutral-600 focus:border-neutral-900 dark:focus:border-white"
-                />
+          <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+            {error && (
+              <div className="rounded-lg border border-destructive/25 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                {error}
               </div>
+            )}
 
-              <div className="space-y-2">
-                <Label htmlFor="password" className="text-neutral-700 dark:text-neutral-300">
-                  Password
-                </Label>
-                <Input
-                  id="password"
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter your password"
-                  required
-                  disabled={loading}
-                  className="h-12 bg-neutral-50 dark:bg-neutral-900 border-neutral-300 dark:border-neutral-600 focus:border-neutral-900 dark:focus:border-white"
-                />
-              </div>
-
-              <Button
-                type="submit"
+            <div className="space-y-2">
+              <Label htmlFor="email">Email or username</Label>
+              <Input
+                id="email"
+                type="text"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                required
                 disabled={loading}
-                className="w-full h-12 bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:hover:bg-neutral-200 text-white dark:text-neutral-900 font-medium text-base rounded-lg transition-all duration-200 hover:scale-[1.02]"
-              >
-                {loading ? (
-                  "Signing in..."
-                ) : (
-                  <span className="flex items-center justify-center gap-2">
-                    Sign In
-                    <ArrowRight className="w-5 h-5" />
-                  </span>
-                )}
-              </Button>
-            </form>
-
-            <div className="mt-6 text-center">
-              <p className="text-neutral-600 dark:text-neutral-400 text-sm">
-                Don't have an account?{" "}
-                <button
-                  onClick={onSwitchToSignup}
-                  className="text-neutral-900 dark:text-white font-semibold hover:underline"
-                >
-                  Sign Up
-                </button>
-              </p>
+                className="h-11"
+              />
             </div>
-          </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Your password"
+                required
+                disabled={loading}
+                className="h-11"
+              />
+            </div>
+
+            <Button
+              type="submit"
+              disabled={loading}
+              className="h-11 w-full text-[15px] font-medium active:scale-[0.99]"
+            >
+              {loading ? (
+                "Signing in…"
+              ) : (
+                <span className="flex items-center justify-center gap-2">
+                  Sign in
+                  <ArrowRight className="h-4 w-4" />
+                </span>
+              )}
+            </Button>
+          </form>
+
+          <p className="mt-8 text-sm text-muted-foreground">
+            No account yet?{" "}
+            <button
+              onClick={onSwitchToSignup}
+              className="font-medium text-primary hover:underline"
+            >
+              Create one
+            </button>
+          </p>
         </div>
       </div>
     </div>

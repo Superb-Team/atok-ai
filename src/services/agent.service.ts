@@ -13,8 +13,10 @@ export interface AgentStreamRequest {
 }
 
 export interface AgentStreamEvent {
-  type: 'content' | 'tool' | 'error';
+  type: 'content' | 'thinking' | 'tool' | 'error';
   content?: string;
+  /** Human-readable tool name, e.g. "search_notes"; set when type is 'tool'. */
+  tool_name?: string;
 }
 
 export const agentService = {

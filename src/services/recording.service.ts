@@ -68,6 +68,13 @@ export class RecordingService {
   }
 
   /**
+   * Path of the in-progress recording, if any (used to attach screenshots).
+   */
+  static getCurrentRecordingPath(): string | null {
+    return this.currentRecordingPath;
+  }
+
+  /**
    * Stop the current recording
    */
   static async stopRecording(): Promise<string> {

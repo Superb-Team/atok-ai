@@ -142,13 +142,11 @@ export class McpService {
    * Connect to GitHub
    */
   static async connectGitHub(userId: string, accessToken: string): Promise<McpAuthConnection> {
-    // Test token first
     const isValid = await this.testConnection('github', accessToken);
     if (!isValid) {
       throw new Error('Invalid GitHub token');
     }
 
-    // Fetch user info from GitHub
     const response = await fetch('https://api.github.com/user', {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -162,7 +160,6 @@ export class McpService {
 
     const githubUser = await response.json();
 
-    // Create connection
     return await this.createConnection(userId, {
       provider: 'github',
       provider_user_id: githubUser.id.toString(),

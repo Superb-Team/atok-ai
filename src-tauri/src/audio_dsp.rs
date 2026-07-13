@@ -10,16 +10,66 @@
 //!   - No mic LPF (Whisper needs full bandwidth for sibilant recognition)
 //!   - Noise gate with soft knee (no hard on/off transitions)
 
-pub struct AudioDsp {
-    // Loudness leveler: targets a fixed mic loudness (BS.1770 K-weighted) instead
-    // of a fixed gain, so speech sits at a consistent level across a long meeting.
-    mic_target_lufs: f32,
-    leveler_gain: f32,
+/// Adaptive loudness leveler: slews a gain toward the value that lands the
+/// stream at `target_lufs` (BS.1770 K-weighted) instead of using a fixed gain,
+/// so speech sits at a consistent level across a long meeting. Near-silent
+/// windows hold the gain (never amplifies room tone or digital silence).
+struct LoudnessLeveler {
+    target_lufs: f32,
+    min_gain_db: f32,
+    max_gain_db: f32,
+    gain: f32,
     // Mono samples awaiting a loudness measurement. Callers that feed tiny buffers
     // (e.g. the Windows ~5ms WASAPI loop) accumulate here until a full window is
     // available, so the leveler engages regardless of per-call buffer size.
-    leveler_accum: Vec<f32>,
-    sys_gain: f32,
+    accum: Vec<f32>,
+}
+
+impl LoudnessLeveler {
+    fn new(target_lufs: f32, min_gain_db: f32, max_gain_db: f32, initial_gain_db: f32) -> Self {
+        Self {
+            target_lufs,
+            min_gain_db,
+            max_gain_db,
+            gain: db_to_linear(initial_gain_db),
+            accum: Vec::new(),
+        }
+    }
+
+    /// Feed interleaved stereo samples; downmixes to mono so the 48kHz
+    /// K-weighting sees the correct time base, then re-levels once a full
+    /// measurement window is available.
+    fn update(&mut self, stereo: &[f32]) {
+        // Fast path: a large buffer (Linux 3-min chunk / macOS whole take) already
+        // exceeds the window — measure it directly with no cross-call buffering.
+        if self.accum.is_empty() && stereo.len() / 2 >= LEVELER_WINDOW_SAMPLES {
+            let mono: Vec<f32> = stereo.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])).collect();
+            self.measure(&mono);
+            return;
+        }
+        self.accum
+            .extend(stereo.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])));
+        if self.accum.len() >= LEVELER_WINDOW_SAMPLES {
+            let buf = std::mem::take(&mut self.accum);
+            self.measure(&buf);
+        }
+    }
+
+    fn measure(&mut self, mono: &[f32]) {
+        if let Some(lufs) = kweighted_lufs(mono) {
+            let gain_db = (self.target_lufs - lufs).clamp(self.min_gain_db, self.max_gain_db);
+            let desired = db_to_linear(gain_db);
+            self.gain = self.gain * 0.4 + desired * 0.6;
+        }
+    }
+}
+
+pub struct AudioDsp {
+    mic_leveler: LoudnessLeveler,
+    // System audio also gets leveled: the PulseAudio monitor signal follows the
+    // sink volume, so remote voices arrive as quiet as the user's earphone knob.
+    // A wider up-side clamp lets the leveler recover a low playback volume.
+    sys_leveler: LoudnessLeveler,
     mix_headroom: f32,
 
     // Noise gate — envelope follower with soft knee
@@ -56,12 +106,13 @@ impl AudioDsp {
         let (b40, a40) = butterworth_hpf_coeffs(40.0, fs);
 
         Self {
-            // -20 LUFS mic stem keeps speech well under the limiter and not hot/harsh.
-            // leveler_gain starts at -6dB (sane first-chunk level before measurement).
-            mic_target_lufs: -20.0,
-            leveler_gain: db_to_linear(-6.0),
-            leveler_accum: Vec::new(),
-            sys_gain: db_to_linear(system_gain_db),
+            // -20 LUFS stems keep speech well under the limiter and not hot/harsh.
+            // Mic starts at -6dB (sane first-chunk level before measurement) and can
+            // be pulled down to -18dB for a hot close-talking mic. Sys starts at the
+            // caller's trim and can be boosted up to +18dB when the user listens at
+            // low volume, so both sides land at comparable loudness for Whisper.
+            mic_leveler: LoudnessLeveler::new(-20.0, -18.0, 12.0, -6.0),
+            sys_leveler: LoudnessLeveler::new(-20.0, -12.0, 18.0, system_gain_db),
             // 0.60: prevents summed (sys+mic) from slamming the limiter.
             // Was 0.75 which allowed mic alone to exceed 1.0 before limiter.
             mix_headroom: 0.60,
@@ -104,7 +155,6 @@ impl AudioDsp {
         let sys_f = pcm_bytes_to_f32(sys_pcm);
         let mic_f = pcm_bytes_to_f32(mic_pcm);
 
-        // Handle mic-only (no system audio) — still apply full gain staging + limiter
         if mic_f.is_empty() && sys_f.is_empty() {
             return Vec::new();
         }
@@ -120,7 +170,6 @@ impl AudioDsp {
         } else if has_sys {
             align_to_stereo(sys_f.len())
         } else {
-            // Mic-only: process through full chain (HPF → gate → gain → limiter)
             align_to_stereo(mic_f.len())
         };
 
@@ -128,10 +177,13 @@ impl AudioDsp {
             return Vec::new();
         }
 
-        // Measure the mic's loudness for this chunk and slew the leveler gain
+        // Measure each stream's loudness for this chunk and slew its leveler gain
         // toward the target. One gain per chunk → no intra-chunk pumping.
         if has_mic {
-            self.update_leveler(&mic_f);
+            self.mic_leveler.update(&mic_f);
+        }
+        if has_sys {
+            self.sys_leveler.update(&sys_f);
         }
 
         let mut mixed = Vec::with_capacity(len);
@@ -139,29 +191,23 @@ impl AudioDsp {
         for i in 0..len {
             let ch = i % 2;
 
-            // Mic chain: HPF → gate → gain
             let mic = if has_mic && i < mic_f.len() {
                 let mic_hp = self.apply_mic_hpf(mic_f[i], ch);
                 let gate = self.noise_gate_gain(mic_hp.abs(), ch);
-                mic_hp * gate * self.leveler_gain
+                mic_hp * gate * self.mic_leveler.gain
             } else {
                 0.0
             };
 
-            // System: just gain (already clean digital audio)
+            // System audio skips the HPF/gate: it's already clean digital audio.
             let sys = if has_sys && i < sys_f.len() {
-                sys_f[i] * self.sys_gain
+                sys_f[i] * self.sys_leveler.gain
             } else {
                 0.0
             };
 
-            // Mix
             let sum = (sys + mic) * self.mix_headroom;
-
-            // Mix HPF: remove DC/subsonic
             let filtered = self.apply_mix_hpf(sum, ch);
-
-            // True-peak limiter
             let limited = self.true_peak_limit(filtered);
 
             mixed.push(limited);
@@ -185,36 +231,6 @@ impl AudioDsp {
         // Smooth hermite interpolation for soft knee
         let smooth = ratio * ratio * (3.0 - 2.0 * ratio);
         self.gate_floor + (1.0 - self.gate_floor) * smooth
-    }
-
-    /// Slew the leveler gain toward the value that lands the mic at the target
-    /// loudness. Silent/near-silent windows hold the gain so the leveler never
-    /// amplifies background noise. Downmixes interleaved stereo → mono so the
-    /// 48kHz K-weighting sees the correct time base.
-    fn update_leveler(&mut self, mic_f: &[f32]) {
-        // Fast path: a large buffer (Linux 3-min chunk / macOS whole take) already
-        // exceeds the window — measure it directly with no cross-call buffering.
-        if self.leveler_accum.is_empty() && mic_f.len() / 2 >= LEVELER_WINDOW_SAMPLES {
-            let mono: Vec<f32> = mic_f.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])).collect();
-            self.apply_leveler_measurement(&mono);
-            return;
-        }
-        // Slow path: small buffers (Windows ~5ms WASAPI packets) — accumulate until
-        // a full window is available, then measure and reset.
-        self.leveler_accum
-            .extend(mic_f.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])));
-        if self.leveler_accum.len() >= LEVELER_WINDOW_SAMPLES {
-            let buf = std::mem::take(&mut self.leveler_accum);
-            self.apply_leveler_measurement(&buf);
-        }
-    }
-
-    fn apply_leveler_measurement(&mut self, mono: &[f32]) {
-        if let Some(lufs) = kweighted_lufs(mono) {
-            let gain_db = (self.mic_target_lufs - lufs).clamp(-12.0, 12.0);
-            let desired = db_to_linear(gain_db);
-            self.leveler_gain = self.leveler_gain * 0.4 + desired * 0.6;
-        }
     }
 
     fn apply_mic_hpf(&mut self, input: f32, ch: usize) -> f32 {
@@ -500,7 +516,45 @@ mod tests {
         for _ in 0..4 {
             let _ = dsp.process(&sys, &mic);
         }
-        assert!(dsp.leveler_gain > 1.0, "leveler_gain={}", dsp.leveler_gain);
+        assert!(
+            dsp.mic_leveler.gain > 1.0,
+            "mic leveler gain={}",
+            dsp.mic_leveler.gain
+        );
+    }
+
+    #[test]
+    fn sys_leveler_raises_gain_for_quiet_sys() {
+        // Quiet monitor signal (user listening at low earphone volume) must be
+        // brought up toward the target instead of staying buried under the mic.
+        let mut dsp = AudioDsp::new(0.0);
+        let sys = sine_pcm(0.05, 48000); // ~-30 LUFS, well below the -20 target
+        let mic = vec![0u8; 48000 * 2];
+        for _ in 0..4 {
+            let _ = dsp.process(&sys, &mic);
+        }
+        assert!(
+            dsp.sys_leveler.gain > 1.0,
+            "sys leveler gain={}",
+            dsp.sys_leveler.gain
+        );
+    }
+
+    #[test]
+    fn sys_leveler_holds_on_silence() {
+        // Digital silence between speech must never be boosted — the loudness
+        // gate returns None so the gain holds at its initial value.
+        let mut dsp = AudioDsp::new(0.0);
+        let sys = vec![0u8; 48000 * 2];
+        let mic = vec![0u8; 48000 * 2];
+        for _ in 0..4 {
+            let _ = dsp.process(&sys, &mic);
+        }
+        assert!(
+            (dsp.sys_leveler.gain - 1.0).abs() < 1e-6,
+            "sys leveler moved on silence: {}",
+            dsp.sys_leveler.gain
+        );
     }
 
     #[test]
@@ -542,9 +596,9 @@ mod tests {
             let _ = dsp.process(&sys, &mic);
         }
         assert!(
-            dsp.leveler_gain > 1.0,
+            dsp.mic_leveler.gain > 1.0,
             "leveler never engaged with small buffers: {}",
-            dsp.leveler_gain
+            dsp.mic_leveler.gain
         );
     }
 
@@ -556,6 +610,10 @@ mod tests {
         for _ in 0..4 {
             let _ = dsp.process(&sys, &mic);
         }
-        assert!(dsp.leveler_gain < 0.45, "leveler_gain={}", dsp.leveler_gain);
+        assert!(
+            dsp.mic_leveler.gain < 0.45,
+            "mic leveler gain={}",
+            dsp.mic_leveler.gain
+        );
     }
 }

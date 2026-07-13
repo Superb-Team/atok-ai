@@ -67,7 +67,6 @@ impl DesktopAudioRecorder {
         unsafe {
             println!("🎙️ Starting MIC + DESKTOP recording...");
 
-            // Initialize COM
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             if hr.0 < 0 {
                 return Err(Error::from_hresult(hr));
@@ -79,12 +78,10 @@ impl DesktopAudioRecorder {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
-            // Get DESKTOP audio device (loopback)
             let desktop_device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
             let desktop_client: IAudioClient = desktop_device.Activate(CLSCTX_ALL, None)?;
             let desktop_format = desktop_client.GetMixFormat()?;
 
-            // Get MICROPHONE device
             let mic_device = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)?;
             let mic_client: IAudioClient = mic_device.Activate(CLSCTX_ALL, None)?;
             let mic_format = mic_client.GetMixFormat()?;
@@ -137,7 +134,6 @@ impl DesktopAudioRecorder {
                     mic_sample_rate, processing_sample_rate
                 );
             }
-            // Initialize desktop audio (LOOPBACK)
             desktop_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -147,19 +143,16 @@ impl DesktopAudioRecorder {
                 None,
             )?;
 
-            // Initialize microphone
             mic_client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, mic_format, None)?;
 
             let desktop_capture: IAudioCaptureClient = desktop_client.GetService()?;
             let mic_capture: IAudioCaptureClient = mic_client.GetService()?;
 
-            // Start both
             desktop_client.Start()?;
             mic_client.Start()?;
 
             println!("✅ Recording started!");
 
-            // Setup MP3 encoder - ensure we use the exact path provided
             let mp3_path = if output_path.extension().and_then(|s| s.to_str()) == Some("mp3") {
                 output_path.clone()
             } else {
@@ -189,7 +182,6 @@ impl DesktopAudioRecorder {
                 .build()
                 .map_err(|_| Error::from_hresult(HRESULT(0x80070002_u32 as i32)))?;
 
-            // Ensure parent directory exists
             if let Some(parent) = mp3_path.parent() {
                 if !parent.exists() {
                     std::fs::create_dir_all(parent).map_err(|e| {
@@ -215,11 +207,10 @@ impl DesktopAudioRecorder {
             let chunk_size = 1152 * output_channels;
             let mut sample_buffer: Vec<i16> = Vec::with_capacity(chunk_size);
 
-            // Separate buffers for desktop and mic to handle async capture
+            // Separate buffers for desktop and mic to handle async capture.
             let mut desktop_buffer: Vec<i16> = Vec::new();
             let mut mic_buffer: Vec<i16> = Vec::new();
 
-            // AEC: persistent across the entire recording session
             let mut aec = AudioAec::new(AecConfig {
                 enabled: aec_enabled,
                 capture_channels: capture_channels as i32,
@@ -227,7 +218,6 @@ impl DesktopAudioRecorder {
                 ..Default::default()
             });
 
-            // Shared DSP chain, state persistent across the whole session.
             let mut dsp = crate::audio_dsp::AudioDsp::new(0.0);
 
             let mut mic_sample_count = 0u64;
@@ -237,7 +227,6 @@ impl DesktopAudioRecorder {
 
             // Recording loop - encode to MP3 in real-time
             loop {
-                // Check if we should stop
                 {
                     let should_stop = !*is_recording.lock().unwrap();
                     if should_stop {
@@ -248,7 +237,6 @@ impl DesktopAudioRecorder {
 
                 std::thread::sleep(std::time::Duration::from_millis(5));
 
-                // Capture DESKTOP audio
                 let desktop_packet = desktop_capture.GetNextPacketSize()?;
                 if desktop_packet > 0 {
                     let mut data: *mut u8 = std::ptr::null_mut();
@@ -282,7 +270,6 @@ impl DesktopAudioRecorder {
                     desktop_capture.ReleaseBuffer(frames)?;
                 }
 
-                // Capture MICROPHONE audio
                 let mic_packet = mic_capture.GetNextPacketSize()?;
                 if mic_packet > 0 {
                     let mut data: *mut u8 = std::ptr::null_mut();
@@ -330,7 +317,6 @@ impl DesktopAudioRecorder {
                     &mut dsp,
                 );
 
-                // Encode when we have enough samples
                 while sample_buffer.len() >= chunk_size {
                     let chunk: Vec<i16> = sample_buffer.drain(..chunk_size).collect();
 
@@ -362,7 +348,6 @@ impl DesktopAudioRecorder {
                 desktop_sample_count, mic_sample_count
             );
 
-            // Stop audio capture
             desktop_client.Stop()?;
             mic_client.Stop()?;
 
@@ -382,7 +367,6 @@ impl DesktopAudioRecorder {
                 &mut dsp,
             );
 
-            // Encode remaining samples
             if !sample_buffer.is_empty() {
                 let bytes_written = if output_channels == 1 {
                     mp3_encoder.encode(MonoPcm(&sample_buffer), &mut mp3_buffer)
@@ -400,7 +384,6 @@ impl DesktopAudioRecorder {
                 }
             }
 
-            // Flush MP3 encoder
             let bytes_written = mp3_encoder
                 .flush::<FlushNoGap>(&mut mp3_buffer)
                 .map_err(|_| Error::from_hresult(HRESULT(0x80070002_u32 as i32)))?;
@@ -413,7 +396,6 @@ impl DesktopAudioRecorder {
                     .map_err(|_| Error::from_hresult(HRESULT(0x80070002_u32 as i32)))?;
             }
 
-            // Ensure all data is written to disk
             mp3_file.sync_all().map_err(|e| {
                 eprintln!("❌ Failed to sync file: {}", e);
                 Error::from_hresult(HRESULT(0x80070002_u32 as i32))
@@ -423,7 +405,6 @@ impl DesktopAudioRecorder {
 
             println!("✅ Recording saved: {}", mp3_path.display());
 
-            // Verify file exists
             if mp3_path.exists() {
                 let metadata = std::fs::metadata(&mp3_path)
                     .map_err(|_| Error::from_hresult(HRESULT(0x80070002_u32 as i32)))?;
@@ -700,7 +681,6 @@ impl DesktopAudioRecorder {
     pub fn stop_recording(&self) -> Result<(), String> {
         println!("Stopping recording...");
 
-        // Set flag to stop recording
         {
             let mut recording = self.is_recording.lock().map_err(|e| e.to_string())?;
             if !*recording {
@@ -710,16 +690,13 @@ impl DesktopAudioRecorder {
             *recording = false;
         }
 
-        // Give thread time to finish gracefully
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Try to join thread with timeout
         let mut thread_lock = self.recording_thread.lock().map_err(|e| e.to_string())?;
         if let Some(handle) = thread_lock.take() {
-            // Spawn a timeout thread to avoid blocking forever
             let join_handle = std::thread::spawn(move || handle.join());
 
-            // Wait max 2 seconds for thread to finish
+            // Wait max 2 seconds for the thread to finish before giving up on it.
             for _ in 0..20 {
                 if join_handle.is_finished() {
                     let _ = join_handle.join();
@@ -759,7 +736,6 @@ impl DesktopAudioRecorder {
                 .GetCount()
                 .map_err(|e| format!("GetCount failed: {}", e))?;
 
-            // Get default device name
             let default_name = {
                 match enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
                     Ok(device) => Self::get_device_friendly_name(&device).unwrap_or_default(),
@@ -784,7 +760,7 @@ impl DesktopAudioRecorder {
 
             devices.sort_by(|a, b| {
                 b.is_default
-                    .cmp(&a.is_default) // default device first
+                    .cmp(&a.is_default)
                     .then_with(|| a.display_name.cmp(&b.display_name))
             });
 
@@ -843,7 +819,6 @@ impl DesktopAudioRecorder {
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
                     .map_err(|e| format!("MMDeviceEnumerator create failed: {}", e))?;
 
-            // Mic detection
             let (mic_available, mic_name) =
                 match enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
                     Ok(device) => {
@@ -853,7 +828,6 @@ impl DesktopAudioRecorder {
                     Err(_) => (false, None),
                 };
 
-            // System audio detection (loopback via eRender)
             let (sys_available, sys_name) =
                 match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
                     Ok(device) => {

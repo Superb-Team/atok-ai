@@ -29,7 +29,6 @@ export const authService = {
     }
   },
 
-  // Local storage helpers
   saveToken(token: string): void {
     localStorage.setItem("auth_token", token);
   },

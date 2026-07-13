@@ -1,8 +1,4 @@
-// AI Backend — all API calls go through here (keys never exposed to frontend)
-//
-// Supported providers:
-//   - DeepInfra (OpenAI-compatible): chat completions, streaming, Whisper transcription
-//   - Agent API: custom transcription, RAG
+// AI Backend — all API calls go through here (keys never exposed to frontend). Providers: DeepInfra (OpenAI-compatible chat/streaming/Whisper) and Agent API (custom transcription, RAG).
 
 use reqwest::Client;
 use std::path::Path;
@@ -45,6 +41,11 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+// A long note can hit max_tokens mid-sentence and would previously be saved
+// truncated with no detection. When finish_reason == "length", feed the partial
+// back as an assistant turn and ask the model to continue, up to this many times.
+const CHAT_MAX_CONTINUATIONS: u32 = 2;
+
 #[tauri::command]
 pub async fn ai_chat(
     messages: Vec<ChatMessage>,
@@ -55,7 +56,7 @@ pub async fn ai_chat(
     let client = Client::new();
     let url = format!("{}/chat/completions", base_url);
 
-    let messages_json: Vec<serde_json::Value> = messages
+    let mut messages_json: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
             serde_json::json!({
@@ -65,40 +66,144 @@ pub async fn ai_chat(
         })
         .collect();
 
+    let mut combined = String::new();
+    for round in 0..=CHAT_MAX_CONTINUATIONS {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages_json,
+            "temperature": temperature.unwrap_or(0.7),
+            "max_tokens": max_tokens.unwrap_or(4096),
+            "top_p": 0.9,
+            // Anti-repetition: stops long completions from looping the same line near max_tokens.
+            "frequency_penalty": 0.4,
+            "presence_penalty": 0.2,
+            "repetition_penalty": 1.15,
+            "stream": false,
+        });
+
+        let response = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Chat request failed: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Chat error ({}): {}", status, error_text));
+        }
+
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse chat response: {}", e))?;
+
+        let content = data["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("No response");
+        combined.push_str(content);
+
+        let finish_reason = data["choices"][0]["finish_reason"].as_str().unwrap_or("");
+        if finish_reason != "length" || round == CHAT_MAX_CONTINUATIONS {
+            if finish_reason == "length" {
+                eprintln!(
+                    "[ai_chat] Output still truncated after {} continuations",
+                    CHAT_MAX_CONTINUATIONS
+                );
+            }
+            break;
+        }
+
+        eprintln!("[ai_chat] Output hit max_tokens; requesting continuation {}", round + 1);
+        // Push only this round's chunk — earlier chunks are already in the
+        // history as previous assistant turns.
+        messages_json.push(serde_json::json!({
+            "role": "assistant",
+            "content": content,
+        }));
+        messages_json.push(serde_json::json!({
+            "role": "user",
+            "content": "Your previous message was cut off mid-output. Continue EXACTLY where you left off — do not repeat anything already written, do not add any preamble.",
+        }));
+    }
+
+    Ok(combined)
+}
+
+/// Describe a screenshot with a vision model so the note-enhancement prompt can
+/// reference what was on screen. Non-fatal by contract: callers treat an Err as
+/// "no description" and continue.
+#[tauri::command]
+pub async fn describe_image(image_path: String, language: String) -> Result<String, String> {
+    use base64::Engine;
+
+    let (base_url, api_key, _) = get_deepinfra_config()?;
+    let model = std::env::var("VISION_MODEL")
+        .unwrap_or_else(|_| "google/gemma-4-26B-A4B-it".to_string());
+
+    let bytes = std::fs::read(&image_path).map_err(|e| format!("Read image: {}", e))?;
+    let mime = match Path::new(&image_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    };
+    let data_uri = format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+
     let body = serde_json::json!({
         "model": model,
-        "messages": messages_json,
-        "temperature": temperature.unwrap_or(0.7),
-        "max_tokens": max_tokens.unwrap_or(4096),
-        "top_p": 0.9,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": format!(
+                    "This is a screen capture taken during a meeting. Describe it concisely in {}: visible titles, bullet/slide text, tables, diagrams, and any key numbers. Plain text only, max 120 words.",
+                    language
+                ) },
+                { "type": "image_url", "image_url": { "url": data_uri } }
+            ]
+        }],
+        "temperature": 0.2,
+        "max_tokens": 512,
         "stream": false,
     });
 
-    let response = client
-        .post(&url)
+    let response = Client::new()
+        .post(format!("{}/chat/completions", base_url))
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Chat request failed: {}", e))?;
+        .map_err(|e| format!("Vision request failed: {}", e))?;
 
     let status = response.status();
     if !status.is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Chat error ({}): {}", status, error_text));
+        return Err(format!("Vision error ({}): {}", status, error_text));
     }
 
     let data: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse chat response: {}", e))?;
+        .map_err(|e| format!("Failed to parse vision response: {}", e))?;
 
-    let content = data["choices"][0]["message"]["content"]
+    Ok(data["choices"][0]["message"]["content"]
         .as_str()
-        .unwrap_or("No response");
-
-    Ok(content.to_string())
+        .unwrap_or_default()
+        .trim()
+        .to_string())
 }
 
 #[tauri::command]
@@ -127,6 +232,9 @@ pub async fn ai_chat_stream(
         "temperature": temperature.unwrap_or(0.7),
         "max_tokens": max_tokens.unwrap_or(4096),
         "top_p": 0.9,
+        "frequency_penalty": 0.4,
+        "presence_penalty": 0.2,
+        "repetition_penalty": 1.15,
         "stream": true,
     });
 
@@ -150,7 +258,6 @@ pub async fn ai_chat_stream(
         .await
         .map_err(|e| format!("Failed to read stream: {}", e))?;
 
-    // Parse SSE chunks
     let mut result = String::new();
     for line in body_text.lines() {
         if let Some(data_str) = line.strip_prefix("data: ") {
@@ -240,31 +347,38 @@ fn whisper_initial_prompt(language: &str) -> &'static str {
 /// invents subtitle/outro boilerplate from its training data — "Terima kasih",
 /// "Thank you", "like and subscribe", foreign thank-yous ("Kiitos", "Gracias") —
 /// none of which is in the audio. We split into segments (Whisper joins them with
-/// two spaces), drop any segment that is exactly a known boilerplate phrase, and
-/// collapse runs of an identical repeated segment. Real speech embeds these words
-/// inside a larger sentence, so exact-match keeps false positives negligible.
+/// two spaces; newlines are treated as boundaries too), drop segments that are
+/// exactly a known short phrase or start with a known outro, and collapse runs of
+/// an identical repeated segment. Real speech embeds the short phrases inside a
+/// larger sentence, so this two-tier match keeps false positives negligible.
 fn clean_transcript(raw: &str) -> String {
-    const HALLUCINATIONS: &[&str] = &[
+    // Short phrases people genuinely say in meetings — dropped only when a
+    // segment is EXACTLY this phrase (embedded uses stay).
+    const EXACT: &[&str] = &[
         "terima kasih",
         "terima kasih banyak",
-        "terima kasih telah menonton",
-        "terima kasih sudah menonton",
-        "terima kasih telah menyaksikan",
-        "jangan lupa like, share dan subscribe ya",
-        "jangan lupa like dan subscribe",
-        "jangan lupa subscribe",
         "like dan subscribe",
         "thank you",
-        "thank you for watching",
-        "thank you for watching this video",
-        "thanks for watching",
         "kiitos",
-        "kiitos kun katsoit",
         "gracias",
-        "gracias por ver el video",
         "subscribe",
         "please subscribe",
         "...",
+    ];
+    // Video-outro boilerplate that never occurs in real meeting speech — dropped
+    // whenever a segment STARTS with it, so long variants ("... video ini sampai
+    // habis") are caught too.
+    const OUTRO_PREFIXES: &[&str] = &[
+        "terima kasih telah menonton",
+        "terima kasih sudah menonton",
+        "terima kasih telah menyaksikan",
+        "thank you for watching",
+        "thanks for watching",
+        "jangan lupa like",
+        "jangan lupa subscribe",
+        "sampai jumpa di video",
+        "kiitos kun katsoit",
+        "gracias por ver",
     ];
 
     fn norm(s: &str) -> String {
@@ -277,13 +391,16 @@ fn clean_transcript(raw: &str) -> String {
 
     let mut kept: Vec<&str> = Vec::new();
     let mut prev_norm = String::new();
-    for seg in raw.split("  ") {
+    for seg in raw.split("  ").flat_map(|s| s.split('\n')) {
         let seg = seg.trim();
         if seg.is_empty() {
             continue;
         }
         let n = norm(seg);
-        if n.is_empty() || HALLUCINATIONS.contains(&n.as_str()) {
+        if n.is_empty()
+            || EXACT.contains(&n.as_str())
+            || OUTRO_PREFIXES.iter().any(|p| n.starts_with(p))
+        {
             continue;
         }
         if n == prev_norm {
@@ -964,6 +1081,27 @@ mod tests {
     fn clean_keeps_real_speech_and_collapses_dupes() {
         let raw = "Targetnya 1000 meter.  Targetnya 1000 meter.  Oke setuju.";
         assert_eq!(clean_transcript(raw), "Targetnya 1000 meter.  Oke setuju.");
+    }
+
+    #[test]
+    fn clean_drops_long_outro_variants() {
+        let raw = "Poin pertama sudah final.  Terima kasih telah menonton video ini sampai habis.  Sampai jumpa di video berikutnya!";
+        assert_eq!(clean_transcript(raw), "Poin pertama sudah final.");
+    }
+
+    #[test]
+    fn clean_keeps_real_thanks_inside_sentences() {
+        let raw = "Terima kasih atas presentasinya, lanjut ke agenda kedua.";
+        assert_eq!(clean_transcript(raw), raw);
+    }
+
+    #[test]
+    fn clean_handles_newline_separated_segments() {
+        let raw = "Rapat dimulai.\nTerima kasih telah menonton.\nAgenda pertama anggaran.";
+        let cleaned = clean_transcript(raw);
+        assert!(!cleaned.to_lowercase().contains("menonton"));
+        assert!(cleaned.contains("Rapat dimulai."));
+        assert!(cleaned.contains("Agenda pertama anggaran."));
     }
 
     #[test]

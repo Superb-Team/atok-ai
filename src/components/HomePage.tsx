@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
-import { FileText, Search, SlidersHorizontal, Star, X } from "lucide-react";
+import { FileText, Loader2, Search, Star, X } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface HomePageProps {
@@ -17,7 +17,9 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [pendingFavorites, setPendingFavorites] = useState<Set<number>>(new Set());
   const loadRequestId = useRef(0);
+  const lastRecordingCheck = useRef(0);
 
   const filteredNotes = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -80,22 +82,24 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     let unlisten1: (() => void) | undefined;
     let storageInterval: NodeJS.Timeout | undefined;
 
-    let lastRecordingCheck = 0;
+    // Shared between the event fast path and the localStorage poll so the same
+    // take is never processed twice (both carry the handoff timestamp).
+    const startProcessing = (audioPath: string, noteTitle: string, language: string | undefined, timestamp: number) => {
+      if (timestamp <= lastRecordingCheck.current) return;
+      lastRecordingCheck.current = timestamp;
+      localStorage.removeItem('audio_to_process');
+      setProcessingNotes(prev => new Set(prev).add(noteTitle));
+      processAudioRecording(audioPath, noteTitle, language);
+    };
 
-    // The recording popup hands off the finished take via the 'audio_to_process'
-    // localStorage key; this component picks it up, transcribes + saves the note,
-    // and clears its own processing indicator inline in processAudioRecording.
+    // Fallback handoff: the poll covers ImportAudioDialog (which only writes
+    // localStorage) and the case where the popup's event invoke failed.
     storageInterval = setInterval(() => {
       const audioData = localStorage.getItem('audio_to_process');
       if (audioData) {
         try {
           const { audioPath, noteTitle, language, timestamp } = JSON.parse(audioData);
-          if (timestamp > lastRecordingCheck) {
-            lastRecordingCheck = timestamp;
-            setProcessingNotes(prev => new Set(prev).add(noteTitle));
-            localStorage.removeItem('audio_to_process');
-            processAudioRecording(audioPath, noteTitle, language);
-          }
+          startProcessing(audioPath, noteTitle, language, timestamp);
         } catch {
           localStorage.removeItem('audio_to_process');
         }
@@ -106,9 +110,14 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       try {
         const { listen } = await import('@tauri-apps/api/event');
 
+        // Fast path: the recording popup sends the full handoff in the event
+        // payload, so processing starts immediately instead of waiting for the
+        // next poll tick. Older payloads without audioPath still show the card.
         unlisten1 = await listen('recording-started', (event: any) => {
-          const noteTitle = event.payload?.noteTitle;
-          if (noteTitle) {
+          const { noteTitle, audioPath, language, timestamp } = event.payload ?? {};
+          if (noteTitle && audioPath && typeof timestamp === 'number') {
+            startProcessing(audioPath, noteTitle, language ?? undefined, timestamp);
+          } else if (noteTitle) {
             setProcessingNotes(prev => new Set(prev).add(noteTitle));
           }
         });
@@ -154,6 +163,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   };
 
   const handleToggleFavorite = async (noteId: number) => {
+    setPendingFavorites((prev) => new Set(prev).add(noteId));
     try {
       const user = authService.getUser();
       if (!user) return;
@@ -162,13 +172,30 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       await loadNotes();
     } catch (err) {
       console.error("Failed to toggle favorite:", err);
+    } finally {
+      setPendingFavorites((prev) => {
+        const next = new Set(prev);
+        next.delete(noteId);
+        return next;
+      });
     }
   };
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-gray-50 dark:bg-neutral-900">
-        <p className="text-neutral-600 dark:text-neutral-400">Loading notes...</p>
+      <div className="flex h-screen flex-1 flex-col overflow-hidden bg-background">
+        <div className="flex-1 overflow-y-auto px-10 pb-10 pt-9">
+          <div className="mx-auto max-w-7xl">
+            <div className="h-10 w-44 animate-pulse rounded-lg bg-muted" />
+            <div className="mt-2 h-4 w-64 animate-pulse rounded-md bg-muted/70" />
+            <div className="mt-8 h-11 animate-pulse rounded-lg bg-muted/70" />
+            <div className="mt-8 grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <SkeletonNoteCard key={i} />
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -186,44 +213,46 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         mode="alert"
         variant="destructive"
       />
-      <div className="flex-1 flex flex-col h-screen overflow-hidden bg-neutral-950">
-      <div className="px-8 py-6 border-b border-white/10 bg-neutral-950/85 backdrop-blur-sm">
-        <div className="max-w-7xl mx-auto flex flex-col gap-1">
-          <h1 className="text-3xl font-bold tracking-tight text-white">
-            My Notes
-          </h1>
-          <p className="text-sm text-neutral-400">
-            Search, organize, and revisit your workspace knowledge.
-          </p>
-        </div>
-      </div>
+      <div className="flex h-screen flex-1 flex-col overflow-hidden bg-background">
+        <div className="flex-1 overflow-y-auto px-10 pb-16 pt-9">
+          <div className="mx-auto max-w-7xl">
+            <header className="flex items-end justify-between gap-6">
+              <div>
+                <h1 className="font-display text-[2rem] font-semibold leading-tight tracking-tight text-foreground">
+                  Notes
+                </h1>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Everything you have written and recorded, in one place.
+                </p>
+              </div>
+              <p className="hidden shrink-0 pb-1 font-mono text-xs text-muted-foreground sm:block">
+                {filteredNotes.length} of {notes.filter((n) => !n.is_archived).length} notes
+              </p>
+            </header>
 
-      <div className="flex-1 overflow-y-auto p-8">
-        <div className="max-w-7xl mx-auto">
-          {error && (
-            <div className="mb-6 rounded-2xl border border-red-500/30 bg-red-950/30 p-4 text-sm text-red-200">
-              {error}
-            </div>
-          )}
+            {error && (
+              <div className="mt-6 rounded-lg border border-destructive/25 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                {error}
+              </div>
+            )}
 
-          <div className="mb-6 rounded-[1.75rem] border border-white/10 bg-[#111111]/90 p-4 shadow-xl shadow-black/20 backdrop-blur">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div className="flex h-12 flex-1 items-center gap-3 rounded-2xl border border-white/[0.08] bg-black/25 px-4 transition focus-within:border-white/20 focus-within:bg-black/35 focus-within:ring-2 focus-within:ring-white/[0.06]">
-                <Search className="h-4 w-4 shrink-0 text-neutral-500" />
+            <div className="mt-7 flex flex-col gap-3 border-b border-border pb-5 md:flex-row md:items-center">
+              <div className="flex h-10 flex-1 items-center gap-2.5 rounded-lg border border-input bg-card px-3.5 transition-colors focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/20">
+                <Search className="h-4 w-4 shrink-0 text-muted-foreground/70" strokeWidth={1.75} />
                 <input
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Search notes by title, content, or tag..."
-                  className="min-w-0 flex-1 bg-transparent text-sm text-neutral-100 outline-none placeholder:text-neutral-500"
+                  placeholder="Search title, content, or tag"
+                  className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground/60"
                 />
                 {searchQuery && (
                   <button
                     type="button"
                     onClick={() => setSearchQuery("")}
-                    className="shrink-0 rounded-lg p-1 text-neutral-500 transition hover:bg-white/10 hover:text-neutral-200"
+                    className="shrink-0 rounded-md p-1 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
                     aria-label="Clear search"
                   >
-                    <X className="h-4 w-4" />
+                    <X className="h-3.5 w-3.5" />
                   </button>
                 )}
               </div>
@@ -232,60 +261,65 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
                 <button
                   type="button"
                   onClick={() => setFavoriteOnly((value) => !value)}
-                  className={`inline-flex h-11 items-center gap-2 rounded-2xl border px-4 text-sm font-medium transition ${
+                  aria-pressed={favoriteOnly}
+                  className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 text-sm font-medium transition-colors active:scale-[0.98] ${
                     favoriteOnly
-                      ? "border-white/20 bg-white/[0.09] text-white"
-                      : "border-white/[0.08] bg-black/25 text-neutral-300 hover:border-white/15 hover:bg-white/[0.06]"
+                      ? "border-primary/35 bg-primary/10 text-primary"
+                      : "border-input bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
                   }`}
                 >
-                  <Star className={`h-4 w-4 ${favoriteOnly ? "fill-current" : ""}`} />
+                  <Star
+                    className={`h-4 w-4 ${favoriteOnly ? "fill-current" : ""}`}
+                    strokeWidth={1.75}
+                  />
                   Favorites
                 </button>
                 {hasActiveFilters && (
                   <button
                     type="button"
                     onClick={clearFilters}
-                    className="inline-flex h-11 items-center gap-2 rounded-2xl border border-white/[0.08] bg-black/25 px-4 text-sm font-medium text-neutral-400 transition hover:border-white/15 hover:bg-white/[0.06] hover:text-neutral-200"
+                    className="inline-flex h-10 items-center rounded-lg px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                   >
-                    <SlidersHorizontal className="h-4 w-4" />
-                    Clear
+                    Reset
                   </button>
                 )}
               </div>
             </div>
-          </div>
 
-          {notes.length === 0 && processingNotes.size === 0 ? (
-            <EmptyState
-              title="No notes yet"
-              description="Create your first note or record audio to start building your workspace."
-            />
-          ) : filteredNotes.length === 0 && processingNotes.size === 0 ? (
-            <EmptyState
-              title="No matching notes"
-              description="Try another keyword or clear the active filters."
-              actionLabel="Clear filters"
-              onAction={clearFilters}
-            />
-          ) : (
-            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
-              {Array.from(processingNotes).map((noteTitle) => (
-                <LoadingNoteCard key={noteTitle} title={noteTitle} />
-              ))}
-
-              {filteredNotes.map((note) => (
-                <NoteCard
-                  key={note.id}
-                  note={note}
-                  onToggleFavorite={handleToggleFavorite}
-                  onClick={() => onNoteClick?.(note.id)}
+            <div className="mt-7">
+              {notes.length === 0 && processingNotes.size === 0 ? (
+                <EmptyState
+                  title="No notes yet"
+                  description="Create your first note, or record audio and let the transcript become one."
                 />
-              ))}
+              ) : filteredNotes.length === 0 && processingNotes.size === 0 ? (
+                <EmptyState
+                  title="Nothing matches"
+                  description="Try another keyword, or reset the active filters."
+                  actionLabel="Reset filters"
+                  onAction={clearFilters}
+                />
+              ) : (
+                <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+                  {Array.from(processingNotes).map((noteTitle) => (
+                    <LoadingNoteCard key={noteTitle} title={noteTitle} />
+                  ))}
+
+                  {filteredNotes.map((note) => (
+                    <NoteCard
+                      key={note.id}
+                      note={note}
+                      onToggleFavorite={handleToggleFavorite}
+                      favoritePending={pendingFavorites.has(note.id)}
+                      onClick={() => onNoteClick?.(note.id)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </div>
-    </div>
     </>
   );
 }
@@ -308,17 +342,17 @@ function EmptyState({
   onAction?: () => void;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center rounded-3xl border border-white/10 bg-neutral-900/60 px-6 py-20 text-center shadow-2xl shadow-black/20">
-      <div className="mb-5 inline-flex h-16 w-16 items-center justify-center rounded-2xl border border-white/10 bg-neutral-950/80">
-        <FileText className="h-8 w-8 text-neutral-500" />
+    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/50 px-6 py-24 text-center">
+      <div className="mb-5 inline-flex h-14 w-14 items-center justify-center rounded-xl bg-primary/10">
+        <FileText className="h-6 w-6 text-primary" strokeWidth={1.5} />
       </div>
-      <h2 className="text-xl font-semibold text-white">{title}</h2>
-      <p className="mt-2 max-w-md text-sm leading-6 text-neutral-400">{description}</p>
+      <h2 className="font-display text-lg font-semibold text-foreground">{title}</h2>
+      <p className="mt-1.5 max-w-sm text-sm leading-6 text-muted-foreground">{description}</p>
       {actionLabel && onAction && (
         <button
           type="button"
           onClick={onAction}
-          className="mt-6 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-neutral-200 transition hover:bg-white/10"
+          className="mt-6 rounded-lg border border-input bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent active:scale-[0.98]"
         >
           {actionLabel}
         </button>
@@ -327,28 +361,48 @@ function EmptyState({
   );
 }
 
-function LoadingNoteCard({ title }: { title: string }) {
+function SkeletonNoteCard() {
   return (
-    <div className="min-h-[250px] rounded-[1.75rem] border border-white/[0.08] bg-[#151515] p-5 shadow-xl shadow-black/20 animate-pulse">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">Processing</p>
-          <h3 className="mt-2 line-clamp-2 text-lg font-semibold text-neutral-50">{title}</h3>
+    <div className="min-h-[230px] animate-pulse rounded-xl border border-border bg-card p-5">
+      <div className="mb-5 flex items-start justify-between gap-4">
+        <div className="flex-1 space-y-2.5">
+          <div className="h-5 w-3/4 rounded-md bg-muted" />
+          <div className="h-3 w-1/3 rounded-md bg-muted/70" />
         </div>
-        <div className="h-9 w-9 rounded-2xl bg-white/5" />
+        <div className="h-8 w-8 rounded-lg bg-muted/70" />
       </div>
       <div className="space-y-2">
-        <div className="h-2 rounded-full bg-white/10" />
-        <div className="h-2 w-5/6 rounded-full bg-white/10" />
-        <div className="h-2 w-2/3 rounded-full bg-white/10" />
+        <div className="h-2.5 rounded-full bg-muted/70" />
+        <div className="h-2.5 w-5/6 rounded-full bg-muted/70" />
+        <div className="h-2.5 w-2/3 rounded-full bg-muted/70" />
       </div>
-      <div className="mt-6 flex items-center gap-2 text-sm text-neutral-500">
+    </div>
+  );
+}
+
+function LoadingNoteCard({ title }: { title: string }) {
+  return (
+    <div className="flex min-h-[230px] flex-col rounded-xl border border-primary/25 bg-card p-5">
+      <div className="mb-4">
+        <p className="font-mono text-[11px] uppercase tracking-widest text-primary">
+          Transcribing
+        </p>
+        <h3 className="mt-2 line-clamp-2 font-display text-[17px] font-semibold leading-snug text-foreground">
+          {title}
+        </h3>
+      </div>
+      <div className="animate-pulse space-y-2">
+        <div className="h-2 rounded-full bg-muted" />
+        <div className="h-2 w-5/6 rounded-full bg-muted" />
+        <div className="h-2 w-2/3 rounded-full bg-muted" />
+      </div>
+      <div className="mt-auto flex items-center gap-2.5 pt-6 text-sm text-muted-foreground">
         <div className="flex space-x-1">
-          <div className="h-1.5 w-1.5 rounded-full bg-neutral-500 animate-bounce [animation-delay:-0.3s]" />
-          <div className="h-1.5 w-1.5 rounded-full bg-neutral-500 animate-bounce [animation-delay:-0.15s]" />
-          <div className="h-1.5 w-1.5 rounded-full bg-neutral-500 animate-bounce" />
+          <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+          <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+          <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
         </div>
-        Generating notes
+        Writing the note
       </div>
     </div>
   );
@@ -357,73 +411,77 @@ function LoadingNoteCard({ title }: { title: string }) {
 interface NoteCardProps {
   note: Note;
   onToggleFavorite: (noteId: number) => void;
+  favoritePending?: boolean;
   onClick?: () => void;
 }
 
-function NoteCard({ note, onToggleFavorite, onClick }: NoteCardProps) {
+function NoteCard({ note, onToggleFavorite, favoritePending, onClick }: NoteCardProps) {
   const tags = note.tags ?? [];
   const preview = cleanNotePreview(note.content);
 
   return (
     <article
       onClick={onClick}
-      className="group relative flex min-h-[250px] cursor-pointer flex-col overflow-hidden rounded-[1.75rem] border border-white/[0.08] bg-[#151515] p-5 shadow-xl shadow-black/20 transition-all duration-200 hover:-translate-y-0.5 hover:border-white/15 hover:bg-[#191919]"
+      className="group relative flex min-h-[230px] cursor-pointer flex-col overflow-hidden rounded-xl border border-border bg-card p-5 shadow-xs transition-all duration-200 hover:-translate-y-0.5 hover:border-ring/35 hover:shadow-md"
     >
-
-      <div className="relative mb-4 flex items-start justify-between gap-4">
+      <div className="mb-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h3 className="line-clamp-2 text-lg font-semibold leading-snug text-white">
+          <div className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground/80">
+            {note.color && (
+              <span
+                aria-hidden
+                className="h-2 w-2 shrink-0 rounded-full ring-1 ring-black/10 dark:ring-white/15"
+                style={{ backgroundColor: note.color }}
+              />
+            )}
+            {formatNoteDate(note.updated_at)}
+          </div>
+          <h3 className="mt-2 line-clamp-2 font-display text-[17px] font-semibold leading-snug text-foreground">
             {note.title}
           </h3>
-          <p className="mt-2 text-xs text-neutral-500">
-            Updated {formatNoteDate(note.updated_at)}
-          </p>
         </div>
         <button
           onClick={(e) => {
             e.stopPropagation();
-            onToggleFavorite(note.id);
+            if (!favoritePending) onToggleFavorite(note.id);
           }}
-          className={`rounded-2xl border p-2 transition ${
+          disabled={favoritePending}
+          className={`rounded-lg p-2 transition-colors disabled:cursor-wait ${
             note.is_favorite
-              ? "border-amber-400/30 bg-amber-400/10 text-amber-300"
-              : "border-white/10 bg-white/[0.03] text-neutral-500 hover:bg-white/10 hover:text-neutral-200"
+              ? "text-primary"
+              : "text-muted-foreground/40 opacity-0 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
           }`}
           aria-label={note.is_favorite ? "Remove from favorites" : "Add to favorites"}
         >
-          <Star className={`h-4 w-4 ${note.is_favorite ? "fill-current" : ""}`} />
+          {favoritePending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Star
+              className={`h-4 w-4 ${note.is_favorite ? "fill-current" : ""}`}
+              strokeWidth={1.75}
+            />
+          )}
         </button>
       </div>
 
-      <p className="relative line-clamp-4 flex-1 text-sm leading-6 text-neutral-300/85">
+      <p className="line-clamp-4 flex-1 text-sm leading-6 text-muted-foreground">
         {preview || "No content yet."}
       </p>
 
-      <div className="relative mt-5 border-t border-white/10 pt-4">
-        <div className="flex flex-wrap gap-2">
-          {tags.length > 0 ? (
-            <>
-              {tags.slice(0, 3).map((tag) => (
-                <span
-                  key={tag}
-                  className="rounded-full border border-white/10 bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-neutral-300"
-                >
-                  {tag}
-                </span>
-              ))}
-              {tags.length > 3 && (
-                <span className="rounded-full px-2.5 py-1 text-[11px] font-medium text-neutral-500">
-                  +{tags.length - 3}
-                </span>
-              )}
-            </>
-          ) : (
-            <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium text-neutral-500">
-              note
+      {tags.length > 0 && (
+        <div className="mt-4 flex flex-wrap gap-x-3 gap-y-1 border-t border-border pt-3.5">
+          {tags.slice(0, 3).map((tag) => (
+            <span key={tag} className="font-mono text-[11px] text-muted-foreground/80">
+              #{tag}
+            </span>
+          ))}
+          {tags.length > 3 && (
+            <span className="font-mono text-[11px] text-muted-foreground/50">
+              +{tags.length - 3}
             </span>
           )}
         </div>
-      </div>
+      )}
     </article>
   );
 }
@@ -437,9 +495,16 @@ function cleanNotePreview(content?: string) {
 }
 
 function formatNoteDate(value: string) {
-  return new Date(value).toLocaleDateString(undefined, {
+  const date = new Date(value);
+  const now = new Date();
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
+
+  if (dayDiff === 0) return "Today";
+  if (dayDiff === 1) return "Yesterday";
+  return date.toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
-    year: "numeric",
+    ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}),
   });
 }

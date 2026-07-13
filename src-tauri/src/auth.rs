@@ -9,12 +9,11 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
-// JWT Claims structure
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: String, // user id
+    sub: String,
     email: String,
-    exp: usize, // expiration time
+    exp: usize,
 }
 
 fn get_jwt_secret() -> String {
@@ -23,8 +22,6 @@ fn get_jwt_secret() -> String {
         "atok-ai-super-secret-jwt-key-development-2025".to_string()
     })
 }
-
-// ==================== Helper Functions ====================
 
 fn hash_password(password: &str) -> Result<String, AuthError> {
     let salt = SaltString::generate(&mut OsRng);
@@ -87,7 +84,6 @@ mod tests {
     #[test]
     fn test_hash_password_produces_valid_hash() {
         let hash = hash_password("my-secret-password").expect("hashing should succeed");
-        // Argon2 hashes start with $argon2
         assert!(
             hash.starts_with("$argon2"),
             "hash should be argon2 format, got: {}",
@@ -289,7 +285,6 @@ pub async fn register(
     db: State<'_, Database>,
     request: RegisterRequest,
 ) -> Result<AuthResponse, String> {
-    // Check if user exists
     let pool = db.get_pool()?;
     let existing = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM users WHERE email = $1 OR username = $2",
@@ -304,7 +299,6 @@ pub async fn register(
         return Err(AuthError::UserAlreadyExists.to_string());
     }
 
-    // Hash password
     let hashed_password = hash_password(&request.password).map_err(|e| e.to_string())?;
 
     // Create user — use 12 hex chars from UUID (16^12 = ~281 trillion possibilities)
@@ -328,7 +322,6 @@ pub async fn register(
     .await
     .map_err(|e| format!("Failed to create user: {}", e))?;
 
-    // Generate JWT
     let token = generate_jwt(&user_id, &request.email).map_err(|e| e.to_string())?;
 
     Ok(AuthResponse {
@@ -347,7 +340,6 @@ pub async fn register(
 
 #[tauri::command]
 pub async fn login(db: State<'_, Database>, request: LoginRequest) -> Result<AuthResponse, String> {
-    // Find user by email or username
     let pool = db.get_pool()?;
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1 OR username = $1")
         .bind(&request.email)
@@ -356,18 +348,15 @@ pub async fn login(db: State<'_, Database>, request: LoginRequest) -> Result<Aut
         .map_err(|e| format!("Database query failed: {}", e))?
         .ok_or_else(|| AuthError::InvalidCredentials.to_string())?;
 
-    // Verify password
     if !verify_password(&request.password, &user.password).map_err(|e| e.to_string())? {
         return Err(AuthError::InvalidCredentials.to_string());
     }
 
-    // Update last login
     let _ = sqlx::query("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = $1")
         .bind(&user.id)
         .execute(pool)
         .await;
 
-    // Generate JWT
     let token = generate_jwt(&user.id, &user.email).map_err(|e| e.to_string())?;
 
     Ok(AuthResponse {

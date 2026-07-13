@@ -1,9 +1,79 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { authService } from '@/services/auth.service';
-import { User as UserIcon, Mail, Hash, Shield, Volume2 } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { BadgeCheck } from 'lucide-react';
 import type { User } from '@/types/auth.types';
+import { getThemePreference, setThemePreference, type ThemePreference } from '@/lib/theme';
+
+const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'system', label: 'System' },
+];
+
+/* Fixed swatches for the theme previews; they must not follow the app theme. */
+const PAPER = { bg: 'oklch(0.9745 0.0048 80)', line: 'oklch(0.88 0.008 72)', accent: 'oklch(0.56 0.125 45)' };
+const INK = { bg: 'oklch(0.2110 0.0095 55)', line: 'oklch(0.32 0.0105 55)', accent: 'oklch(0.705 0.128 48)' };
+
+function ThemeMiniPreview({ variant }: { variant: ThemePreference }) {
+  const half = variant === 'system';
+  const palettes = half ? [PAPER, INK] : [variant === 'light' ? PAPER : INK];
+  return (
+    <div className="flex h-full w-full overflow-hidden rounded-[9px]">
+      {palettes.map((p, i) => (
+        <div key={i} className="flex flex-1 gap-1.5 p-2" style={{ backgroundColor: p.bg }}>
+          <div className="flex w-2.5 flex-col gap-1 pt-0.5">
+            <div className="h-1 rounded-full" style={{ backgroundColor: p.accent }} />
+            <div className="h-1 rounded-full" style={{ backgroundColor: p.line }} />
+            <div className="h-1 rounded-full" style={{ backgroundColor: p.line }} />
+          </div>
+          <div className="flex flex-1 flex-col gap-1 pt-0.5">
+            <div className="h-1.5 w-3/5 rounded-full" style={{ backgroundColor: p.line }} />
+            <div className="h-1 rounded-full" style={{ backgroundColor: p.line, opacity: 0.7 }} />
+            <div className="h-1 w-4/5 rounded-full" style={{ backgroundColor: p.line, opacity: 0.7 }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SettingsSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="border-t border-border py-8 first:border-t-0 first:pt-0">
+      <div className="grid gap-6 md:grid-cols-[220px_1fr]">
+        <div>
+          <h2 className="font-display text-[15px] font-semibold text-foreground">{title}</h2>
+          <p className="mt-1 text-[13px] leading-5 text-muted-foreground">{description}</p>
+        </div>
+        <div className="min-w-0">{children}</div>
+      </div>
+    </section>
+  );
+}
+
+function InfoRow({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between gap-6 py-2.5">
+      <span className="shrink-0 text-[13px] text-muted-foreground">{label}</span>
+      <span
+        className={`min-w-0 truncate text-right text-[13px] font-medium text-foreground ${
+          mono ? 'font-mono text-xs' : ''
+        }`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
 
 const SettingsPage: React.FC = () => {
   const [userInfo, setUserInfo] = useState<User | null>(null);
@@ -12,6 +82,12 @@ const SettingsPage: React.FC = () => {
     const v = localStorage.getItem('aec_enabled');
     return v === null ? true : v === 'true';
   });
+  const [theme, setTheme] = useState<ThemePreference>(() => getThemePreference());
+
+  const changeTheme = (next: ThemePreference) => {
+    setTheme(next);
+    setThemePreference(next);
+  };
 
   useEffect(() => {
     loadUserInfo();
@@ -48,187 +124,145 @@ const SettingsPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-neutral-50 dark:bg-neutral-900">
-        <p className="text-neutral-600 dark:text-neutral-400">Loading...</p>
+      <div className="flex h-screen flex-1 flex-col overflow-hidden bg-background px-10 pt-9">
+        <div className="mx-auto w-full max-w-3xl">
+          <div className="h-10 w-48 animate-pulse rounded-lg bg-muted" />
+          <div className="mt-10 space-y-4">
+            <div className="h-24 animate-pulse rounded-xl bg-muted/70" />
+            <div className="h-24 animate-pulse rounded-xl bg-muted/70" />
+          </div>
+        </div>
       </div>
     );
   }
 
   if (!userInfo) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-neutral-50 dark:bg-neutral-900">
-        <p className="text-neutral-600 dark:text-neutral-400">User not found</p>
+      <div className="flex flex-1 items-center justify-center bg-background">
+        <p className="text-sm text-muted-foreground">User not found</p>
       </div>
     );
   }
 
   return (
-    <div className="flex-1 overflow-auto bg-neutral-50 dark:bg-neutral-900">
-      <div className="max-w-4xl mx-auto p-8">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-neutral-900 dark:text-white mb-2">
-            Account Settings
+    <div className="h-screen flex-1 overflow-y-auto bg-background">
+      <div className="mx-auto max-w-3xl px-10 pb-20 pt-9">
+        <header className="mb-10">
+          <h1 className="font-display text-[2rem] font-semibold leading-tight tracking-tight text-foreground">
+            Settings
           </h1>
-          <p className="text-neutral-600 dark:text-neutral-400">
-            Manage your account information and preferences
+          <p className="mt-1 text-sm text-muted-foreground">
+            Your account, appearance, and recording preferences.
           </p>
-        </div>
+        </header>
 
-        {/* User Profile Card */}
-        <Card className="mb-6 dark:bg-neutral-800 dark:border-neutral-700">
-          <CardHeader>
-            <CardTitle className="text-xl">Profile Information</CardTitle>
-            <CardDescription>Your personal account details</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            {/* Full Name */}
-            {userInfo.full_name && (
-              <div className="flex items-start gap-4">
-                <div className="p-2 rounded-lg bg-neutral-100 dark:bg-neutral-700">
-                  <UserIcon className="w-5 h-5 text-neutral-600 dark:text-neutral-400" />
-                </div>
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-neutral-500 dark:text-neutral-400 mb-1">
-                    Full Name
-                  </p>
-                  <p className="text-base text-neutral-900 dark:text-white font-medium">
-                    {userInfo.full_name}
-                  </p>
-                </div>
+        <SettingsSection
+          title="Profile"
+          description="The account this workspace belongs to."
+        >
+          <div className="overflow-hidden rounded-xl border border-border bg-card">
+            <div className="flex items-center gap-4 border-b border-border bg-gradient-to-r from-primary/8 to-transparent px-5 py-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/12 font-display text-lg font-semibold text-primary">
+                {(userInfo.full_name || userInfo.username).charAt(0).toUpperCase()}
               </div>
-            )}
-
-            {/* Username */}
-            <div className="flex items-start gap-4">
-              <div className="p-2 rounded-lg bg-neutral-100 dark:bg-neutral-700">
-                <UserIcon className="w-5 h-5 text-neutral-600 dark:text-neutral-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-medium text-neutral-500 dark:text-neutral-400 mb-1">
-                  Username
+              <div className="min-w-0 leading-tight">
+                <p className="flex items-center gap-1.5 truncate text-[15px] font-semibold text-foreground">
+                  {userInfo.full_name || userInfo.username}
+                  {userInfo.is_verified && (
+                    <BadgeCheck className="h-4 w-4 shrink-0 text-primary" strokeWidth={1.75} />
+                  )}
                 </p>
-                <p className="text-base text-neutral-900 dark:text-white font-medium">
-                  {userInfo.username}
-                </p>
+                <p className="mt-0.5 truncate text-[13px] text-muted-foreground">{userInfo.email}</p>
               </div>
             </div>
-
-            {/* Email */}
-            <div className="flex items-start gap-4">
-              <div className="p-2 rounded-lg bg-neutral-100 dark:bg-neutral-700">
-                <Mail className="w-5 h-5 text-neutral-600 dark:text-neutral-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-medium text-neutral-500 dark:text-neutral-400 mb-1">
-                  Email Address
-                </p>
-                <p className="text-base text-neutral-900 dark:text-white font-medium">
-                  {userInfo.email}
-                </p>
-                {userInfo.is_verified && (
-                  <div className="flex items-center gap-1 mt-1">
-                    <Shield className="w-3 h-3 text-green-600 dark:text-green-400" />
-                    <span className="text-xs text-green-600 dark:text-green-400">Verified</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* User ID */}
-            <div className="flex items-start gap-4">
-              <div className="p-2 rounded-lg bg-neutral-100 dark:bg-neutral-700">
-                <Hash className="w-5 h-5 text-neutral-600 dark:text-neutral-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-medium text-neutral-500 dark:text-neutral-400 mb-1">
-                  User ID
-                </p>
-                <p className="text-base text-neutral-900 dark:text-white font-mono">
-                  {userInfo.id}
-                </p>
-              </div>
-            </div>
-
-            {/* Account Status */}
-            <div className="flex items-start gap-4">
-              <div className="p-2 rounded-lg bg-neutral-100 dark:bg-neutral-700">
-                <Shield className="w-5 h-5 text-neutral-600 dark:text-neutral-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-medium text-neutral-500 dark:text-neutral-400 mb-1">
-                  Account Status
-                </p>
-                <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${userInfo.is_active ? 'bg-green-500' : 'bg-red-500'}`}></div>
-                  <p className="text-base text-neutral-900 dark:text-white">
+            <div className="px-5 py-2">
+              <InfoRow label="Username" value={`@${userInfo.username}`} />
+              <InfoRow label="User ID" value={userInfo.id} mono />
+              <InfoRow
+                label="Status"
+                value={
+                  <span className={userInfo.is_active ? 'text-foreground' : 'text-destructive'}>
                     {userInfo.is_active ? 'Active' : 'Inactive'}
-                  </p>
-                </div>
-              </div>
+                  </span>
+                }
+              />
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </SettingsSection>
 
-        {/* Audio Settings Card */}
-        <Card className="mb-6 dark:bg-neutral-800 dark:border-neutral-700">
-          <CardHeader>
-            <CardTitle className="text-xl">Audio Settings</CardTitle>
-            <CardDescription>Configure recording preferences</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-4">
-              <div className="p-2 rounded-lg bg-neutral-100 dark:bg-neutral-700 shrink-0">
-                <Volume2 className="w-5 h-5 text-neutral-600 dark:text-neutral-400" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-neutral-900 dark:text-white">
-                  Echo Cancellation
-                </p>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">
-                  Remove speaker audio from mic when sharing system audio.
-                </p>
-              </div>
-              <div className="flex shrink-0 items-center">
+        <SettingsSection
+          title="Appearance"
+          description="How Atok.ai looks on this device."
+        >
+          <div className="grid max-w-md grid-cols-3 gap-3">
+            {THEME_OPTIONS.map(({ value, label }) => {
+              const selected = theme === value;
+              return (
                 <button
+                  key={value}
                   type="button"
-                  role="switch"
-                  aria-checked={aecEnabled}
-                  aria-label="Echo cancellation"
-                  onClick={toggleAec}
-                  className={`relative inline-flex h-8 w-[88px] shrink-0 appearance-none items-center rounded-full border p-0 bg-neutral-950/80 shadow-inner transition-all duration-300 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-50 dark:focus-visible:ring-offset-neutral-900 ${
-                    aecEnabled
-                      ? 'border-cyan-400/35 shadow-cyan-500/10'
-                      : 'border-red-500/25 shadow-red-500/5'
+                  onClick={() => changeTheme(value)}
+                  onMouseDown={(e) => e.preventDefault()}
+                  aria-pressed={selected}
+                  className={`group rounded-xl border p-1.5 text-left transition-all active:scale-[0.98] ${
+                    selected
+                      ? 'border-primary/60 ring-1 ring-primary/40'
+                      : 'border-border hover:border-ring/40'
                   }`}
                 >
-                  <span
-                    className={`absolute top-1/2 -translate-y-1/2 text-[10px] font-semibold tracking-[0.18em] transition-colors duration-200 ${
-                      aecEnabled
-                        ? 'left-3 text-cyan-300'
-                        : 'right-3 text-red-300'
-                    }`}
-                  >
-                    {aecEnabled ? 'ON' : 'OFF'}
-                  </span>
-                  <span
-                    className={`pointer-events-none absolute left-1 top-1 block h-[22px] w-[22px] rounded-full bg-white/90 shadow-[0_2px_10px_rgba(0,0,0,0.45)] ring-1 ring-white/70 transition-transform duration-300 ease-out ${
-                      aecEnabled ? 'translate-x-[58px]' : 'translate-x-0'
-                    }`}
-                  />
+                  <div className="aspect-[16/10] w-full">
+                    <ThemeMiniPreview variant={value} />
+                  </div>
+                  <div className="flex items-center justify-between px-1.5 pb-1 pt-2">
+                    <span className={`text-[12.5px] font-medium ${selected ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      {label}
+                    </span>
+                    <span
+                      aria-hidden
+                      className={`h-2 w-2 rounded-full transition-colors ${
+                        selected ? 'bg-primary' : 'bg-border group-hover:bg-muted-foreground/40'
+                      }`}
+                    />
+                  </div>
                 </button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+              );
+            })}
+          </div>
+        </SettingsSection>
 
-        {/* Additional Info */}
-        <div className="bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
-          <p className="text-sm text-blue-800 dark:text-blue-300">
-            <strong>Note:</strong> Your account information is securely stored and encrypted.
-            If you need to update any information, please contact support.
-          </p>
-        </div>
+        <SettingsSection
+          title="Recording"
+          description="Applies to the pop-up recording studio."
+        >
+          <div className="flex items-center justify-between gap-6 rounded-xl border border-border bg-card px-5 py-4">
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium text-foreground">Echo cancellation</p>
+              <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+                Removes speaker audio from the microphone while system audio is shared.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={aecEnabled}
+              aria-label="Echo cancellation"
+              onClick={toggleAec}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                aecEnabled ? 'bg-primary' : 'bg-muted-foreground/25'
+              }`}
+            >
+              <span
+                className={`pointer-events-none block h-5 w-5 rounded-full bg-card shadow-sm ring-1 ring-black/5 transition-transform duration-200 ${
+                  aecEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          </div>
+        </SettingsSection>
+
+        <p className="border-t border-border pt-6 text-xs leading-5 text-muted-foreground">
+          Account information is stored encrypted. To change any of it, contact support.
+        </p>
       </div>
     </div>
   );

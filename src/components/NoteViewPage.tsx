@@ -1,19 +1,47 @@
-import { useEffect, useState, Component } from "react";
+import { useEffect, useMemo, useState, Component } from "react";
 import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
-import { ArrowLeft, Star, Trash2, Edit, Calendar, Tag, Palette } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ArrowLeft, Star, Trash2, Edit, Paperclip } from "lucide-react";
+import { noteAssetService } from "@/services/note-asset.service";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 
 class ErrorBoundary extends Component<{ fallback: React.ReactNode; children: React.ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
   static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(error: unknown) {
+    console.error("Markdown rendering failed; showing raw note text instead:", error);
+  }
   render() {
     if (this.state.hasError) return this.props.fallback;
     return this.props.children;
   }
+}
+
+// AI-generated notes often open with a "# <title>" heading that repeats the
+// note's title field verbatim (or a truncated version of it, from older
+// title-length limits) — drop it so the title isn't shown twice on the page.
+function stripLeadingDuplicateHeading(content: string, title: string): string {
+  const match = content.match(/^\s*#\s+(.+?)\s*\n+([\s\S]*)$/);
+  if (!match) return content;
+
+  const normalize = (value: string) =>
+    value
+      .replace(/\*\*/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase()
+      .replace(/\.{3}$/, "");
+
+  const heading = normalize(match[1]);
+  const noteTitle = normalize(title);
+  if (!heading || !noteTitle) return content;
+
+  if (heading === noteTitle || heading.startsWith(noteTitle) || noteTitle.startsWith(heading)) {
+    return match[2];
+  }
+  return content;
 }
 
 interface NoteViewPageProps {
@@ -22,12 +50,22 @@ interface NoteViewPageProps {
   onEdit?: (note: Note) => void;
 }
 
+const headerIconButton =
+  "inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60";
+
 export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPageProps) {
   const [note, setNote] = useState<Note | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
+
+  const bodyContent = useMemo(
+    () => (note?.content ? stripLeadingDuplicateHeading(note.content, note.title) : ""),
+    [note?.content, note?.title]
+  );
 
   useEffect(() => {
     loadNote();
@@ -54,7 +92,7 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
 
   const handleToggleFavorite = async () => {
     if (!note) return;
-    
+
     try {
       const user = authService.getUser();
       if (!user) return;
@@ -63,6 +101,27 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
       await loadNote();
     } catch (error) {
       console.error("Failed to toggle favorite:", error);
+    }
+  };
+
+  const handleAttach = async () => {
+    if (!note || attaching) return;
+    try {
+      const sourcePath = await noteAssetService.pickAssetFile();
+      if (!sourcePath) return;
+
+      setAttaching(true);
+      const user = authService.getUser();
+      if (!user) throw new Error("User not authenticated");
+
+      const asset = await noteAssetService.importAsset(sourcePath);
+      const content = noteAssetService.appendAssetToContent(note.content ?? "", asset);
+      await noteService.updateNote(note.id, user.id, { content });
+      await loadNote();
+    } catch (err) {
+      setAttachError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAttaching(false);
     }
   };
 
@@ -92,20 +151,44 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-white dark:bg-neutral-900">
-        <p className="text-neutral-600 dark:text-neutral-400">Loading note...</p>
+      <div className="flex h-screen flex-1 flex-col overflow-hidden bg-background">
+        <div className="border-b border-border px-10 py-4">
+          <div className="mx-auto flex max-w-4xl items-center justify-between">
+            <div className="h-9 w-24 animate-pulse rounded-lg bg-muted" />
+            <div className="flex gap-1.5">
+              <div className="h-9 w-9 animate-pulse rounded-lg bg-muted" />
+              <div className="h-9 w-9 animate-pulse rounded-lg bg-muted" />
+            </div>
+          </div>
+        </div>
+        <div className="mx-auto w-full max-w-4xl flex-1 px-10 py-12">
+          <div className="h-4 w-40 animate-pulse rounded-md bg-muted/70" />
+          <div className="mt-4 h-9 w-3/4 animate-pulse rounded-lg bg-muted" />
+          <div className="mt-10 space-y-3">
+            <div className="h-3 animate-pulse rounded-full bg-muted/70" />
+            <div className="h-3 w-11/12 animate-pulse rounded-full bg-muted/70" />
+            <div className="h-3 w-4/5 animate-pulse rounded-full bg-muted/70" />
+            <div className="h-3 w-2/3 animate-pulse rounded-full bg-muted/70" />
+          </div>
+        </div>
       </div>
     );
   }
 
   if (error || !note) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-white dark:bg-neutral-900">
-        <p className="text-red-600 dark:text-red-400 mb-4">{error || "Note not found"}</p>
-        <Button onClick={onBack} variant="outline">
-          <ArrowLeft className="w-4 h-4 mr-2" />
-          Go Back
-        </Button>
+      <div className="flex flex-1 flex-col items-center justify-center bg-background">
+        <div className="flex flex-col items-center rounded-xl border border-border bg-card px-10 py-14 text-center shadow-sm">
+          <p className="mb-6 text-sm text-destructive">{error || "Note not found"}</p>
+          <button
+            type="button"
+            onClick={onBack}
+            className="inline-flex items-center gap-2 rounded-lg border border-input bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent active:scale-[0.98]"
+          >
+            <ArrowLeft className="h-4 w-4" strokeWidth={1.75} />
+            Back to notes
+          </button>
+        </div>
       </div>
     );
   }
@@ -136,125 +219,135 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
         loading={deleting}
         onConfirm={confirmDelete}
       />
-      <div className="flex-1 flex flex-col h-screen overflow-hidden bg-white dark:bg-neutral-900">
-      {/* Header */}
-      <div className="border-b border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900">
-        <div className="max-w-4xl mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            <Button
-              onClick={onBack}
-              variant="ghost"
-              size="sm"
-              className="text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white"
-            >
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back to Notes
-            </Button>
-
-            <div className="flex items-center gap-2">
-              <Button
-                onClick={handleToggleFavorite}
-                variant="ghost"
-                size="sm"
-                className={note.is_favorite ? "text-yellow-500" : "text-neutral-600 dark:text-neutral-400"}
+      <ConfirmDialog
+        open={attachError !== null}
+        onOpenChange={(open) => {
+          if (!open) setAttachError(null);
+        }}
+        title="Attachment failed"
+        description={attachError ?? ""}
+        confirmText="OK"
+        mode="alert"
+        variant="destructive"
+      />
+      <div className="flex h-screen flex-1 flex-col overflow-hidden bg-background">
+        {/* Header */}
+        <div className="border-b border-border bg-background/90 backdrop-blur-sm">
+          <div className="mx-auto max-w-4xl px-10 py-3.5">
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={onBack}
+                className="inline-flex h-9 items-center gap-2 rounded-lg px-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.98]"
               >
-                <Star className={`w-4 h-4 ${note.is_favorite ? "fill-current" : ""}`} />
-              </Button>
-              
-              {onEdit && (
-                <Button
-                  onClick={() => onEdit(note)}
-                  variant="ghost"
-                  size="sm"
-                  className="text-neutral-600 dark:text-neutral-400"
+                <ArrowLeft className="h-4 w-4" strokeWidth={1.75} />
+                Notes
+              </button>
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={handleAttach}
+                  disabled={attaching}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.98] disabled:opacity-50"
+                  aria-label="Attach file"
                 >
-                  <Edit className="w-4 h-4" />
-                </Button>
-              )}
+                  <Paperclip className="h-4 w-4" strokeWidth={1.75} />
+                  {attaching ? "Attaching…" : "Attach"}
+                </button>
 
-              <Button
-                onClick={handleDelete}
-                variant="ghost"
-                size="sm"
-                className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
-              >
-                <Trash2 className="w-4 h-4" />
-              </Button>
+                <button
+                  type="button"
+                  onClick={handleToggleFavorite}
+                  className={
+                    note.is_favorite
+                      ? "inline-flex h-9 w-9 items-center justify-center rounded-lg text-primary transition-colors hover:bg-primary/10 active:scale-[0.96]"
+                      : headerIconButton
+                  }
+                  aria-label={note.is_favorite ? "Remove from favorites" : "Add to favorites"}
+                >
+                  <Star
+                    className={`h-4 w-4 ${note.is_favorite ? "fill-current" : ""}`}
+                    strokeWidth={1.75}
+                  />
+                </button>
+
+                {onEdit && (
+                  <button
+                    type="button"
+                    onClick={() => onEdit(note)}
+                    className={headerIconButton}
+                    aria-label="Edit note"
+                  >
+                    <Edit className="h-4 w-4" strokeWidth={1.75} />
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive active:scale-[0.96]"
+                  aria-label="Delete note"
+                >
+                  <Trash2 className="h-4 w-4" strokeWidth={1.75} />
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto px-6 py-8">
-          {/* Color Badge */}
-          {note.color && (
-            <div className="flex items-center gap-2 mb-4">
-              <Palette className="w-4 h-4 text-neutral-500 dark:text-neutral-400" />
-              <div
-                className="w-6 h-6 rounded-full border-2 border-neutral-300 dark:border-neutral-600"
-                style={{ backgroundColor: note.color }}
-              />
-            </div>
-          )}
-
-          {/* Title */}
-          <h1 className="text-4xl font-bold text-neutral-900 dark:text-white mb-6">
-            {note.title}
-          </h1>
-
-          {/* Metadata */}
-          <div className="flex flex-wrap items-center gap-4 mb-8 text-sm text-neutral-600 dark:text-neutral-400">
-            <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4" />
+        {/* Content: the note reads like a document, not a boxed widget. */}
+        <div className="flex-1 overflow-y-auto">
+          <article className="mx-auto max-w-4xl px-10 pb-24 pt-12">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11.5px] text-muted-foreground">
+              {note.color && (
+                <span
+                  aria-hidden
+                  className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/10 dark:ring-white/15"
+                  style={{ backgroundColor: note.color }}
+                />
+              )}
               <span>Created {formatDate(note.created_at)}</span>
+              {note.updated_at !== note.created_at && (
+                <span className="text-muted-foreground/60">
+                  Updated {formatDate(note.updated_at)}
+                </span>
+              )}
             </div>
-            
-            {note.updated_at !== note.created_at && (
-              <div className="flex items-center gap-2">
-                <Calendar className="w-4 h-4" />
-                <span>Updated {formatDate(note.updated_at)}</span>
-              </div>
-            )}
-          </div>
 
-          {/* Tags */}
-          {note.tags && note.tags.length > 0 && (
-            <div className="flex items-center gap-2 mb-8">
-              <Tag className="w-4 h-4 text-neutral-500 dark:text-neutral-400" />
-              <div className="flex flex-wrap gap-2">
-                {note.tags.map((tag, index) => (
-                  <span
-                    key={index}
-                    className="px-3 py-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 rounded-full text-sm"
-                  >
-                    {tag}
+            <h1 className="mt-3 font-display text-4xl font-semibold leading-[1.15] tracking-tight text-foreground">
+              {note.title}
+            </h1>
+
+            {(note.tags ?? []).length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-x-3 gap-y-1">
+                {(note.tags ?? []).map((tag) => (
+                  <span key={tag} className="font-mono text-xs text-muted-foreground">
+                    #{tag}
                   </span>
                 ))}
               </div>
-            </div>
-          )}
-
-          {/* Content */}
-          <div className="mt-2">
-            {note.content ? (
-              <ErrorBoundary fallback={
-                <pre className="text-neutral-700 dark:text-neutral-300 whitespace-pre-wrap leading-relaxed">
-                  {note.content}
-                </pre>
-              }>
-                <MarkdownRenderer content={note.content} />
-              </ErrorBoundary>
-            ) : (
-              <p className="text-neutral-500 dark:text-neutral-400 italic">
-                No content
-              </p>
             )}
-          </div>
+
+            <div className="mt-9 border-t border-border pt-9">
+              {bodyContent ? (
+                // Keyed so the boundary resets when the note changes — a caught
+                // error (e.g. a transient one during dev HMR) otherwise pins the
+                // raw-text fallback until the whole page unmounts.
+                <ErrorBoundary key={`${note.id}-${note.updated_at}`} fallback={
+                  <pre className="whitespace-pre-wrap leading-relaxed text-foreground/90">
+                    {bodyContent}
+                  </pre>
+                }>
+                  <MarkdownRenderer content={bodyContent} />
+                </ErrorBoundary>
+              ) : (
+                <p className="italic text-muted-foreground">No content</p>
+              )}
+            </div>
+          </article>
         </div>
       </div>
-    </div>
     </>
   );
 }

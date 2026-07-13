@@ -26,6 +26,21 @@ export const noteService = {
     }
   },
 
+  async updateNote(
+    noteId: number,
+    userId: string,
+    changes: { title?: string; content?: string; tags?: string[]; color?: string },
+  ): Promise<Note> {
+    try {
+      return await invoke<Note>("update_note", {
+        userId,
+        request: { id: noteId, ...changes },
+      });
+    } catch (error) {
+      throw toError(error, "Failed to update note");
+    }
+  },
+
   async deleteNote(noteId: number, userId: string): Promise<{ message: string }> {
     try {
       return await invoke<{ message: string }>("delete_note", { noteId, userId });

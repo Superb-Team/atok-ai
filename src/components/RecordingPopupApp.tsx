@@ -26,6 +26,8 @@ const LANGUAGES: { code: string; label: string }[] = [
 const RecordingPopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [shotFlash, setShotFlash] = useState(false);
   const [time, setTime] = useState(0);
   const [_isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
@@ -38,7 +40,6 @@ const RecordingPopupApp: React.FC = () => {
   const [selectedLanguage, setSelectedLanguage] = useState<string>('id');
   const selectedLanguageRef = useRef<string>('id');
 
-  // Device state
   const [micAvailable, setMicAvailable] = useState(false);
   const [sysAudioAvailable, setSysAudioAvailable] = useState(false);
   const [sysDisplayName, setSysDisplayName] = useState<string>('System Audio');
@@ -115,17 +116,24 @@ const RecordingPopupApp: React.FC = () => {
             const savedPath = await recordingService.stopRecording();
             const { generateNoteTitle } = await import('@/services/audio-processor.service');
             const noteTitle = generateNoteTitle();
+            const timestamp = Date.now();
+            // localStorage is the fallback handoff; the event below is the fast
+            // path that lets the main window start processing immediately.
             localStorage.setItem('audio_to_process', JSON.stringify({
               audioPath: savedPath,
               noteTitle,
               language: selectedLanguageRef.current,
-              timestamp: Date.now(),
+              timestamp,
             }));
             try {
               const { invoke } = await import('@tauri-apps/api/core');
-              await invoke('notify_recording_started', { noteTitle });
+              await invoke('notify_recording_started', {
+                noteTitle,
+                audioPath: savedPath,
+                language: selectedLanguageRef.current,
+                timestamp,
+              });
             } catch {}
-            await new Promise((resolve) => setTimeout(resolve, 200));
           } catch (err) {
             console.error('Failed to finalize recording on close:', err);
           }
@@ -179,6 +187,38 @@ const RecordingPopupApp: React.FC = () => {
     }
   };
 
+  // Screenshot the screen (popup hidden so it isn't in the shot) and log it with
+  // the current elapsed time; failures alert but never interrupt the recording.
+  const handleScreenshot = async () => {
+    if (!isRecording || isCapturing) return;
+    setIsCapturing(true);
+    const elapsedMs = time * 1000;
+    try {
+      const { recordingService } = await import('@/services/recording.service');
+      const { noteAssetService } = await import('@/services/note-asset.service');
+      const audioPath = recordingService.getCurrentRecordingPath();
+      if (!audioPath) throw new Error('No active recording');
+
+      await appWindow?.hide();
+      let asset;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        asset = await noteAssetService.captureScreenshot();
+      } finally {
+        await appWindow?.show();
+      }
+
+      await noteAssetService.recordScreenshotAsset(audioPath, asset.saved_path, elapsedMs);
+      setShotFlash(true);
+      setTimeout(() => setShotFlash(false), 1200);
+    } catch (err) {
+      console.error('Screenshot failed:', err);
+      setAlertMessage(`Screenshot failed: ${err}`);
+    } finally {
+      setIsCapturing(false);
+    }
+  };
+
   const handleFinish = async () => {
     if (isFinalizing) return;
     let savedPath: string | null = null;
@@ -206,25 +246,43 @@ const RecordingPopupApp: React.FC = () => {
     }
 
     if (savedPath && noteTitle) {
+      const timestamp = Date.now();
+      // localStorage is the fallback handoff; the event below is the fast path
+      // that lets the main window start processing immediately.
       localStorage.setItem('audio_to_process', JSON.stringify({
         audioPath: savedPath,
         noteTitle,
         language: selectedLanguage,
-        timestamp: Date.now()
+        timestamp
       }));
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('notify_recording_started', { noteTitle });
+        await invoke('notify_recording_started', {
+          noteTitle,
+          audioPath: savedPath,
+          language: selectedLanguage,
+          timestamp,
+        });
       } catch {}
-      await new Promise(resolve => setTimeout(resolve, 200));
     }
 
+    await closeWindowHard();
+  };
+
+  // close() goes through the close-requested path, which on Linux
+  // transparent/undecorated windows can be silently swallowed. After the take is
+  // handed off there is nothing graceful left to do, so fall back to destroy()
+  // if the window is still alive shortly after.
+  const closeWindowHard = async () => {
+    const win = appWindow || getCurrentWindow();
     try {
-      const win = appWindow || getCurrentWindow();
       await win.close();
     } catch (err) {
       console.error("Failed to close window:", err);
     }
+    setTimeout(() => {
+      win.destroy().catch(() => {});
+    }, 500);
   };
 
   const selectedMicDevice = micDevices.find((d) => d.raw_name === selectedMic);
@@ -506,7 +564,33 @@ const RecordingPopupApp: React.FC = () => {
             } as React.CSSProperties}
           >
             {isRecording ? (
-              /* While recording: only FINISH */
+              /* While recording: SNAP (screenshot) + FINISH */
+              <>
+              <button
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleScreenshot(); }}
+                onMouseDown={(e) => e.stopPropagation()}
+                disabled={isCapturing}
+                title="Capture screen as note context"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontSize: '14px',
+                  fontWeight: 700,
+                  letterSpacing: '0.12em',
+                  color: shotFlash ? '#34d399' : isCapturing ? '#6b7280' : '#d1d5db',
+                  cursor: isCapturing ? 'wait' : 'pointer',
+                  transition: 'color 0.15s, opacity 0.15s',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.7')}
+                onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>
+                  <circle cx="12" cy="13" r="3"/>
+                </svg>
+                {shotFlash ? 'SAVED' : isCapturing ? 'SNAP...' : 'SNAP'}
+              </button>
               <button
                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleFinish(); }}
                 onMouseDown={(e) => e.stopPropagation()}
@@ -523,6 +607,7 @@ const RecordingPopupApp: React.FC = () => {
               >
                 FINISH
               </button>
+              </>
             ) : isFinalizing ? (
               <span
                 style={{
@@ -535,10 +620,24 @@ const RecordingPopupApp: React.FC = () => {
                 WAIT...
               </span>
             ) : (
-              /* Before recording: CLOSE + RECORD */
+              /* Before recording: dim camera hint + CLOSE + RECORD */
               <>
+                <span
+                  title="Start recording to capture screenshots"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    color: '#3f3f46',
+                    cursor: 'not-allowed',
+                  }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>
+                    <circle cx="12" cy="13" r="3"/>
+                  </svg>
+                </span>
                 <button
-                  onClick={() => { appWindow?.close(); }}
+                  onClick={() => { closeWindowHard(); }}
                   style={{
                     fontSize: '14px',
                     fontWeight: 600,

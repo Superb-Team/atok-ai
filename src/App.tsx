@@ -4,17 +4,17 @@ import HomePage from "@/components/HomePage";
 import NoteViewPage from "@/components/NoteViewPage";
 import SettingsPage from "@/components/SettingsPage";
 import CreateNoteDialog from "@/components/CreateNoteDialog";
+import ImportAudioDialog from "@/components/ImportAudioDialog";
 import LoginPage from "@/components/auth/LoginPage";
 import SignUpPage from "@/components/auth/SignUpPage";
 import FloatingActionMenu from "@/components/ui/floating-action-menu";
-import { Sidebar, SidebarBody, SidebarLink } from "@/components/ui/sidebar";
-import { cn } from "@/lib/utils";
+import { AppSidebar, type SidebarItem } from "@/components/ui/sidebar";
+import { applyTheme, watchSystemTheme } from "@/lib/theme";
 import AIChatInterface from "@/searchAI/page";
 import { agentService } from "@/services/agent.service";
 import { authService } from "@/services/auth.service";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
-import { motion } from "framer-motion";
 import {
   CheckSquare,
   Eye,
@@ -24,12 +24,12 @@ import {
   Puzzle,
   Settings,
   Sparkle,
+  Upload,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import "./App.css";
 
 function App() {
-  const [open, setOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState("home");
   const [selectedNoteId, setSelectedNoteId] = useState<number | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -37,8 +37,8 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Set dark mode by default
-    document.documentElement.classList.add('dark');
+    applyTheme();
+    const unwatchTheme = watchSystemTheme();
     checkAuth();
     // The backend AEC_ENABLED static defaults to ON every launch; push the user's
     // persisted preference back into it so a disabled setting survives restarts.
@@ -46,6 +46,7 @@ function App() {
     if (persistedAec !== null) {
       invoke('set_aec_enabled', { enabled: persistedAec === 'true' }).catch(() => {});
     }
+    return unwatchTheme;
   }, []);
 
   const checkAuth = async () => {
@@ -55,7 +56,6 @@ function App() {
         await authService.getCurrentUser(token);
         setIsAuthenticated(true);
 
-        // Ensure OpenSearch collection exists for user
         const user = authService.getUser();
         if (user) {
           agentService.ensureCollection(user.id).catch(err => {
@@ -71,6 +71,7 @@ function App() {
   };
 
   const [createNoteOpen, setCreateNoteOpen] = useState(false);
+  const [importAudioOpen, setImportAudioOpen] = useState(false);
   const [refreshNotes, setRefreshNotes] = useState(0);
 
   const handleLoginSuccess = async () => {
@@ -124,15 +125,29 @@ function App() {
     setCreateNoteOpen(true);
   };
 
+  const handleImportAudio = () => {
+    setImportAudioOpen(true);
+  };
+
   const handleNoteCreated = () => {
-    // Trigger refresh by incrementing counter
     setRefreshNotes(prev => prev + 1);
+  };
+
+  // Navigating from the sidebar always leaves an open note; otherwise the
+  // note view keeps covering every page.
+  const navigate = (page: string) => {
+    setSelectedNoteId(null);
+    setCurrentPage(page);
   };
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-100 dark:bg-neutral-900">
-        <p className="text-neutral-600 dark:text-neutral-400">Loading...</p>
+      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-background">
+        <img src="/logo-atok.png" alt="Atok.ai" className="h-12 w-12 rounded-xl" />
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+          Opening your workspace
+        </div>
       </div>
     );
   }
@@ -154,58 +169,16 @@ function App() {
     );
   }
 
-  const links = [
-    {
-      label: "Home",
-      href: "#",
-      icon: (
-        <Home className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ),
-      onClick: () => setCurrentPage("home"),
-    },
-    {
-      label: "Agents",
-      href: "#",
-      icon: (
-        <Sparkle className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ),
-      onClick: () => setCurrentPage("search"),
-    },
-    {
-      label: "Extensions",
-      href: "#",
-      icon: (
-        <Puzzle className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ),
-      onClick: () => setCurrentPage("extensions"),
-    },
-    {
-      label: "Tasks",
-      href: "#",
-      icon: (
-        <CheckSquare className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ),
-      onClick: () => setCurrentPage("tasks"),
-    },
+  const links: SidebarItem[] = [
+    { key: "home", label: "Notes", icon: Home, onClick: () => navigate("home") },
+    { key: "search", label: "Agents", icon: Sparkle, onClick: () => navigate("search") },
+    { key: "extensions", label: "Extensions", icon: Puzzle, onClick: () => navigate("extensions") },
+    { key: "tasks", label: "Tasks", icon: CheckSquare, onClick: () => navigate("tasks") },
   ];
 
-  const bottomLinks = [
-    {
-      label: "Settings",
-      href: "#",
-      icon: (
-        <Settings className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ),
-      onClick: () => setCurrentPage("settings"),
-    },
-    {
-      label: "Logout",
-      href: "#",
-      icon: (
-        <LogOut className="text-neutral-700 dark:text-neutral-200 h-5 w-5 flex-shrink-0" />
-      ),
-      onClick: handleLogout,
-    },
+  const bottomLinks: SidebarItem[] = [
+    { key: "settings", label: "Settings", icon: Settings, onClick: () => navigate("settings") },
+    { key: "logout", label: "Log out", icon: LogOut, onClick: handleLogout },
   ];
 
   const floatingMenuOptions = [
@@ -215,43 +188,45 @@ function App() {
       onClick: handleOpenPopup,
     },
     {
-      label: "Create Note",
+      label: "Create note",
       Icon: <FileText className="w-4 h-4" />,
       onClick: handleCreateNote,
     },
+    {
+      label: "Import audio",
+      Icon: <Upload className="w-4 h-4" />,
+      onClick: handleImportAudio,
+    },
   ];
 
-  return (
-    <div className={cn(
-      "flex flex-col md:flex-row bg-gray-100 dark:bg-neutral-800 w-full h-screen overflow-hidden"
-    )}>
-      <Sidebar open={open} setOpen={setOpen}>
-        <SidebarBody className="justify-between gap-10">
-          <div className="flex flex-col flex-1 overflow-y-auto overflow-x-hidden">
-            {open ? <Logo /> : <LogoIcon />}
-            <div className="mt-8 flex flex-col gap-2">
-              {links.map((link, idx) => (
-                <SidebarLink
-                  key={idx}
-                  link={link}
-                  onClick={link.onClick}
-                />
-              ))}
-            </div>
-          </div>
-          <div className="flex flex-col gap-2">
-            {bottomLinks.map((link, idx) => (
-              <SidebarLink
-                key={idx}
-                link={link}
-                onClick={link.onClick}
-              />
-            ))}
-          </div>
-        </SidebarBody>
-      </Sidebar>
+  const user = authService.getUser();
 
-      {/* Main Content Area - Show different pages based on currentPage state */}
+  return (
+    <div className="flex h-screen w-full overflow-hidden bg-background">
+      <AppSidebar
+        items={links}
+        bottomItems={bottomLinks}
+        activeKey={currentPage}
+        footer={
+          user ? (
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/12 font-display text-[13px] font-semibold text-primary">
+                {(user.full_name || user.username || "?").charAt(0).toUpperCase()}
+              </div>
+              <div className="min-w-0 leading-tight">
+                <p className="truncate text-[12.5px] font-medium text-sidebar-foreground">
+                  {user.full_name || user.username}
+                </p>
+                <p className="truncate font-mono text-[10.5px] text-sidebar-foreground/45">
+                  @{user.username}
+                </p>
+              </div>
+            </div>
+          ) : undefined
+        }
+      />
+
+      {/* Main content area, one page at a time. */}
       {selectedNoteId ? (
         <NoteViewPage
           noteId={selectedNoteId}
@@ -272,46 +247,17 @@ function App() {
         <HomePage key={refreshNotes} onNoteClick={(noteId) => setSelectedNoteId(noteId)} />
       )}
 
-      {/* Floating Action Menu */}
       <FloatingActionMenu options={floatingMenuOptions} />
 
-      {/* Create Note Dialog */}
       <CreateNoteDialog
         open={createNoteOpen}
         onOpenChange={setCreateNoteOpen}
         onNoteCreated={handleNoteCreated}
       />
+
+      <ImportAudioDialog open={importAudioOpen} onOpenChange={setImportAudioOpen} />
     </div>
   );
 }
-
-const Logo = () => {
-  return (
-    <a
-      href="#"
-      className="font-normal flex space-x-2 items-center text-sm text-black py-1 relative z-20"
-    >
-      <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-auto flex-shrink-0 rounded-lg object-contain" />
-      <motion.span
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="font-medium text-black dark:text-white whitespace-pre"
-      >
-        Atok.ai
-      </motion.span>
-    </a>
-  );
-};
-
-const LogoIcon = () => {
-  return (
-    <a
-      href="#"
-      className="font-normal flex space-x-2 items-center text-sm text-black py-1 relative z-20"
-    >
-      <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-auto flex-shrink-0 rounded-lg object-contain" />
-    </a>
-  );
-};
 
 export default App;

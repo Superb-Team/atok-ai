@@ -17,6 +17,7 @@ use libpulse_binding::operation::{Operation, State as OperationState};
 use libpulse_binding::proplist::{properties, Proplist};
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;
+use libpulse_binding::volume::Volume;
 use libpulse_simple_binding::Simple;
 
 const APP_NAME: &str = "atok-ai";
@@ -122,6 +123,49 @@ pub fn list_sources() -> Vec<PulseSource> {
         return Vec::new();
     }
     out.take()
+}
+
+/// Caps the source's volume at 100% (`Volume::NORMAL`, 0dB). Boost above 100%
+/// is a digital pre-gain applied at the device, so loud close speech clips
+/// before any capture client sees it — unrepairable downstream. Returns
+/// Some(true) if a clamp was applied, Some(false) if the volume was already
+/// sane, None if the server is unreachable (best-effort).
+pub fn clamp_source_volume_to_norm(source_name: &str) -> Option<bool> {
+    let clamped = Rc::new(RefCell::new(false));
+    with_context(|context, mainloop| {
+        let volumes = Rc::new(RefCell::new(None));
+        let captured = volumes.clone();
+        let name = source_name.to_string();
+        let op = context
+            .introspect()
+            .get_source_info_by_name(&name, move |list| {
+                if let ListResult::Item(info) = list {
+                    *captured.borrow_mut() = Some(info.volume);
+                }
+            });
+        drive_until_done(mainloop, &op);
+
+        let Some(current) = volumes.borrow_mut().take() else {
+            return;
+        };
+        if current.max() <= Volume::NORMAL {
+            return;
+        }
+
+        let mut target = current;
+        for v in target.get_mut() {
+            if *v > Volume::NORMAL {
+                *v = Volume::NORMAL;
+            }
+        }
+        let op = context
+            .introspect()
+            .set_source_volume_by_name(source_name, &target, None);
+        drive_until_done(mainloop, &op);
+        *clamped.borrow_mut() = true;
+    })?;
+    let result = *clamped.borrow();
+    Some(result)
 }
 
 /// Connect a context, run `f`, then disconnect. Returns None if the server can't
