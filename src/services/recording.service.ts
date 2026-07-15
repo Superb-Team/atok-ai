@@ -17,16 +17,33 @@ export interface AudioDeviceInfo {
   is_default: boolean;
 }
 
+export interface ProcessingJobSummary {
+  schemaVersion: number;
+  jobId: string;
+  audioPath: string;
+  noteTitle: string;
+  language: string;
+  status: 'transcribing' | 'extracting' | 'synthesizing' | 'saving' | 'complete' | 'partial' | 'failed';
+  updatedAt: string;
+  savedNoteId?: number;
+}
+
 export class RecordingService {
   private static currentRecordingPath: string | null = null;
 
   /**
    * Get the recordings directory (cross-platform)
    */
-  private static async getRecordingsDir(): Promise<string> {
+  static async getRecordingsDir(): Promise<string> {
     const appDir = await appDataDir();
     const recordingsDir = await join(appDir, 'recordings');
     return recordingsDir;
+  }
+
+  static async listProcessingJobs(): Promise<ProcessingJobSummary[]> {
+    return invoke<ProcessingJobSummary[]>('list_processing_manifests', {
+      directory: await this.getRecordingsDir(),
+    });
   }
 
   /**

@@ -19,7 +19,8 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [pendingFavorites, setPendingFavorites] = useState<Set<number>>(new Set());
   const loadRequestId = useRef(0);
-  const lastRecordingCheck = useRef(0);
+  const seenRecordingHandoffs = useRef(new Set<string>());
+  const activeAudioPaths = useRef(new Set<string>());
 
   const filteredNotes = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -85,9 +86,12 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     // Shared between the event fast path and the localStorage poll so the same
     // take is never processed twice (both carry the handoff timestamp).
     const startProcessing = (audioPath: string, noteTitle: string, language: string | undefined, timestamp: number) => {
-      if (timestamp <= lastRecordingCheck.current) return;
-      lastRecordingCheck.current = timestamp;
+      const handoffId = `${audioPath}:${timestamp}`;
+      if (seenRecordingHandoffs.current.has(handoffId)) return;
+      seenRecordingHandoffs.current.add(handoffId);
       localStorage.removeItem('audio_to_process');
+      if (activeAudioPaths.current.has(audioPath)) return;
+      activeAudioPaths.current.add(audioPath);
       setProcessingNotes(prev => new Set(prev).add(noteTitle));
       processAudioRecording(audioPath, noteTitle, language);
     };
@@ -128,6 +132,19 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
     setupTauriListeners();
 
+    // Manifest-backed recovery: a crash or app restart no longer loses a job
+    // after the localStorage handoff has already been consumed.
+    import('@/services/recording.service').then(({ recordingService }) =>
+      recordingService.listProcessingJobs().then((jobs) => {
+        jobs
+          .filter((job) => job.status !== 'complete' && job.status !== 'partial')
+          .forEach((job) => {
+            const timestamp = Date.parse(job.updatedAt) || Date.now();
+            startProcessing(job.audioPath, job.noteTitle, job.language, timestamp);
+          });
+      }).catch(() => {}),
+    );
+
     return () => {
       if (storageInterval) clearInterval(storageInterval);
       unlisten1?.();
@@ -148,6 +165,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         next.delete(noteTitle);
         return next;
       });
+      activeAudioPaths.current.delete(audioPath);
 
       await loadNotes();
     } catch (err) {
@@ -159,6 +177,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         next.delete(noteTitle);
         return next;
       });
+      activeAudioPaths.current.delete(audioPath);
     }
   };
 

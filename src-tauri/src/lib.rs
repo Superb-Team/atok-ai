@@ -33,6 +33,7 @@ mod mcp_auth;
 mod models;
 mod note_assets;
 mod notes;
+mod processing_jobs;
 mod tasks;
 
 // Platform-specific audio recording — captures system audio + mic (like Google Meet/Zoom/Discord)
@@ -260,6 +261,8 @@ pub fn run() {
             agent::transcribe_audio,
             agent::ensure_recordings_dir,
             agent::ai_chat,
+            agent::ai_chat_detailed,
+            agent::get_ai_model_limits,
             agent::ai_chat_stream,
             agent::agent_insert_document,
             agent::agent_check_collection,
@@ -271,6 +274,9 @@ pub fn run() {
             note_assets::capture_screenshot,
             note_assets::record_screenshot_asset,
             note_assets::take_recording_assets,
+            processing_jobs::save_processing_manifest,
+            processing_jobs::load_processing_manifest,
+            processing_jobs::list_processing_manifests,
             start_desktop_recording,
             stop_desktop_recording,
             get_aec_enabled,

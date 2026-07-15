@@ -28,6 +28,7 @@ impl DesktopAudioRecorder {
         output_path: PathBuf,
         aec_enabled: bool,
         _mic_device: Option<String>,
+        chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
     ) -> Result<(), String> {
         let mut recording = self.is_recording.lock().map_err(|e| e.to_string())?;
         if *recording {
@@ -42,6 +43,10 @@ impl DesktopAudioRecorder {
             if let Err(e) = Self::recording_thread_fn(output_path, is_recording, aec_enabled) {
                 eprintln!("Recording error: {}", e);
             }
+            // Windows still writes one progressive MP3. Closing the sender is
+            // intentional: the transcription job then falls back to the final
+            // frame-safe MP3 splitter instead of waiting forever for chunks.
+            drop(chunk_tx);
             // Always clear the flag when the capture thread exits so a mid-recording
             // failure can't wedge the recorder in a permanent "recording" state.
             if let Ok(mut rec) = flag.lock() {
@@ -674,6 +679,7 @@ impl DesktopAudioRecorder {
         _output_path: PathBuf,
         _aec_enabled: bool,
         _mic_device: Option<String>,
+        _chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
     ) -> Result<(), String> {
         Err("Recording only supported on Windows".to_string())
     }

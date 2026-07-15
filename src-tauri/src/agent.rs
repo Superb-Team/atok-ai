@@ -41,6 +41,218 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Debug)]
+struct ParsedChatCompletion {
+    request_id: String,
+    content: String,
+    finish_reason: String,
+    model: String,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+}
+
+impl ParsedChatCompletion {
+    fn is_truncated(&self) -> bool {
+        self.finish_reason == "length"
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ChatCompletionResult {
+    pub request_id: String,
+    pub content: String,
+    pub finish_reason: String,
+    pub model: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub continuation_count: u32,
+    pub is_truncated: bool,
+}
+
+const PROVIDER_MAX_OUTPUT_TOKENS: u64 = 16_384;
+const FALLBACK_CONTEXT_TOKENS: u64 = 32_768;
+const FALLBACK_OUTPUT_TOKENS: u64 = 8_192;
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ModelLimits {
+    pub model: String,
+    pub context_tokens: u64,
+    pub max_output_tokens: u64,
+    pub source: String,
+}
+
+fn parse_model_limits(data: &serde_json::Value, model: &str) -> Result<ModelLimits, String> {
+    let entry = data["data"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["id"].as_str() == Some(model))
+        })
+        .ok_or_else(|| {
+            format!(
+                "Configured model '{}' is absent from provider metadata",
+                model
+            )
+        })?;
+    let context_tokens = entry["metadata"]["context_length"]
+        .as_u64()
+        .ok_or_else(|| format!("Provider metadata has no context length for '{}'", model))?;
+    let advertised_output = entry["metadata"]["max_tokens"]
+        .as_u64()
+        .unwrap_or(PROVIDER_MAX_OUTPUT_TOKENS);
+
+    Ok(ModelLimits {
+        model: model.to_string(),
+        context_tokens,
+        max_output_tokens: advertised_output.min(PROVIDER_MAX_OUTPUT_TOKENS),
+        source: "provider".to_string(),
+    })
+}
+
+fn fallback_model_limits(model: String) -> ModelLimits {
+    let context_tokens = std::env::var("DEEPINFRA_CONTEXT_LIMIT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(FALLBACK_CONTEXT_TOKENS);
+    let max_output_tokens = std::env::var("DEEPINFRA_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(FALLBACK_OUTPUT_TOKENS)
+        .min(PROVIDER_MAX_OUTPUT_TOKENS);
+    ModelLimits {
+        model,
+        context_tokens,
+        max_output_tokens,
+        source: "conservative-fallback".to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn get_ai_model_limits() -> Result<ModelLimits, String> {
+    let (base_url, api_key, model) = get_deepinfra_config()?;
+    let models_url = std::env::var("DEEPINFRA_MODELS_URL").unwrap_or_else(|_| {
+        base_url
+            .trim_end_matches('/')
+            .strip_suffix("/v1/openai")
+            .map(|root| format!("{}/v1/models", root))
+            .unwrap_or_else(|| "https://api.deepinfra.com/v1/models".to_string())
+    });
+
+    let fetched = Client::new()
+        .get(models_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await;
+    let limits = match fetched {
+        Ok(response) if response.status().is_success() => match response.json().await {
+            Ok(data) => parse_model_limits(&data, &model).unwrap_or_else(|error| {
+                eprintln!("[model-limits] {}. Using conservative fallback.", error);
+                fallback_model_limits(model.clone())
+            }),
+            Err(error) => {
+                eprintln!("[model-limits] Invalid metadata response: {}", error);
+                fallback_model_limits(model.clone())
+            }
+        },
+        Ok(response) => {
+            eprintln!(
+                "[model-limits] Metadata request returned {}",
+                response.status()
+            );
+            fallback_model_limits(model.clone())
+        }
+        Err(error) => {
+            eprintln!("[model-limits] Metadata request failed: {}", error);
+            fallback_model_limits(model.clone())
+        }
+    };
+    Ok(limits)
+}
+
+fn parse_chat_completion(data: &serde_json::Value) -> Result<ParsedChatCompletion, String> {
+    let choice = data["choices"]
+        .as_array()
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| "Chat response contains no choices".to_string())?;
+    let content = choice["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "Chat response choice contains no text content".to_string())?;
+
+    Ok(ParsedChatCompletion {
+        request_id: data["id"].as_str().unwrap_or("unknown").to_string(),
+        content: content.to_string(),
+        finish_reason: choice["finish_reason"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        model: data["model"].as_str().unwrap_or("unknown").to_string(),
+        prompt_tokens: data["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+        completion_tokens: data["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+    })
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+async fn post_chat_with_retry(
+    client: &Client,
+    url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, String> {
+    const MAX_ATTEMPTS: u32 = 4;
+    let mut delay_secs = 1u64;
+    let mut last_error = String::new();
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(body)
+            .send()
+            .await
+        {
+            Ok(response) if !is_retryable_status(response.status()) => return Ok(response),
+            Ok(response) => {
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok());
+                last_error = format!("HTTP {}", status);
+                if attempt == MAX_ATTEMPTS {
+                    return Ok(response);
+                }
+                let wait = retry_after.unwrap_or(delay_secs).min(30);
+                eprintln!(
+                    "[ai_chat] Retryable {} (attempt {}/{}), retrying in {}s",
+                    status, attempt, MAX_ATTEMPTS, wait
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            }
+            Err(error) => {
+                last_error = error.to_string();
+                if attempt == MAX_ATTEMPTS {
+                    break;
+                }
+                eprintln!(
+                    "[ai_chat] Transport failure (attempt {}/{}), retrying in {}s",
+                    attempt, MAX_ATTEMPTS, delay_secs
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            }
+        }
+        delay_secs = (delay_secs * 2).min(30);
+    }
+    Err(format!("Chat request failed after retries: {}", last_error))
+}
+
 // A long note can hit max_tokens mid-sentence and would previously be saved
 // truncated with no detection. When finish_reason == "length", feed the partial
 // back as an assistant turn and ask the model to continue, up to this many times.
@@ -52,6 +264,17 @@ pub async fn ai_chat(
     temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<String, String> {
+    Ok(ai_chat_detailed(messages, temperature, max_tokens)
+        .await?
+        .content)
+}
+
+#[tauri::command]
+pub async fn ai_chat_detailed(
+    messages: Vec<ChatMessage>,
+    temperature: Option<f64>,
+    max_tokens: Option<u32>,
+) -> Result<ChatCompletionResult, String> {
     let (base_url, api_key, model) = get_deepinfra_config()?;
     let client = Client::new();
     let url = format!("{}/chat/completions", base_url);
@@ -67,6 +290,12 @@ pub async fn ai_chat(
         .collect();
 
     let mut combined = String::new();
+    let mut total_prompt_tokens = 0u64;
+    let mut total_completion_tokens = 0u64;
+    let mut final_finish_reason = "unknown".to_string();
+    let mut response_model = model.clone();
+    let mut request_ids = Vec::new();
+    let mut continuation_count = 0u32;
     for round in 0..=CHAT_MAX_CONTINUATIONS {
         let body = serde_json::json!({
             "model": model,
@@ -81,14 +310,7 @@ pub async fn ai_chat(
             "stream": false,
         });
 
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Chat request failed: {}", e))?;
+        let response = post_chat_with_retry(&client, &url, &api_key, &body).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -101,14 +323,16 @@ pub async fn ai_chat(
             .await
             .map_err(|e| format!("Failed to parse chat response: {}", e))?;
 
-        let content = data["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("No response");
-        combined.push_str(content);
+        let parsed = parse_chat_completion(&data)?;
+        request_ids.push(parsed.request_id.clone());
+        combined.push_str(&parsed.content);
+        total_prompt_tokens = total_prompt_tokens.saturating_add(parsed.prompt_tokens);
+        total_completion_tokens = total_completion_tokens.saturating_add(parsed.completion_tokens);
+        final_finish_reason = parsed.finish_reason.clone();
+        response_model = parsed.model.clone();
 
-        let finish_reason = data["choices"][0]["finish_reason"].as_str().unwrap_or("");
-        if finish_reason != "length" || round == CHAT_MAX_CONTINUATIONS {
-            if finish_reason == "length" {
+        if !parsed.is_truncated() || round == CHAT_MAX_CONTINUATIONS {
+            if parsed.is_truncated() {
                 eprintln!(
                     "[ai_chat] Output still truncated after {} continuations",
                     CHAT_MAX_CONTINUATIONS
@@ -117,12 +341,16 @@ pub async fn ai_chat(
             break;
         }
 
-        eprintln!("[ai_chat] Output hit max_tokens; requesting continuation {}", round + 1);
+        eprintln!(
+            "[ai_chat] Output hit max_tokens; requesting continuation {}",
+            round + 1
+        );
+        continuation_count += 1;
         // Push only this round's chunk — earlier chunks are already in the
         // history as previous assistant turns.
         messages_json.push(serde_json::json!({
             "role": "assistant",
-            "content": content,
+            "content": parsed.content,
         }));
         messages_json.push(serde_json::json!({
             "role": "user",
@@ -130,7 +358,16 @@ pub async fn ai_chat(
         }));
     }
 
-    Ok(combined)
+    Ok(ChatCompletionResult {
+        request_id: request_ids.join(","),
+        content: combined,
+        is_truncated: final_finish_reason == "length",
+        finish_reason: final_finish_reason,
+        model: response_model,
+        prompt_tokens: total_prompt_tokens,
+        completion_tokens: total_completion_tokens,
+        continuation_count,
+    })
 }
 
 /// Describe a screenshot with a vision model so the note-enhancement prompt can
@@ -141,8 +378,8 @@ pub async fn describe_image(image_path: String, language: String) -> Result<Stri
     use base64::Engine;
 
     let (base_url, api_key, _) = get_deepinfra_config()?;
-    let model = std::env::var("VISION_MODEL")
-        .unwrap_or_else(|_| "google/gemma-4-26B-A4B-it".to_string());
+    let model =
+        std::env::var("VISION_MODEL").unwrap_or_else(|_| "google/gemma-4-26B-A4B-it".to_string());
 
     let bytes = std::fs::read(&image_path).map_err(|e| format!("Read image: {}", e))?;
     let mime = match Path::new(&image_path)
@@ -1014,6 +1251,90 @@ pub async fn agent_ensure_collection(user_id: String) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_chat_completion_metadata() {
+        let response = serde_json::json!({
+            "id": "request-123",
+            "model": "XiaomiMiMo/MiMo-V2.5",
+            "choices": [{
+                "message": { "content": "Detailed notes" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 120, "completion_tokens": 40 }
+        });
+
+        let parsed = parse_chat_completion(&response).unwrap();
+        assert_eq!(parsed.request_id, "request-123");
+        assert_eq!(parsed.content, "Detailed notes");
+        assert_eq!(parsed.finish_reason, "stop");
+        assert_eq!(parsed.model, "XiaomiMiMo/MiMo-V2.5");
+        assert_eq!(parsed.prompt_tokens, 120);
+        assert_eq!(parsed.completion_tokens, 40);
+    }
+
+    #[test]
+    fn parses_length_finish_as_truncated() {
+        let response = serde_json::json!({
+            "model": "model",
+            "choices": [{
+                "message": { "content": "partial" },
+                "finish_reason": "length"
+            }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 20 }
+        });
+
+        let parsed = parse_chat_completion(&response).unwrap();
+        assert!(parsed.is_truncated());
+    }
+
+    #[test]
+    fn rejects_chat_response_without_a_choice() {
+        let response = serde_json::json!({ "model": "model", "choices": [] });
+        assert!(parse_chat_completion(&response).is_err());
+    }
+
+    #[test]
+    fn resolves_limits_for_the_configured_model() {
+        let response = serde_json::json!({
+            "data": [
+                {
+                    "id": "another/model",
+                    "metadata": { "context_length": 8192, "max_tokens": 2048 }
+                },
+                {
+                    "id": "XiaomiMiMo/MiMo-V2.5",
+                    "metadata": { "context_length": 262144, "max_tokens": 16384 }
+                }
+            ]
+        });
+
+        let limits = parse_model_limits(&response, "XiaomiMiMo/MiMo-V2.5").unwrap();
+        assert_eq!(limits.context_tokens, 262_144);
+        assert_eq!(limits.max_output_tokens, 16_384);
+    }
+
+    #[test]
+    fn model_output_limit_is_capped_to_provider_hard_limit() {
+        let response = serde_json::json!({
+            "data": [{
+                "id": "model",
+                "metadata": { "context_length": 1000000, "max_tokens": 1000000 }
+            }]
+        });
+
+        let limits = parse_model_limits(&response, "model").unwrap();
+        assert_eq!(limits.max_output_tokens, 16_384);
+    }
+
+    #[test]
+    fn classifies_transient_chat_statuses_for_retry() {
+        assert!(is_retryable_status(reqwest::StatusCode::REQUEST_TIMEOUT));
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
 
     // 576-byte MPEG1 Layer III frame @ 192kbps/48kHz, no padding (FF FB B4 00).
     fn mp3_frame() -> Vec<u8> {
