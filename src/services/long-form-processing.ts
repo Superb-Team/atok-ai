@@ -67,6 +67,10 @@ export function fingerprintText(text: string): string {
   return `${text.length.toString(36)}-${hash.toString(16).padStart(8, "0")}`;
 }
 
+export function sectionSourceFingerprint(model: string, language: string, source: string): string {
+  return fingerprintText(`${model}\0${language}\0${source}`);
+}
+
 function markersIn(text: string): string[] {
   return text.match(ASSET_MARKER_PATTERN) ?? [];
 }

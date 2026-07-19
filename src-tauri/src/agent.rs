@@ -11,8 +11,8 @@ use std::time::Duration;
 fn get_deepinfra_config() -> Result<(String, String, String), String> {
     let api_key = std::env::var("DEEPINFRA_API_KEY")
         .map_err(|_| "DEEPINFRA_API_KEY not configured in .env".to_string())?;
-    let model =
-        std::env::var("DEEPINFRA_MODEL").unwrap_or_else(|_| "Qwen/Qwen3.6-35B-A3B".to_string());
+    let model = std::env::var("DEEPINFRA_MODEL")
+        .unwrap_or_else(|_| "deepseek-ai/DeepSeek-V4-Flash".to_string());
     let base_url = std::env::var("DEEPINFRA_BASE_URL")
         .unwrap_or_else(|_| "https://api.deepinfra.com/v1/openai".to_string());
 
@@ -36,8 +36,24 @@ fn parse_model_chain(primary: &str, fallbacks: Option<&str>) -> Vec<String> {
 
 fn configured_chat_models(primary: &str) -> Vec<String> {
     let fallbacks = std::env::var("DEEPINFRA_FALLBACK_MODELS")
-        .unwrap_or_else(|_| "Qwen/Qwen3.5-397B-A17B".to_string());
+        .unwrap_or_else(|_| "XiaomiMiMo/MiMo-V2.5".to_string());
     parse_model_chain(primary, Some(&fallbacks))
+}
+
+fn apply_model_chat_settings(body: &mut serde_json::Value, model: &str) {
+    if model.starts_with("Qwen/Qwen3.") {
+        body["top_p"] = serde_json::json!(0.8);
+        body["repetition_penalty"] = serde_json::json!(1.0);
+        body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+    }
+    if model == "deepseek-ai/DeepSeek-V4-Flash" {
+        body["top_p"] = serde_json::json!(0.8);
+        body["repetition_penalty"] = serde_json::json!(1.0);
+        body["reasoning"] = serde_json::json!({ "enabled": false });
+    }
+    if model == "XiaomiMiMo/MiMo-V2.5" {
+        body["reasoning"] = serde_json::json!({ "enabled": false });
+    }
 }
 
 fn get_agent_config() -> Result<(String, String), String> {
@@ -77,6 +93,7 @@ struct ParsedChatCompletion {
     model: String,
     prompt_tokens: u64,
     completion_tokens: u64,
+    estimated_cost: f64,
 }
 
 impl ParsedChatCompletion {
@@ -93,6 +110,7 @@ pub struct ChatCompletionResult {
     pub model: String,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub estimated_cost: f64,
     pub continuation_count: u32,
     pub is_truncated: bool,
 }
@@ -217,6 +235,7 @@ fn parse_chat_completion(data: &serde_json::Value) -> Result<ParsedChatCompletio
         model: data["model"].as_str().unwrap_or("unknown").to_string(),
         prompt_tokens: data["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
         completion_tokens: data["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+        estimated_cost: data["usage"]["estimated_cost"].as_f64().unwrap_or(0.0),
     })
 }
 
@@ -341,7 +360,20 @@ pub async fn ai_chat_detailed(
         )
         .await
         {
-            Ok(result) => return Ok(result),
+            Ok(result) => {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "ai_chat_completed",
+                        "model": result.model,
+                        "promptTokens": result.prompt_tokens,
+                        "completionTokens": result.completion_tokens,
+                        "estimatedCostUsd": result.estimated_cost,
+                        "continuations": result.continuation_count,
+                    })
+                );
+                return Ok(result);
+            }
             Err(error) => {
                 eprintln!(
                     "{{\"event\":\"ai_model_failed\",\"model\":{:?},\"reason\":{:?}}}",
@@ -380,6 +412,7 @@ async fn ai_chat_detailed_for_model(
     let mut combined = String::new();
     let mut total_prompt_tokens = 0u64;
     let mut total_completion_tokens = 0u64;
+    let mut total_estimated_cost = 0.0f64;
     let mut final_finish_reason = "unknown".to_string();
     let mut response_model = model.to_string();
     let mut request_ids = Vec::new();
@@ -397,11 +430,7 @@ async fn ai_chat_detailed_for_model(
             "repetition_penalty": 1.15,
             "stream": false,
         });
-        if model.starts_with("Qwen/Qwen3.") {
-            body["top_p"] = serde_json::json!(0.8);
-            body["repetition_penalty"] = serde_json::json!(1.0);
-            body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
-        }
+        apply_model_chat_settings(&mut body, model);
 
         let response = with_chat_deadline(
             post_chat_with_retry(&client, &url, &api_key, &body),
@@ -429,6 +458,7 @@ async fn ai_chat_detailed_for_model(
         combined.push_str(&parsed.content);
         total_prompt_tokens = total_prompt_tokens.saturating_add(parsed.prompt_tokens);
         total_completion_tokens = total_completion_tokens.saturating_add(parsed.completion_tokens);
+        total_estimated_cost += parsed.estimated_cost;
         final_finish_reason = parsed.finish_reason.clone();
         response_model = parsed.model.clone();
 
@@ -467,6 +497,7 @@ async fn ai_chat_detailed_for_model(
         model: response_model,
         prompt_tokens: total_prompt_tokens,
         completion_tokens: total_completion_tokens,
+        estimated_cost: total_estimated_cost,
         continuation_count,
     })
 }
@@ -1451,7 +1482,11 @@ mod tests {
                 "message": { "content": "Detailed notes" },
                 "finish_reason": "stop"
             }],
-            "usage": { "prompt_tokens": 120, "completion_tokens": 40 }
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 40,
+                "estimated_cost": 0.00015219
+            }
         });
 
         let parsed = parse_chat_completion(&response).unwrap();
@@ -1461,6 +1496,7 @@ mod tests {
         assert_eq!(parsed.model, "XiaomiMiMo/MiMo-V2.5");
         assert_eq!(parsed.prompt_tokens, 120);
         assert_eq!(parsed.completion_tokens, 40);
+        assert!((parsed.estimated_cost - 0.00015219).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1541,6 +1577,24 @@ mod tests {
                 "backup/model",
             ]
         );
+    }
+
+    #[test]
+    fn economical_models_disable_billable_reasoning() {
+        let mut body = serde_json::json!({
+            "model": "deepseek-ai/DeepSeek-V4-Flash",
+            "messages": [],
+            "repetition_penalty": 1.15
+        });
+
+        apply_model_chat_settings(&mut body, "deepseek-ai/DeepSeek-V4-Flash");
+
+        assert_eq!(body["reasoning"]["enabled"], false);
+        assert_eq!(body["repetition_penalty"], 1.0);
+
+        let mut fallback_body = serde_json::json!({ "model": "XiaomiMiMo/MiMo-V2.5" });
+        apply_model_chat_settings(&mut fallback_body, "XiaomiMiMo/MiMo-V2.5");
+        assert_eq!(fallback_body["reasoning"]["enabled"], false);
     }
 
     #[tokio::test]

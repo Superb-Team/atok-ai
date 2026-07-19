@@ -7,6 +7,7 @@ import {
   fingerprintText,
   packByTokenBudget,
   operationalSourceTokenBudget,
+  sectionSourceFingerprint,
   splitTranscriptByTokenBudget,
   stripPlaceholderSections,
   type ProcessedSection,
@@ -25,6 +26,14 @@ test("token estimate is conservative for ASCII and multibyte text", () => {
 test("text fingerprint is stable and changes with source content", () => {
   assert.equal(fingerprintText("same transcript"), fingerprintText("same transcript"));
   assert.notEqual(fingerprintText("same transcript"), fingerprintText("different transcript"));
+});
+
+test("section cache is invalidated when the configured model changes", () => {
+  const source = "Transcript rapat yang sama.";
+  assert.notEqual(
+    sectionSourceFingerprint("deepseek-ai/DeepSeek-V4-Flash", "id", source),
+    sectionSourceFingerprint("XiaomiMiMo/MiMo-V2.5", "id", source),
+  );
 });
 
 test("splitter preserves all source text and keeps every marker atomic", () => {

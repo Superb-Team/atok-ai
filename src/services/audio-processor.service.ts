@@ -5,11 +5,11 @@ import { noteAssetService, type RecordingAsset } from "@/services/note-asset.ser
 import {
   composeLongFormNote,
   estimateTokenUpperBound,
-  fingerprintText,
   operationalSourceTokenBudget,
   packByTokenBudget,
   splitTranscriptByTokenBudget,
   stripPlaceholderSections,
+  sectionSourceFingerprint,
   type ProcessedSection,
 } from "@/services/long-form-processing";
 import { assessGeneratedNote } from "@/services/note-quality";
@@ -64,11 +64,13 @@ interface ChatCompletionResult {
   model: string;
   prompt_tokens: number;
   completion_tokens: number;
+  estimated_cost: number;
   continuation_count: number;
   is_truncated: boolean;
 }
 
 interface LongFormBudget {
+  model: string;
   maxSourceTokens: number;
   maxReduceTokens: number;
   sectionOutputTokens: number;
@@ -151,6 +153,7 @@ async function resolveLongFormBudget(): Promise<LongFormBudget> {
   );
 
   return {
+    model: limits.model,
     maxSourceTokens: operationalSourceTokenBudget(
       Math.min(MAX_SECTION_SOURCE_TOKENS, sectionAvailable),
     ),
@@ -524,6 +527,7 @@ async function processAudioRecordingOnce(
     // Long-form detail is assembled from bounded section outputs; only compact
     // global front matter goes through a hierarchical reduce.
     const budget = repairWithStructuredFallback ? {
+      model: "deterministic-fallback",
       maxSourceTokens: MAX_SECTION_SOURCE_TOKENS,
       maxReduceTokens: 20_000,
       sectionOutputTokens: SECTION_OUTPUT_TOKENS,
@@ -550,7 +554,11 @@ async function processAudioRecordingOnce(
         await saveProcessingManifest(manifest);
         let persistQueue = Promise.resolve();
         const processedSections = await mapWithConcurrency(sections, SECTION_MAX_CONCURRENT, async (section, i) => {
-          const sourceHash = fingerprintText(`${CURRENT_AI_PIPELINE_VERSION}\0${lang}\0${section.text}`);
+          const sourceHash = sectionSourceFingerprint(
+            `${CURRENT_AI_PIPELINE_VERSION}:${budget.model}`,
+            lang,
+            section.text,
+          );
           const cached = manifest!.sections.find(
             (item) => item.id === section.id && item.sourceHash === sourceHash && item.status === "complete",
           );
