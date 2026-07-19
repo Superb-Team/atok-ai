@@ -5,6 +5,7 @@ import type { Note } from "@/types/note.types";
 import { FileText, Loader2, Search, Star, X } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { installAsyncListener } from "@/services/recording-processing-guard";
+import { shouldRecoverProcessingJob } from "@/services/processing-review-policy";
 
 interface HomePageProps {
   onNoteClick?: (noteId: number) => void;
@@ -130,7 +131,11 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     import('@/services/recording.service').then(({ recordingService }) =>
       recordingService.listProcessingJobs().then((jobs) => {
         jobs
-          .filter((job) => job.status !== 'complete' && job.status !== 'partial')
+          .filter((job) => shouldRecoverProcessingJob(
+            job.status,
+            job.fallbackVersion,
+            job.repairingFallback,
+          ))
           .forEach((job) => {
             const timestamp = Date.parse(job.updatedAt) || Date.now();
             startProcessing(job.audioPath, job.noteTitle, job.language, timestamp);

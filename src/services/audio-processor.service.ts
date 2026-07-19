@@ -12,7 +12,11 @@ import {
 } from "@/services/long-form-processing";
 import { assessGeneratedNote } from "@/services/note-quality";
 import { recordingProcessingGuard } from "@/services/recording-processing-guard";
-import { shouldReviewGeneratedNote } from "@/services/processing-review-policy";
+import { buildLosslessStructuredFallback } from "@/services/lossless-note-fallback";
+import {
+  shouldRepairWithStructuredFallback,
+  shouldReviewGeneratedNote,
+} from "@/services/processing-review-policy";
 
 // ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -90,6 +94,10 @@ interface ProcessingManifest {
   sections: ManifestSection[];
   savedNoteId?: number;
   failureNoteId?: number;
+  enhancementMode?: "ai" | "hybrid" | "extractive-fallback";
+  fallbackVersion?: number;
+  repairingFallback?: boolean;
+  timingsMs?: Record<string, number>;
   error?: string;
   createdAt: string;
   updatedAt: string;
@@ -355,6 +363,8 @@ async function processAudioRecordingOnce(
     timings[stage] = Math.round(performance.now() - since);
   };
   let manifest: ProcessingManifest | null = null;
+  let repairWithStructuredFallback = false;
+  let repairReason: string | undefined;
   try {
     // `??` not `||`: an explicit "" means AUTO-detect and must survive; only a
     // missing language (legacy handoff) falls back to Indonesian.
@@ -378,6 +388,17 @@ async function processAudioRecordingOnce(
     } else {
       manifest.noteTitle = noteTitle;
       manifest.language = lang;
+      repairWithStructuredFallback = shouldRepairWithStructuredFallback(
+        manifest.status,
+        manifest.savedNoteId,
+        manifest.fallbackVersion,
+        manifest.repairingFallback,
+      );
+      if (repairWithStructuredFallback) {
+        repairReason = manifest.error;
+        manifest.repairingFallback = true;
+        await saveProcessingManifest(manifest);
+      }
     }
 
     // Screenshots + vision descriptions only need audioPath, so run them
@@ -388,7 +409,9 @@ async function processAudioRecordingOnce(
       const taken = await noteAssetService.takeRecordingAssets(audioPath);
       const descriptions = await Promise.all(
         taken.assets.map((a) =>
-          invoke<string>("describe_image", { imagePath: a.path, language: langName })
+          (repairWithStructuredFallback
+            ? Promise.resolve("")
+            : invoke<string>("describe_image", { imagePath: a.path, language: langName }))
             .catch(() => ""),
         ),
       );
@@ -409,8 +432,8 @@ async function processAudioRecordingOnce(
         throw new Error("Transcription returned no usable text");
       }
       manifest.transcript = transcript;
-      manifest.status = "extracting";
-      manifest.error = undefined;
+      manifest.status = repairWithStructuredFallback ? "partial" : "extracting";
+      if (!repairWithStructuredFallback) manifest.error = undefined;
       await saveProcessingManifest(manifest);
     } catch (transcribeError) {
       manifest.status = "failed";
@@ -468,15 +491,27 @@ async function processAudioRecordingOnce(
     // Step 2: every request is planned against a conservative token budget.
     // Long-form detail is assembled from bounded section outputs; only compact
     // global front matter goes through a hierarchical reduce.
-    const budget = await resolveLongFormBudget();
-    let usedMapReduce = estimateTokenUpperBound(userContent) > budget.maxSourceTokens;
+    const budget = repairWithStructuredFallback ? {
+      maxSourceTokens: MAX_SECTION_SOURCE_TOKENS,
+      maxReduceTokens: 20_000,
+      sectionOutputTokens: SECTION_OUTPUT_TOKENS,
+      globalOutputTokens: GLOBAL_OUTPUT_TOKENS,
+    } : await resolveLongFormBudget();
+    let usedMapReduce = !repairWithStructuredFallback &&
+      estimateTokenUpperBound(userContent) > budget.maxSourceTokens;
     let processingDegraded = false;
+    let usedStructuredFallback = false;
     let processingError: string | undefined;
     const tEnhance = performance.now();
     let enhancedText: string;
     let reviewSource = markedTranscript;
     try {
-      if (usedMapReduce) {
+      if (repairWithStructuredFallback) {
+        processingDegraded = true;
+        usedStructuredFallback = true;
+        processingError = repairReason ?? "Previous AI enhancement did not complete";
+        enhancedText = buildLosslessStructuredFallback(noteTitle, markedTranscript, lang);
+      } else if (usedMapReduce) {
         const sections = splitTranscriptByTokenBudget(markedTranscript, budget.maxSourceTokens);
         console.log(`[audio-processor] map-reduce enhance: ${sections.length} sections`);
         manifest.status = "extracting";
@@ -611,8 +646,15 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       }
     } catch (enhancementError) {
       processingDegraded = true;
+      usedStructuredFallback = true;
       processingError = `Note enhancement failed: ${String(enhancementError)}`;
-      enhancedText = `# ${noteTitle}\n\n> Note enhancement could not be completed. The complete raw transcript is preserved below.\n\n## Raw Transcript\n\n${markedTranscript}`;
+      enhancedText = buildLosslessStructuredFallback(noteTitle, markedTranscript, lang);
+      console.warn(JSON.stringify({
+        event: "recording_enhancement_fallback",
+        jobId: manifest.jobId,
+        stage: "enhance",
+        reason: "provider_error",
+      }));
     }
     mark("enhance", tEnhance);
 
@@ -649,8 +691,9 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
     });
     if (finalQualityIssues.length > 0) {
       processingDegraded = true;
+      usedStructuredFallback = true;
       processingError = `Generated note rejected by quality checks: ${finalQualityIssues.map((issue) => issue.code).join(", ")}`;
-      enhancedText = `# ${noteTitle}\n\n> AI-generated formatting was rejected because it appeared incomplete or unreliable. The source transcript is preserved below for review.\n\n## Raw Transcript\n\n${markedTranscript}`;
+      enhancedText = buildLosslessStructuredFallback(noteTitle, markedTranscript, lang);
     }
 
     // Step 3: Save note
@@ -676,6 +719,11 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       // Persist the note id before optional indexing so a crash cannot create a
       // duplicate note when this job resumes.
       await saveProcessingManifest(manifest);
+    } else if (repairWithStructuredFallback) {
+      await noteService.updateNote(manifest.savedNoteId, user.id, {
+        title: finalTitle,
+        content: enhancedText,
+      });
     }
 
     // Step 4: Insert to RAG (optional, non-fatal)
@@ -696,12 +744,24 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
     }
     mark("save+rag", tSave);
     mark("total", t0);
+    manifest.enhancementMode = usedStructuredFallback
+      ? "extractive-fallback"
+      : processingDegraded ? "hybrid" : "ai";
+    if (usedStructuredFallback) manifest.fallbackVersion = 1;
+    manifest.repairingFallback = undefined;
+    manifest.timingsMs = timings;
     manifest.status = needsReview ? "partial" : "complete";
     manifest.error = manifest.status === "partial"
       ? processingError ?? "One or more transcript sections used a lossless fallback"
       : undefined;
     await saveProcessingManifest(manifest);
-    console.log(`[audio-processor] timings(ms): ${JSON.stringify(timings)}`);
+    console.log(JSON.stringify({
+      event: "recording_processing_completed",
+      jobId: manifest.jobId,
+      status: manifest.status,
+      enhancementMode: manifest.enhancementMode,
+      timingsMs: timings,
+    }));
 
     return { noteTitle, enhancedText, success: true };
   } catch (error) {
