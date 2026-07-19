@@ -2,6 +2,54 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+static MANIFEST_IO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+lazy_static::lazy_static! {
+    static ref ACTIVE_JOB_CLAIMS: std::sync::Mutex<std::collections::HashMap<PathBuf, String>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
+}
+
+fn canonical_audio_key(audio_path: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(audio_path)
+        .map_err(|error| format!("Resolve recording path '{}': {}", audio_path.display(), error))
+}
+
+fn claim(audio_path: &Path, run_id: &str) -> Result<bool, String> {
+    if run_id.trim().is_empty() {
+        return Err("Processing runId cannot be empty".to_string());
+    }
+    let key = canonical_audio_key(audio_path)?;
+    let mut claims = ACTIVE_JOB_CLAIMS
+        .lock()
+        .map_err(|error| format!("Lock active processing jobs: {}", error))?;
+    if claims.contains_key(&key) {
+        return Ok(false);
+    }
+    claims.insert(key, run_id.to_string());
+    Ok(true)
+}
+
+fn release_claim(audio_path: &Path, run_id: &str) -> Result<bool, String> {
+    let key = canonical_audio_key(audio_path)?;
+    let mut claims = ACTIVE_JOB_CLAIMS
+        .lock()
+        .map_err(|error| format!("Lock active processing jobs: {}", error))?;
+    if claims.get(&key).map(String::as_str) != Some(run_id) {
+        return Ok(false);
+    }
+    claims.remove(&key);
+    Ok(true)
+}
+
+#[cfg(test)]
+fn clear_claim_for_test(audio_path: &Path) {
+    if let Ok(key) = canonical_audio_key(audio_path) {
+        if let Ok(mut claims) = ACTIVE_JOB_CLAIMS.lock() {
+            claims.remove(&key);
+        }
+    }
+}
+
 fn manifest_path(audio_path: &Path) -> PathBuf {
     let stem = audio_path
         .file_stem()
@@ -36,35 +84,49 @@ fn save_atomic(path: &Path, manifest: &Value) -> Result<(), String> {
         .map_err(|error| format!("Serialize processing manifest: {}", error))?;
     let mut file = std::fs::File::create(&temp)
         .map_err(|error| format!("Create processing manifest temp file: {}", error))?;
-    file.write_all(&bytes)
-        .map_err(|error| format!("Write processing manifest temp file: {}", error))?;
-    file.sync_all()
-        .map_err(|error| format!("Sync processing manifest temp file: {}", error))?;
+    let result = (|| {
+        file.write_all(&bytes)
+            .map_err(|error| format!("Write processing manifest temp file: {}", error))?;
+        file.sync_all()
+            .map_err(|error| format!("Sync processing manifest temp file: {}", error))?;
+        drop(file);
 
-    // Windows cannot rename over an existing file. Move the prior committed
-    // value aside first, then restore it if committing the new value fails.
-    let backup = path.with_extension("json.backup");
-    if backup.exists() {
-        std::fs::remove_file(&backup)
-            .map_err(|error| format!("Remove stale processing manifest backup: {}", error))?;
-    }
-    let had_previous = path.exists();
-    if had_previous {
-        std::fs::rename(path, &backup)
-            .map_err(|error| format!("Back up processing manifest: {}", error))?;
-    }
-    if let Err(error) = std::fs::rename(&temp, path) {
-        if had_previous {
-            let _ = std::fs::rename(&backup, path);
+        // Windows cannot rename over an existing file. All manifest I/O is
+        // serialized by MANIFEST_IO_LOCK, so the backup swap cannot race a
+        // second writer in this application process.
+        let backup = path.with_extension("json.backup");
+        if backup.exists() {
+            std::fs::remove_file(&backup)
+                .map_err(|error| format!("Remove stale processing manifest backup: {}", error))?;
         }
+        let had_previous = path.exists();
+        if had_previous {
+            std::fs::rename(path, &backup)
+                .map_err(|error| format!("Back up processing manifest: {}", error))?;
+        }
+        if let Err(error) = std::fs::rename(&temp, path) {
+            if had_previous {
+                let _ = std::fs::rename(&backup, path);
+            }
+            return Err(format!("Commit processing manifest: {}", error));
+        }
+        if had_previous {
+            let _ = std::fs::remove_file(&backup);
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
         let _ = std::fs::remove_file(&temp);
-        return Err(format!("Commit processing manifest: {}", error));
     }
-    if had_previous {
-        std::fs::remove_file(&backup)
-            .map_err(|error| format!("Remove processing manifest backup: {}", error))?;
-    }
-    Ok(())
+    result
+}
+
+fn save_serialized(path: &Path, manifest: &Value) -> Result<(), String> {
+    let _guard = MANIFEST_IO_LOCK
+        .lock()
+        .map_err(|error| format!("Lock processing manifest: {}", error))?;
+    save_atomic(path, manifest)
 }
 
 fn load(path: &Path) -> Result<Option<Value>, String> {
@@ -84,21 +146,38 @@ fn load(path: &Path) -> Result<Option<Value>, String> {
     Ok(Some(manifest))
 }
 
+fn load_serialized(path: &Path) -> Result<Option<Value>, String> {
+    let _guard = MANIFEST_IO_LOCK
+        .lock()
+        .map_err(|error| format!("Lock processing manifest: {}", error))?;
+    load(path)
+}
+
 #[tauri::command]
 pub async fn save_processing_manifest(audio_path: String, manifest: Value) -> Result<(), String> {
     if manifest.get("audioPath").and_then(Value::as_str) != Some(audio_path.as_str()) {
         return Err("Processing manifest audioPath does not match command audioPath".to_string());
     }
     let path = manifest_path(Path::new(&audio_path));
-    tokio::task::spawn_blocking(move || save_atomic(&path, &manifest))
+    tokio::task::spawn_blocking(move || save_serialized(&path, &manifest))
         .await
         .map_err(|error| format!("Manifest task failed: {}", error))?
 }
 
 #[tauri::command]
+pub async fn claim_processing_job(audio_path: String, run_id: String) -> Result<bool, String> {
+    claim(Path::new(&audio_path), &run_id)
+}
+
+#[tauri::command]
+pub async fn release_processing_job(audio_path: String, run_id: String) -> Result<bool, String> {
+    release_claim(Path::new(&audio_path), &run_id)
+}
+
+#[tauri::command]
 pub async fn load_processing_manifest(audio_path: String) -> Result<Option<Value>, String> {
     let path = manifest_path(Path::new(&audio_path));
-    tokio::task::spawn_blocking(move || load(&path))
+    tokio::task::spawn_blocking(move || load_serialized(&path))
         .await
         .map_err(|error| format!("Manifest task failed: {}", error))?
 }
@@ -121,7 +200,7 @@ pub async fn list_processing_manifests(directory: String) -> Result<Vec<Value>, 
                 .map(|name| name.ends_with(".processing.json"))
                 .unwrap_or(false);
             if is_manifest {
-                if let Ok(Some(manifest)) = load(&path) {
+                if let Ok(Some(manifest)) = load_serialized(&path) {
                     manifests.push(manifest);
                 }
             }
@@ -212,6 +291,92 @@ mod tests {
 
         assert_eq!(load(&path).unwrap(), Some(expected));
         assert!(path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_manifest_saves_are_serialized_and_leave_valid_json() {
+        let dir = temp_dir("concurrent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("take.mp3");
+        let path = manifest_path(&audio);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+
+        let writers: Vec<_> = (0..32)
+            .map(|index| {
+                let audio = audio.clone();
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut value = manifest(&audio, "extracting");
+                    value["generation"] = serde_json::json!(index);
+                    barrier.wait();
+                    save_serialized(&path, &value)
+                })
+            })
+            .collect();
+
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+
+        let saved = load_serialized(&path).unwrap().unwrap();
+        assert_eq!(saved["status"], "extracting");
+        assert!(saved["generation"].as_i64().is_some());
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+                .count(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_job_claims_have_exactly_one_owner() {
+        let dir = temp_dir("claims");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("take.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+
+        let claimers: Vec<_> = (0..32)
+            .map(|index| {
+                let audio = audio.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    claim(&audio, &format!("run-{index}"))
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = claimers
+            .into_iter()
+            .map(|claimer| claimer.join().unwrap().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|claimed| **claimed).count(), 1);
+
+        clear_claim_for_test(&audio);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_the_owner_can_release_a_processing_claim() {
+        let dir = temp_dir("claim-release");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("take.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        assert!(claim(&audio, "owner").unwrap());
+        assert!(!release_claim(&audio, "not-owner").unwrap());
+        assert!(!claim(&audio, "next").unwrap());
+        assert!(release_claim(&audio, "owner").unwrap());
+        assert!(claim(&audio, "next").unwrap());
+
+        clear_claim_for_test(&audio);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

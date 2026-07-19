@@ -195,9 +195,9 @@ pub async fn record_screenshot_asset(
     std::fs::write(&manifest, json).map_err(|e| format!("Write manifest: {}", e))
 }
 
-/// Read-and-consume the screenshot manifest for a finished recording. Returns
-/// the entries sorted by elapsed time plus the MP3 duration (derived from the
-/// CBR byte rate) so the caller can position each screenshot proportionally.
+/// Read the durable screenshot manifest for a finished recording. Returns the
+/// entries sorted by elapsed time plus the MP3 duration (derived from the CBR
+/// byte rate) so retries can reproduce the same note after a restart.
 #[tauri::command]
 pub async fn take_recording_assets(audio_path: String) -> Result<RecordingAssets, String> {
     let manifest = manifest_path(&audio_path);
@@ -205,9 +205,6 @@ pub async fn take_recording_assets(audio_path: String) -> Result<RecordingAssets
         Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    if !assets.is_empty() {
-        let _ = std::fs::remove_file(&manifest);
-    }
     assets.sort_by_key(|a| a.elapsed_ms);
     // Drop entries whose file vanished (e.g. user cleaned the assets dir).
     assets.retain(|a| Path::new(&a.path).is_file());
@@ -373,9 +370,11 @@ mod tests {
         assert_eq!(taken.assets[0].elapsed_ms, 5_000);
         assert_eq!(taken.assets[1].elapsed_ms, 20_000);
 
-        // Consumed: a second take returns empty.
+        // Durable: retries and restart recovery see the same ordered assets.
         let again = take_recording_assets(mp3_str).await.unwrap();
-        assert!(again.assets.is_empty());
+        assert_eq!(again.assets.len(), 2);
+        assert_eq!(again.assets[0].elapsed_ms, 5_000);
+        assert_eq!(again.assets[1].elapsed_ms, 20_000);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

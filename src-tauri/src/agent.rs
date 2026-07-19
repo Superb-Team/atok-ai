@@ -1,6 +1,7 @@
 // AI Backend — all API calls go through here (keys never exposed to frontend). Providers: DeepInfra (OpenAI-compatible chat/streaming/Whisper) and Agent API (custom transcription, RAG).
 
 use reqwest::Client;
+use std::io::Write;
 use std::path::Path;
 
 // ==================== Config ====================
@@ -541,6 +542,9 @@ lazy_static::lazy_static! {
     static ref LIVE_TRANSCRIBE_JOBS: std::sync::Mutex<
         std::collections::HashMap<String, tokio::task::JoinHandle<()>>,
     > = std::sync::Mutex::new(std::collections::HashMap::new());
+    static ref TRANSCRIBE_LOCKS: std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    > = std::sync::Mutex::new(std::collections::HashMap::new());
 }
 
 /// Canonical `.mp3` form of a recording path so the recorder and `transcribe_audio`
@@ -552,6 +556,77 @@ fn mp3_key(path: &str) -> String {
     } else {
         p.with_extension("mp3").to_string_lossy().to_string()
     }
+}
+
+fn transcript_sidecar_path(audio_path: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(audio_path);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("recording");
+    path.parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!("{}.transcript.txt", stem))
+}
+
+fn read_transcript_sidecar(audio_path: &str) -> Result<Option<String>, String> {
+    let path = transcript_sidecar_path(audio_path);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("Read transcript sidecar: {}", error))?;
+    Ok((!text.trim().is_empty()).then_some(text))
+}
+
+fn persist_transcript_sidecar(audio_path: &str, transcript: &str) -> Result<(), String> {
+    let path = transcript_sidecar_path(audio_path);
+    persist_transcript_file(&path, transcript)
+}
+
+fn persist_transcript_file(path: &std::path::Path, transcript: &str) -> Result<(), String> {
+    let temp = path.with_extension(format!("txt.tmp-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = std::fs::File::create(&temp)
+            .map_err(|error| format!("Create transcript sidecar temp file: {}", error))?;
+        file.write_all(transcript.as_bytes())
+            .map_err(|error| format!("Write transcript sidecar temp file: {}", error))?;
+        file.sync_all()
+            .map_err(|error| format!("Sync transcript sidecar temp file: {}", error))?;
+        drop(file);
+        #[cfg(windows)]
+        {
+            let backup = path.with_extension("txt.backup");
+            if backup.exists() {
+                std::fs::remove_file(&backup)
+                    .map_err(|error| format!("Remove stale transcript backup: {}", error))?;
+            }
+            let had_previous = path.exists();
+            if had_previous {
+                std::fs::rename(path, &backup)
+                    .map_err(|error| format!("Back up transcript sidecar: {}", error))?;
+            }
+            if let Err(error) = std::fs::rename(&temp, path) {
+                if had_previous {
+                    let _ = std::fs::rename(&backup, path);
+                }
+                return Err(format!("Commit transcript sidecar: {}", error));
+            }
+            if had_previous {
+                let _ = std::fs::remove_file(&backup);
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(&temp, path)
+                .map_err(|error| format!("Commit transcript sidecar: {}", error))
+        }
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// Register a live-transcription task for `mp3_path`. Called by the recorder
@@ -844,6 +919,17 @@ pub async fn transcribe_audio(
     let api_key = std::env::var("DEEPINFRA_API_KEY")
         .map_err(|_| "DEEPINFRA_API_KEY not configured in .env".to_string())?;
     let lang = language.unwrap_or_else(|| WHISPER_DEFAULT_LANGUAGE.to_string());
+    let audio_key = mp3_key(&audio_path);
+    let transcribe_lock = {
+        let mut locks = TRANSCRIBE_LOCKS
+            .lock()
+            .map_err(|error| format!("Lock transcription registry: {}", error))?;
+        locks
+            .entry(audio_key)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _transcribe_guard = transcribe_lock.lock().await;
 
     // If the chunked recorder is still transcribing this take live, await it so we
     // return its result instead of racing it into a redundant second full re-split.
@@ -853,24 +939,12 @@ pub async fn transcribe_audio(
 
     // Fast path: the chunked Linux pipeline pre-transcribes during recording and
     // writes a sidecar file. Return it instantly without re-reading the MP3.
-    let p = std::path::Path::new(&audio_path);
-    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-        let sidecar = p
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join(format!("{}.transcript.txt", stem));
-        if sidecar.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&sidecar) {
-                if !text.is_empty() {
-                    eprintln!(
-                        "[transcribe] Returning live transcript ({} chars)",
-                        text.len()
-                    );
-                    let _ = std::fs::remove_file(&sidecar);
-                    return Ok(text);
-                }
-            }
-        }
+    if let Some(text) = read_transcript_sidecar(&audio_path)? {
+        eprintln!(
+            "[transcribe] Returning persisted transcript ({} chars)",
+            text.len()
+        );
+        return Ok(text);
     }
 
     let audio_bytes = std::fs::read(&audio_path)
@@ -885,7 +959,9 @@ pub async fn transcribe_audio(
     let ranges = split_mp3_frames(&audio_bytes, WHISPER_MAX_BYTES);
     if ranges.len() == 1 {
         let text = transcribe_chunk(&api_key, &audio_bytes, "recording.mp3", &lang).await?;
-        return Ok(clean_transcript(&text));
+        let result = clean_transcript(&text);
+        persist_transcript_sidecar(&audio_path, &result)?;
+        return Ok(result);
     }
     let num_chunks = ranges.len();
 
@@ -918,21 +994,28 @@ pub async fn transcribe_audio(
 
     // Collect results in order
     let mut all_transcripts: Vec<String> = Vec::with_capacity(num_chunks);
+    let mut failures = Vec::new();
     for (i, handle) in handles.into_iter().enumerate() {
         match handle.await {
             Ok(Ok(text)) => all_transcripts.push(text),
             Ok(Err(e)) => {
                 eprintln!("[transcribe] Chunk {} failed: {}", i, e);
-                all_transcripts.push(format!("[Transcription failed for part {}: {}]", i + 1, e));
+                failures.push(format!("part {}: {}", i + 1, e));
             }
             Err(e) => {
                 eprintln!("[transcribe] Chunk {} task panicked: {}", i, e);
-                all_transcripts.push(format!(
-                    "[Transcription failed for part {}: join error]",
-                    i + 1
-                ));
+                failures.push(format!("part {}: task join error", i + 1));
             }
         }
+    }
+
+    if !failures.is_empty() {
+        return Err(format!(
+            "Transcription incomplete; {} of {} chunks failed ({})",
+            failures.len(),
+            num_chunks,
+            failures.join("; ")
+        ));
     }
 
     let result = all_transcripts
@@ -942,6 +1025,7 @@ pub async fn transcribe_audio(
         .collect::<Vec<_>>()
         .join("\n\n");
     eprintln!("[transcribe] All {} chunks completed", num_chunks);
+    persist_transcript_sidecar(&audio_path, &result)?;
     Ok(result)
 }
 
@@ -1002,18 +1086,24 @@ pub async fn transcribe_chunks_live(
         handles.len()
     );
     let mut transcripts: Vec<String> = Vec::with_capacity(handles.len());
+    let mut had_failure = false;
     for (i, handle) in handles.into_iter().enumerate() {
         match handle.await {
             Ok(Ok(text)) => transcripts.push(text),
             Ok(Err(e)) => {
                 eprintln!("[transcribe-live] Chunk {} failed: {}", i, e);
-                transcripts.push(format!("[Part {} transcription failed: {}]", i + 1, e));
+                had_failure = true;
             }
             Err(e) => {
                 eprintln!("[transcribe-live] Chunk {} panicked: {}", i, e);
-                transcripts.push(format!("[Part {} failed: task error]", i + 1));
+                had_failure = true;
             }
         }
+    }
+
+    if had_failure {
+        eprintln!("[transcribe-live] Incomplete result; canonical transcript was not committed");
+        return;
     }
 
     // Clean each chunk, then stitch consecutive chunks at their overlapping seam
@@ -1025,7 +1115,7 @@ pub async fn transcribe_chunks_live(
         return;
     }
 
-    match std::fs::write(&transcript_path, &combined) {
+    match persist_transcript_file(&transcript_path, &combined) {
         Ok(()) => eprintln!(
             "[transcribe-live] Saved transcript: {} chars, {} parts → {}",
             combined.len(),
@@ -1457,6 +1547,26 @@ mod tests {
             stitch_overlapping(&parts),
             "a b c satu dua tiga empat lima enam tujuh delapan sembilan"
         );
+    }
+
+    #[test]
+    fn transcript_sidecar_can_be_read_repeatedly_without_being_consumed() {
+        let dir = std::env::temp_dir().join(format!("atok-sidecar-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("meeting.mp3");
+        let audio_path = audio.to_string_lossy().to_string();
+        persist_transcript_sidecar(&audio_path, "transkrip penting").unwrap();
+
+        assert_eq!(
+            read_transcript_sidecar(&audio_path).unwrap().as_deref(),
+            Some("transkrip penting")
+        );
+        assert_eq!(
+            read_transcript_sidecar(&audio_path).unwrap().as_deref(),
+            Some("transkrip penting")
+        );
+        assert!(transcript_sidecar_path(&audio_path).is_file());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

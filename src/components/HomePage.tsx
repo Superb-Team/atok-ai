@@ -4,6 +4,7 @@ import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
 import { FileText, Loader2, Search, Star, X } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { installAsyncListener } from "@/services/recording-processing-guard";
 
 interface HomePageProps {
   onNoteClick?: (noteId: number) => void;
@@ -80,7 +81,6 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   useEffect(() => {
     loadNotes();
 
-    let unlisten1: (() => void) | undefined;
     let storageInterval: NodeJS.Timeout | undefined;
 
     // Shared between the event fast path and the localStorage poll so the same
@@ -110,27 +110,20 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       }
     }, 500);
 
-    const setupTauriListeners = async () => {
-      try {
+    const cleanupRecordingListener = installAsyncListener<any>(
+      async (handler) => {
         const { listen } = await import('@tauri-apps/api/event');
-
-        // Fast path: the recording popup sends the full handoff in the event
-        // payload, so processing starts immediately instead of waiting for the
-        // next poll tick. Older payloads without audioPath still show the card.
-        unlisten1 = await listen('recording-started', (event: any) => {
-          const { noteTitle, audioPath, language, timestamp } = event.payload ?? {};
-          if (noteTitle && audioPath && typeof timestamp === 'number') {
-            startProcessing(audioPath, noteTitle, language ?? undefined, timestamp);
-          } else if (noteTitle) {
-            setProcessingNotes(prev => new Set(prev).add(noteTitle));
-          }
-        });
-      } catch (err) {
-        console.error("Failed to set up Tauri event listeners:", err);
-      }
-    };
-
-    setupTauriListeners();
+        return listen('recording-started', handler);
+      },
+      (event) => {
+        const { noteTitle, audioPath, language, timestamp } = event.payload ?? {};
+        if (noteTitle && audioPath && typeof timestamp === 'number') {
+          startProcessing(audioPath, noteTitle, language ?? undefined, timestamp);
+        } else if (noteTitle) {
+          setProcessingNotes(prev => new Set(prev).add(noteTitle));
+        }
+      },
+    );
 
     // Manifest-backed recovery: a crash or app restart no longer loses a job
     // after the localStorage handoff has already been consumed.
@@ -147,7 +140,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
     return () => {
       if (storageInterval) clearInterval(storageInterval);
-      unlisten1?.();
+      cleanupRecordingListener();
     };
   }, [loadNotes]);
 

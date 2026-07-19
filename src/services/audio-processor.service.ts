@@ -10,6 +10,8 @@ import {
   splitTranscriptByTokenBudget,
   type ProcessedSection,
 } from "@/services/long-form-processing";
+import { assessGeneratedNote } from "@/services/note-quality";
+import { recordingProcessingGuard } from "@/services/recording-processing-guard";
 
 // ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -222,7 +224,10 @@ async function processSectionReliably(
       hasMarkers,
       budget.sectionOutputTokens,
     );
-    if (!result.is_truncated) {
+    const qualityIssues = assessGeneratedNote(section, result.content, {
+      isTruncated: result.is_truncated,
+    });
+    if (qualityIssues.length === 0) {
       return { markdown: result.content, isDegraded: false };
     }
 
@@ -282,8 +287,11 @@ async function synthesizeGlobalNote(
         0.1,
         budget.globalOutputTokens,
       );
-      if (result.is_truncated || !result.content.trim()) {
-        throw new Error("Intermediate global reduction was truncated");
+      const issues = assessGeneratedNote(batch.join("\n\n"), result.content, {
+        isTruncated: result.is_truncated,
+      });
+      if (issues.length > 0) {
+        throw new Error(`Intermediate global reduction failed quality checks: ${issues.map((issue) => issue.code).join(", ")}`);
       }
       return result.content;
     });
@@ -304,8 +312,11 @@ async function synthesizeGlobalNote(
     0.1,
     budget.globalOutputTokens,
   );
-  if (final.is_truncated || !final.content.trim()) {
-    throw new Error("Global synthesis was truncated");
+  const finalIssues = assessGeneratedNote(source, final.content, {
+    isTruncated: final.is_truncated,
+  });
+  if (finalIssues.length > 0) {
+    throw new Error(`Global synthesis failed quality checks: ${finalIssues.map((issue) => issue.code).join(", ")}`);
   }
   return final.content;
 }
@@ -317,7 +328,26 @@ export interface AudioProcessingResult {
   error?: string;
 }
 
-export async function processAudioRecording(
+export function processAudioRecording(
+  audioPath: string,
+  noteTitle: string,
+  language?: string,
+): Promise<AudioProcessingResult> {
+  return recordingProcessingGuard.run(audioPath, async () => {
+    const runId = globalThis.crypto.randomUUID();
+    const claimed = await invoke<boolean>("claim_processing_job", { audioPath, runId });
+    if (!claimed) {
+      return { noteTitle, enhancedText: "", success: true };
+    }
+    try {
+      return await processAudioRecordingOnce(audioPath, noteTitle, language);
+    } finally {
+      await invoke("release_processing_job", { audioPath, runId }).catch(() => {});
+    }
+  });
+}
+
+async function processAudioRecordingOnce(
   audioPath: string,
   noteTitle: string,
   language?: string,
@@ -338,7 +368,7 @@ export async function processAudioRecording(
       const now = new Date().toISOString();
       manifest = {
         schemaVersion: 1,
-        jobId: `job-${fingerprintText(audioPath)}`,
+        jobId: `job-${globalThis.crypto.randomUUID()}`,
         audioPath,
         noteTitle,
         language: lang,
@@ -551,7 +581,10 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
           0.2,
           budget.sectionOutputTokens,
         );
-        if (single.is_truncated) {
+        const singleIssues = assessGeneratedNote(markedTranscript, single.content, {
+          isTruncated: single.is_truncated,
+        });
+        if (singleIssues.length > 0) {
           const recovered = await processSectionReliably(
             markedTranscript,
             0,
@@ -609,12 +642,23 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       enhancedText = applyAssetMarkers(enhancedText, assets);
     }
 
+    const finalQualityIssues = assessGeneratedNote(markedTranscript, enhancedText, {
+      isTruncated: false,
+    });
+    if (finalQualityIssues.length > 0) {
+      processingDegraded = true;
+      processingError = `Generated note rejected by quality checks: ${finalQualityIssues.map((issue) => issue.code).join(", ")}`;
+      enhancedText = `# ${noteTitle}\n\n> AI-generated formatting was rejected because it appeared incomplete or unreliable. The source transcript is preserved below for review.\n\n## Raw Transcript\n\n${markedTranscript}`;
+    }
+
     // Step 3: Save note
     const tSave = performance.now();
     const user = authService.getUser();
     if (!user) throw new Error("User not authenticated");
 
     const finalTitle = deriveNoteTitle(enhancedText, transcript, noteTitle);
+    const hasFailedSection = manifest.sections.some((section) => section.status === "failed");
+    const needsReview = processingDegraded || hasFailedSection;
 
     manifest.status = "saving";
     await saveProcessingManifest(manifest);
@@ -622,8 +666,9 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       const savedNote = await saveNote(
         finalTitle,
         enhancedText,
-        ["voice-recording", "transcription"],
+        ["voice-recording", "transcription", ...(needsReview ? ["needs-review"] : [])],
         user.id,
+        manifest.jobId,
       );
       manifest.savedNoteId = savedNote.id;
       // Persist the note id before optional indexing so a crash cannot create a
@@ -632,23 +677,24 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
     }
 
     // Step 4: Insert to RAG (optional, non-fatal)
-    try {
-      await invoke<boolean>("agent_insert_document", {
-        userId: user.id,
-        text: enhancedText,
-        metadata: {
-          type: "voice_recording",
-          date: new Date().toISOString().split("T")[0],
-          source: "whisper_transcription",
-        },
-      });
-    } catch {
-      // RAG insertion is optional — don't fail the workflow
+    if (!needsReview) {
+      try {
+        await invoke<boolean>("agent_insert_document", {
+          userId: user.id,
+          text: enhancedText,
+          metadata: {
+            type: "voice_recording",
+            date: new Date().toISOString().split("T")[0],
+            source: "whisper_transcription",
+          },
+        });
+      } catch {
+        // RAG insertion is optional — don't fail the workflow
+      }
     }
     mark("save+rag", tSave);
     mark("total", t0);
-    const hasFailedSection = manifest.sections.some((section) => section.status === "failed");
-    manifest.status = processingDegraded || hasFailedSection ? "partial" : "complete";
+    manifest.status = needsReview ? "partial" : "complete";
     manifest.error = manifest.status === "partial"
       ? processingError ?? "One or more transcript sections used a lossless fallback"
       : undefined;
@@ -676,18 +722,22 @@ async function saveNote(
   content: string,
   tags: string[],
   userId?: string,
+  jobId?: string,
 ) {
   if (!userId) {
     const user = authService.getUser();
     if (!user) throw new Error("User not authenticated");
     userId = user.id;
   }
-  return noteService.createNote(userId, {
+  const request = {
     title,
     content,
     tags,
     color: "#E0F2FE",
-  });
+  };
+  return jobId
+    ? noteService.createRecordingNote(userId, jobId, request)
+    : noteService.createNote(userId, request);
 }
 
 // Place each screenshot marker at the word position proportional to when it was

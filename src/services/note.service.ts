@@ -26,6 +26,18 @@ export const noteService = {
     }
   },
 
+  async createRecordingNote(
+    userId: string,
+    jobId: string,
+    request: CreateNoteRequest,
+  ): Promise<Note> {
+    try {
+      return await invoke<Note>("create_recording_note", { userId, jobId, request });
+    } catch (error) {
+      throw toError(error, "Failed to create recording note");
+    }
+  },
+
   async updateNote(
     noteId: number,
     userId: string,
