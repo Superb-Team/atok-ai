@@ -12,6 +12,7 @@ import {
 } from "@/services/long-form-processing";
 import { assessGeneratedNote } from "@/services/note-quality";
 import { recordingProcessingGuard } from "@/services/recording-processing-guard";
+import { shouldReviewGeneratedNote } from "@/services/processing-review-policy";
 
 // ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -23,10 +24,6 @@ const LANGUAGE_NAMES: Record<string, string> = {
   es: "Spanish",
   ar: "Arabic",
 };
-
-// ~6000 chars ≈ 10+ minutes of speech. Below this a clean draft skips the
-// second review LLM pass entirely (it would double the post-stop wait).
-const REVIEW_TRANSCRIPT_THRESHOLD = 6000;
 
 // max_tokens only hurts when the model loops until it exhausts the budget
 // (which has happened — that's why collapseRepeatedLines exists). Scale the
@@ -632,7 +629,12 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
     // reintroduce the giant serial call map-reduce exists to avoid); if a loop
     // IS suspected there, the review runs against the bounded section notes.
     const tReview = performance.now();
-    if (loopSuspected || (!usedMapReduce && markedTranscript.length > REVIEW_TRANSCRIPT_THRESHOLD)) {
+    if (shouldReviewGeneratedNote({
+      processingDegraded,
+      loopSuspected,
+      usedMapReduce,
+      transcriptLength: markedTranscript.length,
+    })) {
       enhancedText = await reviewNote(reviewSource, enhancedText, langName);
       enhancedText = collapseRepeatedLines(enhancedText);
       mark("review", tReview);

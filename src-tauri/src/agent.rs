@@ -1,8 +1,10 @@
 // AI Backend — all API calls go through here (keys never exposed to frontend). Providers: DeepInfra (OpenAI-compatible chat/streaming/Whisper) and Agent API (custom transcription, RAG).
 
 use reqwest::Client;
+use std::future::Future;
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 // ==================== Config ====================
 
@@ -32,6 +34,14 @@ fn get_agent_config() -> Result<(String, String), String> {
     }
 
     Ok((base_url, api_key))
+}
+
+fn build_provider_client(request_timeout: Duration) -> Result<Client, String> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15).min(request_timeout))
+        .timeout(request_timeout)
+        .build()
+        .map_err(|error| format!("Build provider HTTP client: {error}"))
 }
 
 // ==================== DeepInfra Chat ====================
@@ -140,7 +150,7 @@ pub async fn get_ai_model_limits() -> Result<ModelLimits, String> {
             .unwrap_or_else(|| "https://api.deepinfra.com/v1/models".to_string())
     });
 
-    let fetched = Client::new()
+    let fetched = build_provider_client(Duration::from_secs(15))?
         .get(models_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
@@ -258,6 +268,25 @@ async fn post_chat_with_retry(
 // truncated with no detection. When finish_reason == "length", feed the partial
 // back as an assistant turn and ask the model to continue, up to this many times.
 const CHAT_MAX_CONTINUATIONS: u32 = 2;
+const DEFAULT_CHAT_DEADLINE_SECS: u64 = 300;
+
+fn chat_request_deadline() -> Duration {
+    let seconds = std::env::var("DEEPINFRA_CHAT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CHAT_DEADLINE_SECS)
+        .clamp(10, 900);
+    Duration::from_secs(seconds)
+}
+
+async fn with_chat_deadline<F, T>(future: F, deadline: Duration) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    tokio::time::timeout(deadline, future)
+        .await
+        .map_err(|_| format!("Chat request timed out after {}ms", deadline.as_millis()))?
+}
 
 #[tauri::command]
 pub async fn ai_chat(
@@ -277,7 +306,8 @@ pub async fn ai_chat_detailed(
     max_tokens: Option<u32>,
 ) -> Result<ChatCompletionResult, String> {
     let (base_url, api_key, model) = get_deepinfra_config()?;
-    let client = Client::new();
+    let deadline = chat_request_deadline();
+    let client = build_provider_client(deadline)?;
     let url = format!("{}/chat/completions", base_url);
 
     let mut messages_json: Vec<serde_json::Value> = messages
@@ -311,7 +341,11 @@ pub async fn ai_chat_detailed(
             "stream": false,
         });
 
-        let response = post_chat_with_retry(&client, &url, &api_key, &body).await?;
+        let response = with_chat_deadline(
+            post_chat_with_retry(&client, &url, &api_key, &body),
+            deadline,
+        )
+        .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -1424,6 +1458,42 @@ mod tests {
         assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
         assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn chat_deadline_stops_a_stalled_provider_request() {
+        let stalled = async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok::<_, String>("late response")
+        };
+
+        let started = std::time::Instant::now();
+        let result = with_chat_deadline(stalled, std::time::Duration::from_millis(20)).await;
+
+        assert_eq!(result.unwrap_err(), "Chat request timed out after 20ms");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn provider_client_times_out_while_waiting_for_response_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let client = build_provider_client(std::time::Duration::from_millis(20)).unwrap();
+
+        let started = std::time::Instant::now();
+        let error = client
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(error.is_timeout());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        server.abort();
     }
 
     // 576-byte MPEG1 Layer III frame @ 192kbps/48kHz, no padding (FF FB B4 00).
