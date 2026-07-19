@@ -1,640 +1,408 @@
-# Implementation Plan: Reliable Long-Form Transcription and Note Processing
+# Implementation Plan: Lossless and Trustworthy Recording Pipeline
 
-## Overview
+## Objective
 
-The current pipeline already improves long recordings with three-minute audio chunks, bounded Whisper concurrency, overlap stitching, and a frontend map-reduce pass. It is still not length-safe because the note stage estimates tokens from JavaScript character counts and eventually collapses every section note into one large reduce request. A sufficiently long recording can exceed the model context, hit the output cap, silently fall back to raw text, or produce a final note that omits middle sections.
+Make a 1–2 hour recording durable, single-processing, resumable, and auditable. A UI remount, duplicate event, app crash, provider outage, malformed AI response, or retry must never delete the MP3, silently discard transcript sections, create duplicate notes, or publish hallucinated/runaway text as a successful note.
 
-This plan changes the pipeline from "one final giant model response" into a bounded, checkpointed document pipeline. Every transcript segment remains recoverable, every model request is preflighted against a token budget, detailed section notes are assembled deterministically, and only bounded global summaries are reduced by the model.
+## Reliability Contract
 
-## Goals and Reliability Contract
+1. The finalized MP3 is the source of truth and is immutable until the user explicitly deletes it.
+2. Exactly one active processing owner exists for each canonical audio path; duplicate starts return the existing job.
+3. Every completed transcription chunk and note section is persisted atomically and reused after restart.
+4. A failed or suspicious stage is marked `partial`/`needs_review`; it is never presented as clean success.
+5. Raw transcript and generated note are separate artifacts. AI enhancement cannot overwrite the transcript.
+6. A note is published only after deterministic quality gates pass.
+7. Automatic cleanup may remove disposable temp files, but never the MP3, canonical transcript, or committed chunk artifacts.
 
-- No successful transcript chunk is silently dropped because a later AI request fails.
-- No AI request is knowingly sent above its model input/output budget.
-- A recording can be resumed after app restart, provider outage, or partial stage failure.
-- The final note preserves detailed section output without requiring one unbounded completion.
-- Every partial or failed stage is visible as a typed processing status, not hidden behind a raw-transcript fallback.
-- Screenshot markers remain exactly once and in chronological order.
-- The design behaves consistently for Indonesian, English, CJK, Arabic, and mixed-language transcripts.
+## Verified Current Failures
 
-## Non-Goals
+- `HomePage` registers `recording-started` asynchronously. Cleanup can run while `unlisten` is still unresolved, leaving a stale listener after Strict Mode/HMR/remount.
+- Deduplication lives in component-local refs, so stale component instances do not share the same active-job set.
+- Event, localStorage polling, and manifest recovery can all initiate the same job.
+- The manifest writer uses a shared `.backup` name and an `exists -> rename` sequence without a per-path lock or generation check.
+- Live transcription ownership is destructive (`take_live_job` removes the handle). Concurrent callers fall through to duplicate full-file uploads.
+- The live transcript sidecar is deleted on first read, preventing safe reuse by retries.
+- Failed Whisper chunks are inserted into transcript text as bracketed prose, allowing downstream AI to treat infrastructure errors as meeting content.
+- AI output validation checks truncation and exact repeated lines, but not a single long runaway paragraph with changing words. The supplied July 15 note is a regression example of this failure.
+- The review pass is best-effort and returns the original draft when review fails, even if that draft is precisely the suspicious artifact.
+- Existing manifest tests cover only a single writer; they cannot detect the observed race.
 
-- Replacing DeepInfra or Whisper.
-- Speaker diarization.
-- Rewriting the audio DSP/AEC chain, except where chunk delivery affects transcription reliability.
-- Guaranteeing that an LLM never summarizes a detail incorrectly. The guarantee is that source transcript and section artifacts remain available and that no pipeline stage silently discards data.
+## Implemented Safety Slice (2026-07-19)
 
-## Verified Current-State Findings
+- Frontend async listener cleanup is cancellation-safe and covered by a delayed-registration test.
+- Frontend processing is single-flight per audio path, and Rust rejects concurrent claims from duplicate webview listeners.
+- Manifest access is serialized in-process; a 32-writer regression test covers the observed backup race.
+- Transcript requests are single-flight in-process, canonical transcript sidecars are durable/non-consuming, and failed chunks are no longer injected as meeting prose.
+- Screenshot manifests are non-consuming so restart/retry retains the same assets.
+- Runaway/truncated AI output is rejected before save; rejected notes fall back to the preserved transcript, receive `needs-review`, and are excluded from RAG indexing.
+- Recording note insertion is idempotent across processes through a PostgreSQL transaction advisory lock and persisted internal job marker.
 
-### Existing strengths
+This slice closes the reported same-process incident. The remaining tasks below are still required for cross-process OS fencing, managed artifact storage, chunk-level resume, explicit deletion semantics, and full two-hour qualification.
 
-- Linux emits standalone MP3 chunks every 180 seconds and transcribes them while recording continues.
-- Adjacent live chunks carry five seconds of overlap and are stitched in order.
-- Whisper uploads are limited to two concurrent requests and retry 429/model-busy responses.
-- Oversized fallback MP3 uploads are capped at 20 MiB and normally split at MP3 frame boundaries.
-- Long transcript enhancement splits around 10,000 characters and maps at concurrency three.
-- `ai_chat` detects `finish_reason == "length"` and attempts up to two continuations.
-
-### Root causes and failure modes
-
-1. **Characters are treated as tokens.**
-   `maxTokensFor()` uses `ceil(input.length / 2)` and all section thresholds are character-based. The ratio varies substantially by language and content, so it cannot guarantee a context-safe request.
-
-2. **The reduce stage is still unbounded.**
-   All mapped section notes are concatenated into `reviewSource`, then sent to one `mergeSectionNotes()` request. As recording duration grows, this eventually exceeds context even though each map request is small.
-
-3. **One completion owns the complete final document.**
-   The final detailed note is constrained by `maxTokensFor()` to 8,192 requested output tokens. DeepInfra documents a model-dependent output limit, commonly capped at 16,384 tokens. Continuations can extend output, but they also re-send the original large prompt and previous output, consuming the same total context window.
-
-4. **Continuation is not a completeness guarantee.**
-   Two continuations are arbitrary. A continuation can repeat content, lose markdown structure, exceed total context, or still end with `finish_reason == "length"`; the current command returns the combined partial result anyway.
-
-5. **Map failures can inflate the reduce input.**
-   A failed map request silently falls back to its raw transcript section. Several failures can make the reduce prompt much larger than expected, increasing the chance of a second failure.
-
-6. **Enhancement failure is hidden.**
-   The outer catch assigns `markedTranscript` to `enhancedText`. The note is then saved as if processing succeeded, so the UI cannot distinguish a completed enhanced note from a degraded fallback.
-
-7. **The model response contract loses metadata.**
-   Rust returns only a `String`, discarding `finish_reason`, prompt tokens, completion tokens, model name, request ID, and provider usage. The frontend cannot make a reliable retry/subdivide decision.
-
-8. **The review pass can become another giant request.**
-   It submits both the section-note source and full draft. For long jobs this duplicates most content within one context window.
-
-9. **The current deterministic deduper is globally lossy.**
-   `collapseRepeatedLines()` removes a content line after its second occurrence anywhere in the document. Repetition across separate meeting sections may be meaningful and should not be deleted from detailed chronological notes.
-
-10. **Processing state is transient.**
-    The transcript sidecar is deleted after reading, live jobs are held only in memory, and frontend orchestration lives in component state/localStorage. A crash can force expensive work to restart or leave an ambiguous state.
-
-11. **Cross-platform live behavior is inconsistent.**
-    Linux uses live chunk transcription. macOS explicitly drops `chunk_tx` and batch-loads the take. The Windows recorder currently has no chunk sender in its method signature, while `lib.rs` calls the shared API with one; this needs a platform compile check and a unified chunk contract.
-
-## Provider Constraints Verified from Official Documentation
-
-- The configured default model, `XiaomiMiMo/MiMo-V2.5`, is currently advertised with a 262,144-token context window.
-- DeepInfra states that maximum conversation length is determined by the selected model's context size.
-- DeepInfra states that most models have a hard maximum of 16,384 generated tokens per response.
-- Response continuation cannot exceed the model's total context and returns HTTP 400 when total context is exceeded.
-- DeepInfra's model-list API exposes `metadata.context_length` and `metadata.max_tokens`; limits should therefore be discovered from the configured model rather than hard-coded.
-- DeepInfra exposes token counting through its Anthropic-compatible `messages/count_tokens` endpoint. If exact counting cannot be used for the configured model, the pipeline must use a conservative estimator with a large safety margin and validate against returned usage.
-
-Official references:
-
-- https://deepinfra.com/XiaomiMiMo/MiMo-V2.5/api
-- https://docs.deepinfra.com/chat/overview
-- https://docs.deepinfra.com/api-reference/models/openai-models
-- https://docs.deepinfra.com/integrations/anthropic
-- https://docs.deepinfra.com/chat/structured-outputs
-- https://docs.deepinfra.com/chat/streaming
-
-## Target Architecture
+## Target Flow
 
 ```text
-recording/imported audio
-        |
-        v
-durational audio chunks + stable chunk IDs
-        |
-        v
-Whisper chunk artifacts (ordered, persisted, retryable)
-        |
-        v
-canonical transcript segments
-  - source range / timestamps
-  - text / language
-  - screenshot markers
-  - status / attempts / error
-        |
-        v
-token-aware section planner
-        |
-        +----> bounded section extraction jobs (structured output)
-        |          |
-        |          v
-        |     validated section-note artifacts
-        |          |
-        |          +----> deterministic detailed document assembly
-        |
-        +----> bounded hierarchical global synthesis
-                   - title
-                   - overview
-                   - key decisions
-                   - action items
-                   - topic index
-                          |
-                          v
-              deterministic final Markdown composer
-                          |
-                          v
-              PostgreSQL note + processing manifest
+Popup/import
+   -> finalize and fsync immutable MP3
+   -> enqueue_or_get_job(canonical audio identity)
+   -> durable job manifest
+   -> one leased processing owner
+   -> persisted Whisper chunk artifacts
+   -> canonical transcript (never consumed/deleted)
+   -> bounded section-note artifacts
+   -> deterministic quality gates
+   -> publish clean note OR publish review-required fallback
+   -> retain MP3 + transcript + audit metadata
 ```
 
-### Core architecture decisions
+## Architecture Decisions
 
-1. **Use tokens for budgets, never raw character thresholds.**
-   Read context/output limits for `DEEPINFRA_MODEL`; reserve output, system-prompt, continuation, and safety budgets before dispatch.
+### One backend authority for job identity and ownership
 
-2. **Bound every LLM call independently.**
-   If a request does not fit, subdivide its source input before sending. Never rely on provider rejection as normal flow control.
+Assign a random recording UUID at capture/import; identical bytes imported twice remain distinct user recordings. Copy/finalize source media into a managed app-data artifact directory and use the UUID—not path or a short content hash—as identity. A Rust command acquires a cross-process OS file lock for that UUID and returns either `claimed`, `already_running`, or `resumable`. Every durable mutation also carries a monotonically increasing fencing token checked under the same lock. Automatic lease expiry alone must never create a second owner while an older process is alive or suspended.
 
-3. **Do not use one LLM response as the detailed final note.**
-   Each bounded section produces a detailed section note. The application concatenates those validated outputs chronologically. This removes the single-response maximum-character ceiling.
+### Layered idempotency
 
-4. **Use hierarchical reduce only for global information.**
-   Global overview, decisions, actions, and topics are compact enough to reduce through bounded batches. Detailed content never passes through a lossy global merge.
+- UI layer: one lifecycle-safe listener and no polling/event double execution.
+- Coordinator layer: process-wide single-flight keyed by recording UUID.
+- Ownership layer: cross-process OS lock; process death releases ownership without wall-clock assumptions.
+- Persistence layer: generation/fencing token prevents stale writers from mutating chunks, synthesis, manifests, or notes.
+- Note layer: PostgreSQL serialization plus a user-scoped durable idempotency key prevents duplicate notes.
 
-5. **Persist source and derived artifacts.**
-   A processing manifest records stage, version, chunk hashes, attempts, token usage, and errors. Completed stages are reused on resume.
+### Explicit state and publication model
 
-6. **Treat truncation as an incomplete stage.**
-   `finish_reason == "length"`, malformed structured output, missing section ID, or missing required markers must never be marked complete.
+The job state machine has legal compare-and-swap transitions only: `capturing -> finalizing -> queued -> transcribing -> transcript_partial|transcript_ready -> enhancing -> needs_review|ready_to_publish -> complete`, plus `failed_recoverable`, `cancelled`, and `deleting`. Generated drafts, quality decisions, and final Markdown are separate immutable artifacts referenced by hash. A note persists `processingStatus`, `sourceJobId`, and provenance; search, RAG, export, and normal note views may treat only `complete` as clean.
 
-7. **Prefer subdivide-and-retry over free-form continuation.**
-   Continuation remains optional for bounded prose-only global summaries. Detailed section extraction subdivides its input because that is deterministic and independently verifiable.
+### Deletion is a fenced state transition
 
-## Data Contracts
+Deleting a note does not delete recording evidence. “Delete recording data” is a separate explicit operation: write a durable tombstone, fence/cancel the owner, prevent all later publication, remove derived artifacts, then remove source media last. Recovery resumes the deletion transaction rather than resuming processing.
 
-### Processing manifest
+### Fail closed for generated prose, fail open for source preservation
 
-```ts
-interface ProcessingManifest {
-  schemaVersion: 1;
-  jobId: string;
-  audioPath: string;
-  audioFingerprint: string;
-  language: string;
-  pipelineVersion: string;
-  status: "transcribing" | "extracting" | "synthesizing" | "saving" | "complete" | "partial" | "failed";
-  chunks: TranscriptChunkArtifact[];
-  sections: SectionArtifact[];
-  globalSynthesis?: GlobalSynthesisArtifact;
-  errors: ProcessingError[];
-  createdAt: string;
-  updatedAt: string;
-}
-```
+If enhancement is suspicious, preserve and expose the canonical transcript, mark the note `needs_review`, and retain retry controls. Never discard source data; never label unvalidated prose as complete.
 
-### Transcript chunk artifact
+### Quality checks must be deterministic first
 
-```ts
-interface TranscriptChunkArtifact {
-  id: string;
-  index: number;
-  audioPath?: string;
-  startMs: number;
-  endMs: number;
-  text: string;
-  language: string;
-  sha256: string;
-  status: "pending" | "running" | "complete" | "failed";
-  attempts: number;
-  error?: string;
-}
-```
+An LLM review can improve prose but cannot be the only validator. Local checks detect runaway length, abnormal lexical chains, excessive repetition, unsupported entity/number growth, malformed structure, missing source coverage, and suspicious completion metadata before saving.
 
-### Section extraction artifact
+## Implementation Tasks
 
-```ts
-interface SectionArtifact {
-  id: string;
-  sourceChunkIds: string[];
-  sourceStartMs: number;
-  sourceEndMs: number;
-  sourceHash: string;
-  title: string;
-  summary: string;
-  details: string[];
-  decisions: Array<{ text: string; evidence: string }>;
-  actionItems: Array<{ text: string; owner?: string; due?: string; evidence: string }>;
-  markers: string[];
-  promptTokens: number;
-  completionTokens: number;
-  status: "pending" | "running" | "complete" | "failed";
-}
-```
+### Task 1: Add regression fixtures and failure-injection harness
 
-Evidence fields are short source excerpts or segment references used for validation; they are not required in the rendered note.
-
-### Backend chat result
-
-```rust
-struct ChatCompletionResult {
-    content: String,
-    finish_reason: String,
-    model: String,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    request_id: Option<String>,
-}
-```
-
-## Token Budget Policy
-
-The exact numbers are configuration, not scattered constants.
-
-```text
-context_limit       = provider model metadata
-provider_output_cap = provider model metadata, capped by documented platform maximum
-reserved_output     = min(stage output target, provider_output_cap)
-prompt_overhead     = counted system prompt + message formatting
-safety_margin       = max(8% of context, fixed minimum)
-max_source_tokens   = context_limit - reserved_output - prompt_overhead - safety_margin
-```
-
-Recommended initial stage targets:
-
-- Section extraction source: 8,000-12,000 tokens, with 2,000-4,000 output tokens reserved.
-- Global leaf reduce: no more than 50-60% of available input budget.
-- Global final synthesis: reserve at most 2,000-4,000 output tokens because it contains overview/index rather than detailed transcript reproduction.
-- Any count uncertainty: use a conservative fallback estimate and 20% additional margin.
-
-## Task Plan
-
-### Phase 1: Make limits and failures explicit
-
-#### Task 1: Introduce typed chat completion results
-
-**Description:** Preserve finish reason, usage, model, and request metadata from DeepInfra instead of returning only content.
+**Description:** Preserve sanitized fixtures for the observed duplicate-start race and the July 15 runaway note. Add controllable delays/failures around listener setup, manifest commit, chunk upload, enhancement, and note save.
 
 **Acceptance criteria:**
 
-- `ai_chat` callers can distinguish `stop`, `length`, provider error, and malformed response.
-- Prompt/completion usage is available to the processing pipeline.
-- Existing agent chat behavior remains compatible through a thin content-only adapter if needed.
+- A test reproduces multiple starts for one `audioPath` without relying on real network calls.
+- A fixture shaped like the supplied long one-line word cascade is classified as suspicious.
+- Tests can simulate app restart after every durable stage.
 
-**Verification:**
-
-- Rust unit tests cover `stop`, `length`, missing choice, and missing usage fixtures.
-- `cargo test --manifest-path src-tauri/Cargo.toml` passes.
+**Verification:** `pnpm test` and targeted Rust tests fail before the fixes.
 
 **Dependencies:** None.
 
-**Files likely touched:**
+**Likely files:** `src/services/*.test.ts`, `src-tauri/src/processing_jobs.rs`, new test fixtures under `src/test-fixtures/`.
 
-- `src-tauri/src/agent.rs`
-- `src/services/agent.service.ts`
-- `src/services/audio-processor.service.ts`
+**Scope:** Medium.
 
-**Estimated scope:** Medium.
+### Task 2: Make frontend handoff lifecycle-safe
 
-#### Task 2: Add model-limit discovery and token-budget service
-
-**Description:** Resolve the configured model's context/output metadata, expose a token-count operation, cache model metadata, and provide a conservative offline fallback.
+**Description:** Replace the fire-and-forget async listener setup with cancellation-aware registration. If cleanup occurs before `listen()` resolves, immediately invoke the returned unlisten function. Route event, import, and recovery through one application-level coordinator rather than component-local refs.
 
 **Acceptance criteria:**
 
-- Limits come from the configured `DEEPINFRA_MODEL`, not a hard-coded MiMo assumption.
-- The planner rejects or subdivides requests before they exceed the calculated budget.
-- Indonesian, English, CJK, Arabic, emoji, and markdown fixtures all remain within budget.
+- Strict Mode setup/cleanup/setup leaves exactly one live listener.
+- Ten simulated HMR/remount cycles still produce one enqueue request.
+- Navigation and `key={refreshNotes}` remounts cannot start a second pipeline.
 
-**Verification:**
-
-- Unit tests use mocked metadata/count responses and offline fallback cases.
-- Logs show calculated input, reserved output, and safety budget without logging transcript text.
+**Verification:** frontend lifecycle test with delayed `listen()`; manual dev-mode HMR test.
 
 **Dependencies:** Task 1.
 
-**Files likely touched:**
+**Likely files:** `src/components/HomePage.tsx`, new `src/services/recording-job-coordinator.ts`, coordinator tests.
 
-- `src-tauri/src/agent.rs`
-- `src/services/audio-processor.service.ts`
-- a new focused token-budget module/service
+**Scope:** Medium.
 
-**Estimated scope:** Medium.
+### Task 3: Add atomic backend job claim and lease
 
-### Checkpoint A
-
-- All existing 94 Rust tests still pass.
-- New response/limit tests pass without a live provider key.
-- No application workflow depends on JavaScript character count for correctness.
-
-### Phase 2: Persist and resume transcription work
-
-#### Task 3: Add a versioned processing manifest
-
-**Description:** Persist job, transcript chunk, section, stage, attempt, and error state under app data using atomic write-then-rename semantics.
+**Description:** Introduce `enqueue_or_claim_processing_job` keyed by the persisted recording UUID. Hold a cross-process OS lock for the run lifetime and issue a monotonically increasing fencing token. Thread that token through every chunk, synthesis, manifest, RAG, and note mutation. Heartbeats are diagnostic; wall-clock lease expiry never overrides a live OS lock.
 
 **Acceptance criteria:**
 
-- A killed process can reopen a job and identify exactly which chunks/sections are complete.
-- Manifest corruption produces a recoverable error and preserves the previous valid copy.
-- Pipeline-version or source-hash changes invalidate only affected derived artifacts.
+- 100 concurrent claim attempts yield one owner and one `jobId`.
+- Duplicate requests return existing status without retranscribing.
+- Restart recovery can claim after process death but cannot steal from a live or suspended process.
+- Two independent app processes cannot both perform provider calls or durable writes for one recording.
 
-**Verification:**
+**Verification:** Tokio concurrency tests plus two-process, suspend/resume, old-owner-survives-update, and fencing tests.
 
-- Tests cover atomic save/load, interrupted temp write, schema mismatch, and hash invalidation.
+**Dependencies:** Task 1.
 
-**Dependencies:** None.
+**Likely files:** `src-tauri/src/processing_jobs.rs`, `src-tauri/src/lib.rs`, `src/services/recording.service.ts`.
 
-**Files likely touched:**
+**Scope:** Medium.
 
-- new Rust processing-manifest module
-- `src-tauri/src/lib.rs`
-- `src-tauri/src/agent.rs`
+### Task 4: Replace manifest persistence with serialized, crash-safe commits
 
-**Estimated scope:** Medium.
-
-#### Task 4: Make Whisper chunk processing resumable and fully classified
-
-**Description:** Persist each ordered Whisper result before stitching, use stable chunk IDs, and classify retryable/permanent failures.
+**Description:** Serialize load/save per manifest path, use unique temp/backup files, validate schema before commit, fsync file and parent directory where supported, clean temps on every error path, and reject stale generations.
 
 **Acceptance criteria:**
 
-- Completed Whisper chunks are not re-uploaded after restart.
-- 408, 429, transport timeout, and 5xx use bounded exponential backoff with jitter and `Retry-After` support.
-- A permanently failed chunk yields `partial`, not a false `complete`, while successful text remains accessible.
+- Concurrent saves never produce `ENOENT`, corrupted JSON, or stale-state rollback.
+- Killing the process before/after each rename recovers either the previous or next valid generation.
+- Startup quarantines corrupt manifests and recovers the newest valid committed generation.
 
-**Verification:**
-
-- Mocked tests cover out-of-order completion, retry exhaustion, restart/resume, duplicate delivery, and one failed middle chunk.
+**Verification:** barrier-controlled multi-writer test, crash-point matrix, 1,000-save stress test.
 
 **Dependencies:** Task 3.
 
-**Files likely touched:**
+**Likely files:** `src-tauri/src/processing_jobs.rs` and its tests.
 
-- `src-tauri/src/agent.rs`
-- processing-manifest module
-- recorder-to-transcriber chunk contract
+**Scope:** Medium.
 
-**Estimated scope:** Medium.
+### Checkpoint A: duplicate processing eliminated
 
-### Checkpoint B
+- One event produces one backend job under Strict Mode, HMR, remount, event+poll, and restart recovery.
+- No duplicate Whisper or chat request appears in captured test telemetry.
+- Manifest concurrency and crash tests pass.
 
-- A synthetic multi-chunk job survives forced termination and resumes without duplicate provider calls.
-- A partial transcript can be inspected and retried.
-- The raw/canonical transcript is never deleted merely because enhancement starts.
+### Task 5: Guarantee raw-audio durability
 
-### Phase 3: Replace character map-reduce with bounded section extraction
-
-#### Task 5: Build a marker-safe token-aware section planner
-
-**Description:** Segment canonical transcript text at paragraph/sentence boundaries under a token budget while keeping asset markers intact and attaching source ranges.
+**Description:** Retain raw capture chunks until a managed app-data MP3 has been written, synced, verified, and indexed by recording UUID. Imported sources are copied into the managed store. Revalidate the stored content hash before each stage. No automatic retention policy may delete source audio; deletion follows the tombstoned protocol above.
 
 **Acceptance criteria:**
 
-- Every source character belongs to exactly one section, excluding intentional overlap metadata.
-- Markers are never split, duplicated, reordered, or dropped.
-- No planned section exceeds its model input budget.
+- The MP3 survives transcription, enhancement, provider failures, app crashes, and note deletion.
+- A corrupt/incomplete MP3 is reported before processing without deleting it.
+- Only an explicit user deletion flow can remove source audio, with confirmation and a documented recovery consequence.
+- Removable, read-only, replaced, symlinked, renamed, and same-bytes-imported-twice cases follow the defined UUID/copy semantics.
 
-**Verification:**
+**Verification:** forced-stop tests at chunk boundaries and filesystem audit tests asserting source existence.
 
-- Property-style tests run against 10k, 100k, and 1M-character synthetic transcripts.
-- Fixtures include single oversized lines, missing punctuation, CJK text, RTL text, markdown, and hundreds of asset markers.
+**Dependencies:** Task 3.
 
-**Dependencies:** Task 2 and Task 3.
+**Likely files:** `src-tauri/src/audio_recorder.rs`, `src-tauri/src/audio_import.rs`, `src/services/recording.service.ts`.
 
-**Files likely touched:**
+**Scope:** Medium.
 
-- new frontend or Rust section-planner module
-- `src/services/audio-processor.service.ts`
-- section-planner tests
+### Task 6: Persist Whisper chunks and make transcription single-flight
 
-**Estimated scope:** Medium.
-
-#### Task 6: Produce validated structured section artifacts
-
-**Description:** Replace free-form section summaries with bounded structured extraction containing detailed notes, decisions, actions, evidence, and marker inventory.
+**Description:** Replace destructive `take_live_job` with shared single-flight state. Persist each chunk result atomically with index, time range, hash, model, language, attempts, and error. Keep the canonical transcript sidecar; reading it must not consume it.
 
 **Acceptance criteria:**
 
-- `finish_reason == "length"` or invalid schema triggers subdivision/retry, never completion.
-- Every output artifact references its source section and passes marker validation.
-- A failed section remains independently retryable; successful neighbors are retained.
+- Concurrent callers await or reuse the same transcription job.
+- Restart retranscribes only missing/failed chunks.
+- Chunk failures remain typed metadata and never appear as prose inside the transcript.
 
-**Verification:**
+**Verification:** concurrent `transcribe_audio` test, sidecar reuse test, partial-chunk retry test.
 
-- Tests cover truncated JSON, hallucinated markers, missing markers, duplicate markers, provider timeout, and subdivision convergence.
+**Dependencies:** Tasks 4 and 5.
 
-**Dependencies:** Task 1, Task 2, and Task 5.
+**Likely files:** `src-tauri/src/agent.rs`, `src-tauri/src/lib.rs`, processing manifest schema/tests.
 
-**Files likely touched:**
+**Scope:** Medium.
 
-- `src-tauri/src/agent.rs`
-- `src/services/audio-processor.service.ts`
-- processing-manifest module
+### Task 7: Add transcript-level hallucination and integrity gates
 
-**Estimated scope:** Medium.
-
-### Checkpoint C
-
-- A 1M-character transcript can be planned and processed with a mock provider without any over-budget request.
-- Failure of any one section does not discard other completed sections.
-- Re-running the same source reuses valid artifacts.
-
-### Phase 4: Assemble unlimited detailed notes safely
-
-#### Task 7: Add deterministic detailed-note composition
-
-**Description:** Render section artifacts directly into chronological Markdown sections so detailed output length is limited by storage/UI, not one model completion.
+**Description:** Validate each Whisper chunk before stitching. Use available segment/timestamp/no-speech metadata where supported, audio-energy context, repeated n-gram detection, language drift detection, implausible expansion ratio, and cross-chunk duplication checks. Suspicious chunks are retried conservatively or flagged—not silently deleted.
 
 **Acceptance criteria:**
 
-- Every completed section appears exactly once in chronological order.
-- Screenshot markers render exactly once at the correct section.
-- A partial section is represented by a clear local placeholder and retry status, not hidden.
+- Known silence/outro hallucinations and repetitive loops are flagged with a reason and source chunk.
+- Real repeated meeting phrases are preserved unless the duplicate is proven to come from overlap.
+- A partial transcript reports exact missing/suspicious time ranges.
 
-**Verification:**
-
-- Snapshot/invariant tests cover hundreds of sections and markers.
-- Generated Markdown remains renderable by the existing `MarkdownRenderer`.
+**Verification:** Indonesian silence, noisy audio, mixed-language, repeated-real-speech, and overlap fixtures.
 
 **Dependencies:** Task 6.
 
-**Files likely touched:**
+**Likely files:** `src-tauri/src/agent.rs`, transcript-quality module/tests.
 
-- new document-composer module
-- `src/services/audio-processor.service.ts`
-- `src/components/MarkdownRenderer.tsx` only if pagination/lazy rendering is required
+**Scope:** Medium.
 
-**Estimated scope:** Medium.
+### Checkpoint B: source and transcript are recoverable
 
-#### Task 8: Add bounded hierarchical global synthesis
+- A two-hour simulated job resumes after forced termination without redoing successful chunks.
+- MP3 and canonical transcript remain readable after every injected failure.
+- Partial ranges are visible and individually retryable.
 
-**Description:** Generate only the document title, overview, topic index, global decisions, and global action items through a tree of bounded reductions.
+### Task 8: Introduce deterministic generated-note quality scoring
 
-**Acceptance criteria:**
-
-- Every reduce node is token-budgeted before dispatch.
-- Global outputs retain evidence/source references internally for validation.
-- The final global synthesis fits a fixed compact output budget and never owns detailed section content.
-
-**Verification:**
-
-- Tests cover 1, 10, 100, and 1,000 section artifacts.
-- Tests prove no reduce request exceeds the mocked context limit.
-- Repeated decisions are deduplicated globally without removing chronological detail.
-
-**Dependencies:** Task 2, Task 6, and Task 7.
-
-**Files likely touched:**
-
-- new hierarchical-reducer module
-- `src-tauri/src/agent.rs`
-- `src/services/audio-processor.service.ts`
-
-**Estimated scope:** Medium.
-
-### Checkpoint D
-
-- Final detailed document size scales linearly with section count without increasing maximum single-request size.
-- Global overview stays bounded.
-- No free-form continuation is required to preserve detailed content.
-
-### Phase 5: Surface progress, retry, and degraded outcomes
-
-#### Task 9: Move processing status from transient UI state to job state
-
-**Description:** Expose manifest-backed stage progress and errors to the frontend and replace title-keyed loading state/localStorage-only handoff.
+**Description:** Validate every section and global synthesis before it becomes a committed artifact. Detect the supplied runaway cascade using paragraph length, sentence-boundary scarcity, unique-token chains, n-gram repetition, output/input expansion, completion saturation, malformed headings, and abnormal vocabulary drift.
 
 **Acceptance criteria:**
 
-- UI distinguishes running, partial, failed, retrying, and complete jobs.
-- Restarting the app resumes or offers retry for unfinished jobs.
-- Multiple recordings with identical titles cannot collide.
+- The supplied July 15 runaway pattern is rejected before save.
+- Valid long technical notes are not rejected merely for length.
+- Each rejection records machine-readable reasons and request metadata.
 
-**Verification:**
+**Verification:** golden valid notes plus adversarial loop, word-salad, repeated-line, huge-paragraph, and truncated-output fixtures.
 
-- Component/service tests cover restart hydration, duplicate titles, partial jobs, and retry.
+**Dependencies:** Task 1.
 
-**Dependencies:** Task 3, Task 4, Task 6, and Task 8.
+**Likely files:** new `src/services/note-quality.ts`, `src/services/audio-processor.service.ts`, tests.
 
-**Files likely touched:**
+**Scope:** Medium.
 
-- `src/components/HomePage.tsx`
-- `src/components/RecordingPopupApp.tsx`
-- `src/services/audio-processor.service.ts`
-- `src-tauri/src/lib.rs`
+### Task 9: Ground generated sections against transcript evidence
 
-**Estimated scope:** Medium.
-
-#### Task 10: Add stage telemetry and privacy-safe diagnostics
-
-**Description:** Record duration, attempts, token usage, chunk/section counts, provider status, and truncation events without logging transcript content or credentials.
+**Description:** Keep an accepted transcript separate from raw Whisper hypotheses. Generate structured, preferably extractive section artifacts where every rendered claim carries an exact evidence span plus segment ID. Locally verify that spans occur in accepted segments, expose citations for audit, and use a second bounded verifier only as an additional signal—not proof. Unsupported or ambiguously supported prose forces `needs_review`. Do not ask a global model to recreate detailed content.
 
 **Acceptance criteria:**
 
-- A production failure identifies the exact job stage and artifact ID.
-- Token usage and cost-driving calls can be audited per job.
-- Logs never contain transcript bodies, API keys, or screenshot data URIs.
+- Every rendered detailed section maps to persisted source segment IDs.
+- Every factual sentence—not only names and numbers—has a verified source span or forces review.
+- Missing section output falls back to that section's raw transcript and marks the note partial.
 
-**Verification:**
+**Verification:** fabricated-name/number fixtures, missing-section test, source-coverage test.
 
-- Tests/assertions inspect representative logs for required fields and forbidden sensitive content.
+**Dependencies:** Tasks 7 and 8.
 
-**Dependencies:** Task 1 and Task 3.
+**Likely files:** `src/services/audio-processor.service.ts`, `src/services/long-form-processing.ts`, manifest types/tests.
 
-**Files likely touched:**
+**Scope:** Medium.
 
-- `src-tauri/src/agent.rs`
-- processing-manifest module
-- `src/services/audio-processor.service.ts`
+### Task 10: Remove unsafe continuation and review fallback behavior
 
-**Estimated scope:** Small/Medium.
-
-### Phase 6: Cross-platform convergence and stress qualification
-
-#### Task 11: Unify the recorder chunk-delivery contract across OSes
-
-**Description:** Make Linux, Windows, macOS, and imported audio produce the same stable durational chunk stream for transcription.
+**Description:** For detailed notes, replace free-form continuation with subdivide-and-retry. A failed quality review must not return an already-suspicious draft as success. Global synthesis remains bounded and optional; deterministic section content remains authoritative.
 
 **Acceptance criteria:**
 
-- The shared recorder API compiles on all target OS configurations.
-- Windows accepts and emits the chunk sender contract.
-- macOS no longer requires loading a complete long take into memory before transcription can begin.
+- `finish_reason=length`, max-token saturation, or quality failure can never be marked complete.
+- Review failure results in `needs_review` or source-backed fallback, not silent acceptance.
+- No model request is responsible for reproducing the entire two-hour note.
 
-**Verification:**
+**Verification:** forced truncation, continuation loop, review timeout, and malformed-output tests.
 
-- Linux native tests pass.
-- CI cross-checks Windows and macOS targets or platform machines run documented smoke tests.
-- A two-hour synthetic capture keeps bounded memory.
+**Dependencies:** Tasks 8 and 9.
 
-**Dependencies:** Task 4.
+**Likely files:** `src-tauri/src/agent.rs`, `src/services/audio-processor.service.ts`.
 
-**Files likely touched:**
+**Scope:** Medium.
 
-- `src-tauri/src/lib.rs`
-- `src-tauri/src/audio_recorder.rs`
-- `src-tauri/src/windows_audio.rs`
-- `src-tauri/swift/SystemAudio.swift`
+### Checkpoint C: hallucinated notes cannot publish as clean
 
-**Estimated scope:** Break into separate OS-specific medium tasks during implementation.
+- The supplied runaway example is blocked deterministically.
+- Unsupported names/numbers/actions are rejected or traceably removed.
+- Clean fixtures remain accepted and preserve all source sections.
 
-#### Task 12: Add end-to-end long-form qualification tests
+### Task 11: Make note saving idempotent and transactional
 
-**Description:** Establish a reproducible test matrix for size, language, failures, recovery, markers, and resource bounds.
+**Description:** Persist a user-scoped recording UUID idempotency key and processing status with the note. Enforce uniqueness in PostgreSQL and use an upsert/CAS contract. Treat filesystem manifest + PostgreSQL as a recoverable saga: after an unknown commit outcome, query by the unique key before retrying. Never resurrect a user-deleted note automatically.
 
 **Acceptance criteria:**
 
-- 10-minute, 2-hour, 8-hour, and synthetic 1M-character cases have expected invariants.
-- Provider mocks cover 400 context overflow, 408, 429, 500/503, malformed response, `length`, connection loss, and restart.
-- Test report records maximum request tokens, peak memory, provider call count, and final section coverage.
+- Replaying a completed job cannot create a duplicate note.
+- Crash between note save and manifest save recovers the original note.
+- A clean note cannot be overwritten by a stale or degraded attempt.
+- Search, RAG, export, and note lists cannot treat `needs_review`/partial artifacts as clean.
 
-**Verification:**
+**Verification:** crash-between-writes integration tests and repeated-resume test.
 
-- `pnpm build` passes.
-- Frontend unit tests pass.
-- `cargo test --manifest-path src-tauri/Cargo.toml` passes.
-- Platform smoke-test checklist passes before release.
+**Dependencies:** Tasks 4, 9, and 10.
 
-**Dependencies:** Tasks 1-11.
+**Likely files:** notes persistence layer, `src/services/audio-processor.service.ts`, manifest schema/tests.
 
-**Files likely touched:**
+**Scope:** Medium.
 
-- Rust integration-test fixtures
-- frontend test fixtures/configuration
-- CI configuration if cross-platform runners are added
+### Task 12: Add recovery and review UX
 
-**Estimated scope:** Medium per test layer.
+**Description:** Display durable stages (`recording saved`, `transcribing n/m`, `enhancing n/m`, `needs review`, `complete`), preserve the processing card across navigation, and expose fenced retry only for failed stages. Provide direct access to raw audio, raw hypotheses, accepted transcript, evidence citations, and quality reasons. Persist status with the note so every downstream consumer honors it.
 
-### Final Checkpoint
+**Acceptance criteria:**
 
-- No character-based threshold is used as a correctness boundary.
-- No detailed-note stage depends on one unbounded model response.
-- All artifacts are resumable and idempotent.
-- Partial failures are visible and retryable.
-- Synthetic 1M-character coverage reaches 100% of planned sections.
-- Linux build/tests pass and Windows/macOS compilation is verified.
+- Closing/reopening the app shows the same job and resumes safely.
+- Users can distinguish transcript failure, enhancement failure, partial completion, and suspicious-output rejection.
+- Retry cannot create another job or duplicate note.
 
-## Dependency Graph
+**Verification:** real Tauri lifecycle test and manual recovery walkthrough.
 
-```text
-Task 1 typed responses ──> Task 2 token budgets ──> Task 5 planner ──> Task 6 extraction
-          |                       |                                      |
-          |                       +──────────────────────────────> Task 8 global reduce
-          |                                                              |
-Task 3 manifest ──> Task 4 resumable Whisper ──> Task 11 OS chunks       |
-     |                 |                                                 |
-     +─────────────────+──────────────> Task 9 UI progress               |
-     +───────────────────────────────> Task 6 extraction ──> Task 7 compose
+**Dependencies:** Tasks 3, 6, 10, and 11.
 
-Tasks 1 + 3 ──> Task 10 telemetry
-Tasks 1-11 ──> Task 12 qualification
-```
+**Likely files:** `src/components/HomePage.tsx`, recording/job services, status components.
 
-## Risks and Mitigations
+**Scope:** Medium.
 
-| Risk | Impact | Mitigation |
-|---|---|---|
-| Provider metadata changes or is unavailable | High | Cache last-known metadata, use conservative fallback, and refuse an unsafe giant request |
-| Exact token count differs across API protocols | Medium | Apply safety margin and calibrate estimates against returned OpenAI usage |
-| Structured output truncates into invalid JSON | High | Validate finish reason before parse; subdivide and retry; never mark complete |
-| Hierarchical summary loses detail | High | Keep detailed section artifacts out of the reduce path and compose them deterministically |
-| Excessive provider cost on resume/retry | High | Hash/idempotency keys, persisted completed artifacts, bounded attempts, usage telemetry |
-| One failed section blocks the whole note | Medium | Allow partial document assembly with explicit local failure and targeted retry |
-| Very large Markdown hurts frontend rendering | Medium | Add section pagination/virtualization only after profiling; storage pipeline remains independent |
-| Hundreds of screenshots inflate prompts | Medium | Attach each description only to its local section; global synthesis receives compact marker metadata |
-| Cross-platform recorder drift | High | One chunk interface, target compilation, and OS-specific smoke tests |
+### Task 13: Add privacy-safe observability and retention controls
 
-## Recommended Implementation Order
+**Description:** Log job IDs, fencing tokens, stage transitions, request IDs, durations, chunk indexes, retry counts, and quality reasons without logging transcript/audio content. Add storage warnings and explicit export/delete controls. “Retention” is informational only; it never authorizes automatic deletion of canonical artifacts.
 
-Start with Tasks 1-2 because they expose the actual truncation and context behavior. Then implement Tasks 3-6 so work becomes resumable and bounded. Tasks 7-8 remove the final-output ceiling. Only after those guarantees exist should UI progress, telemetry, and cross-platform live chunking be expanded.
+**Acceptance criteria:**
 
-The first production-safe milestone is Tasks 1-8. Tasks 9-12 complete operational reliability and cross-platform parity.
+- Duplicate starts and quality rejections are diagnosable without exposing meeting text.
+- Storage pressure never triggers silent deletion.
+- Users can explicitly export or delete audio/transcript artifacts.
 
-## Open Decisions Before Implementation
+**Verification:** log-redaction test, low-disk test, retention-policy test.
 
-1. Whether processing manifests should remain local files only or also be represented in PostgreSQL for cross-device visibility. Recommendation: local atomic manifests first; store only final note/job summary in PostgreSQL.
-2. Whether a partial job should automatically create a note. Recommendation: create a clearly labelled partial note only when at least one section succeeded, and keep a retry action.
-3. Whether the final detailed note should be one PostgreSQL row or a parent note with child sections. Recommendation: keep one row initially, then add section virtualization if real data shows rendering problems.
-4. Whether Windows/macOS live chunk parity is required in the first milestone. Recommendation: fix the Windows compile contract immediately, but schedule full native chunk emission after the length-safe note pipeline is green.
+**Dependencies:** Tasks 5, 6, and 12.
+
+**Likely files:** processing services, settings UI, logging helpers.
+
+**Scope:** Medium.
+
+### Task 14: Two-hour qualification and release gate
+
+**Description:** Run deterministic short fixtures plus real/synthetic 10-minute, 1-hour, and 2-hour recordings under normal operation, HMR/remount, offline periods, rate limits, and forced process termination.
+
+**Acceptance criteria:**
+
+- No source artifact is lost in the complete fault matrix.
+- Exactly one job and one note exist per recording.
+- Every source chunk is accounted for as complete, suspicious, or failed—never missing silently.
+- No known runaway/hallucination fixture is published as clean.
+
+**Verification:** full frontend tests, full Rust tests, production build, runtime Tauri smoke test, and artifact audit.
+
+**Dependencies:** All prior tasks.
+
+**Likely files:** integration/e2e harness, fixture documentation, release checklist.
+
+**Scope:** Medium.
+
+## Fault Matrix Required Before Release
+
+| Injection point | Required result |
+|---|---|
+| Popup closes during recording | Finalize recoverably or clearly retain incomplete source; never pretend success |
+| Duplicate event/poll/recovery | One job owner; duplicates return existing job |
+| HMR/Strict Mode/remount | One listener and one enqueue |
+| Crash during manifest commit | Previous or next valid generation loads |
+| Crash after chunk transcription | Completed chunks reused |
+| Provider timeout/rate limit | Bounded retry; durable partial status |
+| One Whisper chunk fails | Exact time range marked; no error prose injected |
+| AI truncates/loops/word-salads | Artifact rejected; transcript preserved |
+| Crash after note creation | Existing note recovered; no duplicate |
+| Low disk space | Processing pauses with warning; source is not deleted |
+| Two app processes / overlapping update | OS lock admits one owner; stale fencing token rejects every side effect |
+| OS suspend or wall-clock jump | Ownership does not expire while the process still holds the OS lock |
+| Source file replaced after finalize | Hash mismatch blocks processing; managed immutable copy remains available |
+| Delete during processing | Tombstone fences owner; recovery completes deletion and never publishes |
+| DB commit timeout with unknown outcome | Lookup by unique recording key resolves outcome before retry |
+| App/schema upgrade or downgrade | Versioned reader migrates forward; rollback never writes a newer schema |
+| Read-only/removable import source | Managed copy completes before source is considered finalized |
+
+## Rollout Strategy
+
+1. Land Tasks 1–4 behind a `reliable_job_coordinator` flag. New recordings use exactly one path; rollback disables new processing but never re-routes them into the unsafe path.
+2. Enable durable audio/chunk handling from Tasks 5–7 and migrate existing manifests without deleting legacy artifacts.
+3. Calibrate quality gates against a versioned, human-labeled Indonesian/mixed-language corpus. Shadow mode may create diagnostics only; would-reject output is never indexed or presented as clean.
+4. Switch quality gates to enforcement only after false-positive review.
+5. Enable idempotent save and recovery UX, then complete the two-hour qualification matrix.
+6. Remove the old orchestration path only after at least one release cycle with no duplicate starts or unrecoverable jobs. Rollback is fail-closed: preserve/enqueue recording data and pause processing.
+
+## Definition of Done
+
+- Task-specific acceptance criteria pass at runtime, not only at compile time.
+- New regression tests fail without the corresponding fix and pass with it.
+- `pnpm test`, `pnpm build`, and the complete Rust test suite pass.
+- Tauri runtime is tested with Strict Mode, HMR, restart, and forced failures.
+- No logs contain transcript text, API keys, or raw audio content.
+- Architecture and recovery behavior are documented.
+- Rollback path remains available through staged rollout.
+- Human review approves quality-gate thresholds using real valid and invalid recordings.
+
+## Explicit Non-Guarantee
+
+No speech-recognition or language model can guarantee perfect wording. This plan guarantees preservation, traceability, bounded retries, evidence-backed note construction, and rejection of known suspicious output classes. When confidence is insufficient, the product must say so and preserve the source instead of fabricating certainty.

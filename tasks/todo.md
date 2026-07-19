@@ -1,54 +1,44 @@
-# Reliable Long-Form Transcription Checklist
+# Lossless Recording Reliability Checklist
 
-## Phase 1: Explicit limits and outcomes
+## Phase A — Reproduce and stop duplicate jobs
 
-- [x] Task 1: Return typed chat completion metadata (`finish_reason`, usage, model, request ID)
-- [x] Task 2: Discover configured model limits and add token-aware request budgets
-- [ ] Checkpoint A: All requests are preflighted; existing Rust tests remain green
+- [x] Task 1a: Add duplicate-start and runaway-output regression fixtures
+- [x] Task 2a: Make Tauri event listener setup cancellation-safe across Strict Mode/HMR
+- [x] Task 3a: Add same-process backend atomic job claim and owner-checked release
+- [x] Task 4a: Serialize same-process manifest writes and clean failed temp files
+- [ ] Task 3b: Add recording UUID, cross-process OS ownership lock, and fencing token
+- [ ] Task 4b: Add generation CAS and power-loss recovery across all durable artifacts
+- [ ] Checkpoint A: one recording produces exactly one active job under all start paths
 
-## Phase 2: Durable and resumable jobs
+## Phase B — Preserve source and transcript
 
-- [x] Task 3: Add atomic, versioned processing manifests
-- [ ] Task 4: Persist and resume classified Whisper chunk jobs
-- [ ] Checkpoint B: Forced-stop job resumes without retranscribing completed chunks
+- [ ] Task 5: Make finalized MP3 immutable, verified, and explicitly retained
+- [x] Task 6a: Implement same-process single-flight transcription and durable canonical sidecar
+- [ ] Task 6b: Persist independently retryable Whisper chunk artifacts with accepted/suspicious ranges
+- [ ] Task 7: Add transcript hallucination/integrity gates with typed suspicious ranges
+- [ ] Checkpoint B: forced restart of a two-hour job loses no completed work or source data
 
-## Phase 3: Bounded section processing
+## Phase C — Block AI hallucination and runaway notes
 
-- [x] Task 5: Replace character splitting with marker-safe token-aware planning
-- [ ] Task 6: Extract validated structured section artifacts with subdivide-and-retry
-- [ ] Checkpoint C: Mocked 1M-character transcript produces no over-budget requests
+- [x] Task 8a: Reject truncated, runaway-paragraph, and extreme-expansion output
+- [ ] Task 8b: Calibrate multilingual quality corpus and versioned thresholds
+- [ ] Task 9: Ground section notes in source segment/evidence IDs
+- [ ] Task 10: Replace unsafe continuation and suspicious-draft fallback behavior
+- [ ] Checkpoint C: no truncated, looping, word-salad, or unsupported note publishes as clean
 
-## Phase 4: Unlimited detailed output
+## Phase D — Idempotent delivery and recovery
 
-- [x] Task 7: Compose detailed Markdown deterministically from section artifacts
-- [x] Task 8: Add bounded hierarchical synthesis for overview/decisions/actions/index
-- [ ] Checkpoint D: Final detail scales with section count while request size stays bounded
+- [x] Task 11a: Serialize recording-note creation in PostgreSQL and hide internal idempotency tags
+- [ ] Task 11b: Add schema-level user+recording UUID uniqueness and persisted publication status
+- [ ] Task 12: Add persistent recovery, partial-status, raw-audio, transcript, and retry UX
+- [ ] Task 13: Add privacy-safe diagnostics, storage warnings, and explicit retention controls
 
-## Phase 5: Operational UX
+## Phase E — Qualification
 
-- [ ] Task 9: Expose manifest-backed progress, partial status, and retry in the UI
-- [ ] Task 10: Add privacy-safe stage/token/retry telemetry
-
-## Phase 6: Cross-platform and qualification
-
-- [ ] Task 11a: Fix and verify the Windows recorder chunk-sender API contract
-- [ ] Task 11b: Add bounded live chunk emission on Windows
-- [ ] Task 11c: Replace macOS whole-take batching with bounded chunk emission
-- [ ] Task 11d: Route imported audio through the same stable chunk contract
-- [ ] Task 12: Add end-to-end long-form stress and recovery tests
-
-## Definition of Done
-
-- [x] No character count is used as a correctness boundary
-- [x] No detailed final note relies on one unbounded LLM completion
-- [ ] `finish_reason == "length"` can never be marked complete
-- [x] Every successful transcript/section artifact survives later-stage failure
-- [x] Interrupted work resumes idempotently
-- [ ] Partial failures are visible and individually retryable
-- [ ] Screenshot markers remain exactly once and chronological
-- [ ] Indonesian, English, CJK, Arabic, and mixed-language fixtures pass
-- [ ] 10-minute, 2-hour, 8-hour, and 1M-character qualification cases pass
-- [x] `pnpm build` passes
-- [x] Frontend tests pass
-- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes
-- [ ] Windows and macOS target compilation/smoke checks pass
+- [ ] Task 14: Pass 10-minute, 1-hour, and 2-hour fault-injection qualification
+- [ ] `pnpm test` passes
+- [ ] `pnpm build` passes
+- [ ] Full Rust test suite passes
+- [ ] Tauri runtime smoke test passes under Strict Mode, HMR, restart, offline, and rate limiting
+- [ ] Artifact audit confirms MP3, transcript chunks, canonical transcript, manifest, and note identity
+- [ ] Human review approves quality thresholds and release rollout
