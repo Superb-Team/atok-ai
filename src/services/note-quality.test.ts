@@ -45,3 +45,27 @@ test("rejects the observed single-paragraph runaway word cascade", () => {
   assert.ok(issues.some((issue) => issue.code === "runaway_paragraph"));
   assert.ok(issues.some((issue) => issue.code === "excessive_expansion"));
 });
+
+test("rejects editor self-commentary and same-line repetition loops", () => {
+  const note = `# Rapat
+
+## Action Items
+- Dandi memperbaiki login agar sistem aman terpercaya scalable maintainable correlated correlated correlated correlated... *(Stop generating filler)* -> ulangi lagi.`;
+
+  const issues = assessGeneratedNote(source, note, { isTruncated: false });
+
+  assert.ok(issues.some((issue) => issue.code === "generation_artifact"));
+  assert.ok(issues.some((issue) => issue.code === "repetition_loop"));
+});
+
+test("rejects invented, missing, or renumbered screenshot markers", () => {
+  const invented = assessGeneratedNote(source, "# Rapat\n\n[[ATOK_ASSET_1]]", {
+    isTruncated: false,
+  });
+  const missing = assessGeneratedNote(`${source}\n[[ATOK_ASSET_2]]`, "# Rapat", {
+    isTruncated: false,
+  });
+
+  assert.ok(invented.some((issue) => issue.code === "marker_mismatch"));
+  assert.ok(missing.some((issue) => issue.code === "marker_mismatch"));
+});

@@ -21,6 +21,24 @@ fn visible_tags(tags: Option<Vec<String>>) -> Option<Vec<String>> {
     })
 }
 
+fn merge_public_tags_with_internal(
+    existing: Option<Vec<String>>,
+    requested: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    requested.map(|requested| {
+        let mut merged: Vec<String> = requested
+            .into_iter()
+            .filter(|tag| !tag.starts_with(INTERNAL_JOB_TAG_PREFIX))
+            .collect();
+        for tag in existing.unwrap_or_default() {
+            if tag.starts_with(INTERNAL_JOB_TAG_PREFIX) && !merged.contains(&tag) {
+                merged.push(tag);
+            }
+        }
+        merged
+    })
+}
+
 fn into_response(note: Note) -> NoteResponse {
     NoteResponse {
         id: note.id,
@@ -175,6 +193,20 @@ pub async fn update_note(
     request: UpdateNoteRequest,
 ) -> Result<NoteResponse, String> {
     let pool = db.get_pool()?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin note update: {}", error))?;
+    let existing_tags = sqlx::query_scalar::<_, Option<Vec<String>>>(
+        "SELECT tags FROM notes WHERE id = $1 AND user_id = $2 AND is_deleted = false FOR UPDATE",
+    )
+    .bind(request.id)
+    .bind(&user_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| format!("Failed to load note for update: {}", error))?
+    .ok_or_else(|| "Note not found".to_string())?;
+    let tags = merge_public_tags_with_internal(existing_tags, request.tags.clone());
     let note = sqlx::query_as::<_, Note>(
         "UPDATE notes 
          SET title = COALESCE($1, title),
@@ -192,13 +224,18 @@ pub async fn update_note(
     .bind(request.is_favorite)
     .bind(request.is_archived)
     .bind(&request.color)
-    .bind(&request.tags)
+    .bind(&tags)
     .bind(request.id)
     .bind(&user_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(|e| format!("Failed to update note: {}", e))?
     .ok_or_else(|| "Note not found".to_string())?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("Failed to commit note update: {}", error))?;
 
     Ok(into_response(note))
 }
@@ -265,7 +302,10 @@ mod tests {
 
         assert_eq!(
             visible_tags(Some(tags)),
-            Some(vec!["voice-recording".to_string(), "transcription".to_string()])
+            Some(vec![
+                "voice-recording".to_string(),
+                "transcription".to_string()
+            ])
         );
     }
 
@@ -276,6 +316,28 @@ mod tests {
         assert_eq!(
             processing_job_tag("job-abc").unwrap(),
             "atok-internal-job:job-abc"
+        );
+    }
+
+    #[test]
+    fn public_tag_updates_preserve_only_the_existing_internal_job_tag() {
+        let existing = Some(vec![
+            "needs-review".to_string(),
+            "atok-internal-job:job-original".to_string(),
+        ]);
+        let requested = Some(vec![
+            "voice-recording".to_string(),
+            "transcription".to_string(),
+            "atok-internal-job:job-forged".to_string(),
+        ]);
+
+        assert_eq!(
+            merge_public_tags_with_internal(existing, requested),
+            Some(vec![
+                "voice-recording".to_string(),
+                "transcription".to_string(),
+                "atok-internal-job:job-original".to_string(),
+            ])
         );
     }
 }

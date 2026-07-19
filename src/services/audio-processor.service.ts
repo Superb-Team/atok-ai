@@ -6,16 +6,20 @@ import {
   composeLongFormNote,
   estimateTokenUpperBound,
   fingerprintText,
+  operationalSourceTokenBudget,
   packByTokenBudget,
   splitTranscriptByTokenBudget,
+  stripPlaceholderSections,
   type ProcessedSection,
 } from "@/services/long-form-processing";
 import { assessGeneratedNote } from "@/services/note-quality";
 import { recordingProcessingGuard } from "@/services/recording-processing-guard";
 import { buildLosslessStructuredFallback } from "@/services/lossless-note-fallback";
 import {
+  CURRENT_AI_PIPELINE_VERSION,
   shouldRepairWithStructuredFallback,
   shouldReviewGeneratedNote,
+  shouldUpgradeExtractiveFallback,
 } from "@/services/processing-review-policy";
 
 // ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
@@ -43,8 +47,8 @@ const SECTION_MAX_CONCURRENT = 3;
 const FALLBACK_CONTEXT_TOKENS = 32_768;
 const FALLBACK_OUTPUT_TOKENS = 8_192;
 const MAX_SECTION_SOURCE_TOKENS = 24_000;
-const SECTION_OUTPUT_TOKENS = 4_096;
-const GLOBAL_OUTPUT_TOKENS = 2_048;
+const SECTION_OUTPUT_TOKENS = 1_536;
+const GLOBAL_OUTPUT_TOKENS = 1_536;
 
 interface ModelLimits {
   model: string;
@@ -97,6 +101,8 @@ interface ProcessingManifest {
   enhancementMode?: "ai" | "hybrid" | "extractive-fallback";
   fallbackVersion?: number;
   repairingFallback?: boolean;
+  aiPipelineVersion?: number;
+  upgradingAi?: boolean;
   timingsMs?: Record<string, number>;
   error?: string;
   createdAt: string;
@@ -145,7 +151,9 @@ async function resolveLongFormBudget(): Promise<LongFormBudget> {
   );
 
   return {
-    maxSourceTokens: Math.min(MAX_SECTION_SOURCE_TOKENS, sectionAvailable),
+    maxSourceTokens: operationalSourceTokenBudget(
+      Math.min(MAX_SECTION_SOURCE_TOKENS, sectionAvailable),
+    ),
     maxReduceTokens: Math.min(20_000, reduceAvailable),
     sectionOutputTokens,
     globalOutputTokens,
@@ -199,6 +207,10 @@ function summarizeSection(
 RULES:
 - ONLY use information actually in this part — never invent speakers, names, numbers, or content
 - Capture EVERY clear point; preserve concrete specifics: numbers, dates, quantities, names, technical/product terms
+- Preserve epistemic status exactly: distinguish reported progress from verified results, proposals from decisions, estimates from deadlines, and suspected causes from confirmed causes
+- If someone says "should", "probably", "not checked", "dummy", "plan", "maybe", or an equivalent qualifier, keep that uncertainty; never upgrade it into a completed or confirmed fact
+- Never infer an action owner from conversational proximity. Attribute an action only when the part explicitly identifies who owns it; otherwise label it unassigned
+- Do not speculate about the meaning of isolated or unclear words. Omit them instead of inventing a possible visual, positional, or situational context
 - Write in ${langName}
 - Ignore transcription-noise filler such as "thank you", "terima kasih", "like and subscribe" — that is leftover noise, not real content
 - Never repeat the same bullet; never add meta commentary about transcript quality${markerRule}
@@ -229,11 +241,12 @@ async function processSectionReliably(
       hasMarkers,
       budget.sectionOutputTokens,
     );
-    const qualityIssues = assessGeneratedNote(section, result.content, {
+    const reviewed = await reviewNote(section, result.content, langName);
+    const qualityIssues = assessGeneratedNote(section, reviewed, {
       isTruncated: result.is_truncated,
     });
     if (qualityIssues.length === 0) {
-      return { markdown: result.content, isDegraded: false };
+      return { markdown: reviewed, isDegraded: false };
     }
 
     if (depth < 4 && estimateTokenUpperBound(section) > 1_024) {
@@ -266,8 +279,8 @@ async function processSectionReliably(
 
 function globalReduceMessages(content: string, langName: string, final: boolean) {
   const instruction = final
-    ? `Create the compact global front matter for one meeting note in ${langName}. Return ONLY markdown with: # title, ## Summary, ## Key Points, ## Decisions, and ## Action Items. Omit empty sections. Preserve concrete facts, deduplicate, never invent, and do not reproduce detailed section notes.`
-    : `Extract compact global facts from these sequential meeting-section notes in ${langName}. Return only concise markdown bullets grouped as Topics, Decisions, and Action Items. Preserve names, dates, numbers, owners, and deadlines. Never invent and do not reproduce detailed prose.`;
+    ? `Create the compact global front matter for one meeting note in ${langName}. Return ONLY markdown with: # title, ## Summary, ## Key Points, ## Decisions, and ## Action Items. Omit empty sections completely; never emit placeholders such as "no decisions". Preserve concrete facts and their uncertainty, deduplicate, never invent, and do not reproduce detailed section notes. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Put something under Decisions only when the source explicitly records agreement or a decision.`
+    : `Extract compact global facts from these sequential meeting-section notes in ${langName}. Return only concise markdown bullets grouped as Topics, Decisions, and Action Items. Preserve names, dates, numbers, owners, deadlines, and every uncertainty qualifier. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Never invent and do not reproduce detailed prose.`;
   return [
     { role: "system", content: instruction },
     { role: "user", content },
@@ -279,6 +292,31 @@ async function synthesizeGlobalNote(
   langName: string,
   budget: LongFormBudget,
 ): Promise<string> {
+  const qualityCheckedChat = async (
+    content: string,
+    final: boolean,
+  ): Promise<string> => {
+    let lastIssues = "unknown";
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const result = await detailedChat(
+        globalReduceMessages(content, langName, final),
+        0.1,
+        budget.globalOutputTokens,
+      );
+      const issues = assessGeneratedNote(content, result.content, {
+        isTruncated: result.is_truncated,
+      });
+      if (issues.length === 0) return result.content;
+      lastIssues = issues.map((issue) => issue.code).join(", ");
+      console.warn(JSON.stringify({
+        event: "global_note_quality_retry",
+        attempt,
+        issues: lastIssues,
+      }));
+    }
+    throw new Error(`Global reduction failed quality checks after 3 attempts: ${lastIssues}`);
+  };
+
   let level = sectionNotes.flatMap((note, index) =>
     splitTranscriptByTokenBudget(`PART ${index + 1}\n${note}`, budget.maxReduceTokens)
       .map((section) => section.text),
@@ -287,18 +325,7 @@ async function synthesizeGlobalNote(
   for (let depth = 0; level.length > 1 && depth < 8; depth += 1) {
     const batches = packByTokenBudget(level, budget.maxReduceTokens);
     const nextLevel = await mapWithConcurrency(batches, SECTION_MAX_CONCURRENT, async (batch) => {
-      const result = await detailedChat(
-        globalReduceMessages(batch.join("\n\n"), langName, false),
-        0.1,
-        budget.globalOutputTokens,
-      );
-      const issues = assessGeneratedNote(batch.join("\n\n"), result.content, {
-        isTruncated: result.is_truncated,
-      });
-      if (issues.length > 0) {
-        throw new Error(`Intermediate global reduction failed quality checks: ${issues.map((issue) => issue.code).join(", ")}`);
-      }
-      return result.content;
+      return qualityCheckedChat(batch.join("\n\n"), false);
     });
     if (batches.length > 1 && nextLevel.length >= level.length) {
       throw new Error("Global reduction did not converge within its token budget");
@@ -312,18 +339,10 @@ async function synthesizeGlobalNote(
   }
 
   const source = level.join("\n\n");
-  const final = await detailedChat(
-    globalReduceMessages(source, langName, true),
-    0.1,
-    budget.globalOutputTokens,
-  );
-  const finalIssues = assessGeneratedNote(source, final.content, {
-    isTruncated: final.is_truncated,
-  });
-  if (finalIssues.length > 0) {
-    throw new Error(`Global synthesis failed quality checks: ${finalIssues.map((issue) => issue.code).join(", ")}`);
-  }
-  return final.content;
+  const final = await qualityCheckedChat(source, true);
+  const reviewed = await reviewNote(source, final, langName);
+  const reviewedIssues = assessGeneratedNote(source, reviewed, { isTruncated: false });
+  return stripPlaceholderSections(reviewedIssues.length > 0 ? final : reviewed);
 }
 
 export interface AudioProcessingResult {
@@ -364,6 +383,7 @@ async function processAudioRecordingOnce(
   };
   let manifest: ProcessingManifest | null = null;
   let repairWithStructuredFallback = false;
+  let upgradeExtractiveFallback = false;
   let repairReason: string | undefined;
   try {
     // `??` not `||`: an explicit "" means AUTO-detect and must survive; only a
@@ -398,6 +418,18 @@ async function processAudioRecordingOnce(
         repairReason = manifest.error;
         manifest.repairingFallback = true;
         await saveProcessingManifest(manifest);
+      } else {
+        upgradeExtractiveFallback = shouldUpgradeExtractiveFallback(
+          manifest.status,
+          manifest.enhancementMode,
+          manifest.aiPipelineVersion,
+        );
+        if (upgradeExtractiveFallback) {
+          manifest.upgradingAi = true;
+          // Cached section output belongs to an older prompt/model policy.
+          manifest.sections = [];
+          await saveProcessingManifest(manifest);
+        }
       }
     }
 
@@ -518,7 +550,7 @@ async function processAudioRecordingOnce(
         await saveProcessingManifest(manifest);
         let persistQueue = Promise.resolve();
         const processedSections = await mapWithConcurrency(sections, SECTION_MAX_CONCURRENT, async (section, i) => {
-          const sourceHash = fingerprintText(`${lang}\0${section.text}`);
+          const sourceHash = fingerprintText(`${CURRENT_AI_PIPELINE_VERSION}\0${lang}\0${section.text}`);
           const cached = manifest!.sections.find(
             (item) => item.id === section.id && item.sourceHash === sourceHash && item.status === "complete",
           );
@@ -719,10 +751,11 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       // Persist the note id before optional indexing so a crash cannot create a
       // duplicate note when this job resumes.
       await saveProcessingManifest(manifest);
-    } else if (repairWithStructuredFallback) {
+    } else {
       await noteService.updateNote(manifest.savedNoteId, user.id, {
         title: finalTitle,
         content: enhancedText,
+        tags: ["voice-recording", "transcription", ...(needsReview ? ["needs-review"] : [])],
       });
     }
 
@@ -749,6 +782,8 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       : processingDegraded ? "hybrid" : "ai";
     if (usedStructuredFallback) manifest.fallbackVersion = 1;
     manifest.repairingFallback = undefined;
+    manifest.aiPipelineVersion = CURRENT_AI_PIPELINE_VERSION;
+    manifest.upgradingAi = undefined;
     manifest.timingsMs = timings;
     manifest.status = needsReview ? "partial" : "complete";
     manifest.error = manifest.status === "partial"
@@ -915,6 +950,9 @@ You receive a TRANSCRIPT and a DRAFT note. Return the corrected note and nothing
 
 RULES:
 - Remove every claim, name, number, or action item NOT supported by the transcript
+- Preserve epistemic status: reported or unverified progress must not become confirmed; proposals must not become decisions; estimates must not become deadlines; suspected causes must not become confirmed causes
+- Keep a Decisions section only for decisions or agreements explicitly present in the source
+- Never infer an action owner from surrounding dialogue. Keep the owner unassigned unless the source explicitly identifies that person
 - Remove duplicated or looping bullets — each point appears exactly once
 - Keep every [[ATOK_ASSET_N]] marker exactly once, at its current position
 - Keep the section structure and keep the note in ${langName}
@@ -932,6 +970,7 @@ RULES:
 
     const trimmed = reviewed.trim();
     if (!trimmed || trimmed.length < draft.length * 0.3) return draft;
+    if (assessGeneratedNote(transcript, trimmed, { isTruncated: false }).length > 0) return draft;
     return trimmed;
   } catch {
     return draft;

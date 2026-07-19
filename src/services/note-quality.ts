@@ -2,7 +2,10 @@ export type NoteQualityIssueCode =
   | "empty"
   | "truncated"
   | "runaway_paragraph"
-  | "excessive_expansion";
+  | "excessive_expansion"
+  | "generation_artifact"
+  | "repetition_loop"
+  | "marker_mismatch";
 
 export interface NoteQualityIssue {
   code: NoteQualityIssueCode;
@@ -14,6 +17,10 @@ interface CompletionState {
 
 function wordsIn(value: string): string[] {
   return value.match(/[\p{L}\p{N}_-]+/gu) ?? [];
+}
+
+function assetMarkersIn(value: string): string[] {
+  return (value.match(/\[\[ATOK_ASSET_\d+\]\]/g) ?? []).sort();
 }
 
 export function assessGeneratedNote(
@@ -29,6 +36,30 @@ export function assessGeneratedNote(
   }
   if (completion.isTruncated) {
     issues.push({ code: "truncated", detail: "Provider ended the response at its token limit" });
+  }
+
+  if (/\b(?:stop|continue) generating\b|\bas an ai\b|\*\(stop generating filler\)\*|\s->\s/iu.test(trimmed)) {
+    issues.push({
+      code: "generation_artifact",
+      detail: "Generated note contains model-control commentary or continuation artifacts",
+    });
+  }
+  if (/\b([\p{L}\p{N}_-]{3,})\b(?:[\s,;:*-]+\1\b){2,}/iu.test(trimmed)) {
+    issues.push({
+      code: "repetition_loop",
+      detail: "Generated note repeats the same token at least three times consecutively",
+    });
+  }
+  const sourceMarkers = assetMarkersIn(source);
+  const generatedMarkers = assetMarkersIn(generated);
+  if (
+    sourceMarkers.length !== generatedMarkers.length ||
+    sourceMarkers.some((marker, index) => marker !== generatedMarkers[index])
+  ) {
+    issues.push({
+      code: "marker_mismatch",
+      detail: "Generated note added, removed, duplicated, or renumbered a screenshot marker",
+    });
   }
 
   const paragraphs = trimmed.split(/\n\s*\n/);

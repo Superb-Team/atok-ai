@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  CURRENT_AI_PIPELINE_VERSION,
   shouldRecoverProcessingJob,
   shouldRepairWithStructuredFallback,
   shouldReviewGeneratedNote,
+  shouldUpgradeExtractiveFallback,
 } from "./processing-review-policy.ts";
 
 describe("shouldReviewGeneratedNote", () => {
@@ -25,6 +27,15 @@ describe("shouldReviewGeneratedNote", () => {
       transcriptLength: 17_327,
     }), true);
   });
+
+  it("does not let a global editor rewrite already fact-checked map-reduce sections", () => {
+    assert.equal(shouldReviewGeneratedNote({
+      processingDegraded: false,
+      loopSuspected: false,
+      usedMapReduce: true,
+      transcriptLength: 17_327,
+    }), false);
+  });
 });
 
 describe("processing recovery policy", () => {
@@ -43,5 +54,43 @@ describe("processing recovery policy", () => {
     assert.equal(shouldRecoverProcessingJob("extracting", undefined), true);
     assert.equal(shouldRecoverProcessingJob("failed", undefined), true);
     assert.equal(shouldRecoverProcessingJob("complete", undefined), false);
+  });
+
+  it("upgrades a saved extractive fallback exactly once through the current AI pipeline", () => {
+    assert.equal(
+      shouldUpgradeExtractiveFallback("partial", "extractive-fallback", undefined),
+      true,
+    );
+    assert.equal(
+      shouldRecoverProcessingJob(
+        "partial",
+        1,
+        false,
+        "extractive-fallback",
+        CURRENT_AI_PIPELINE_VERSION - 1,
+      ),
+      true,
+    );
+    assert.equal(
+      shouldRecoverProcessingJob(
+        "partial",
+        1,
+        false,
+        "extractive-fallback",
+        CURRENT_AI_PIPELINE_VERSION,
+      ),
+      false,
+    );
+    assert.equal(
+      shouldRecoverProcessingJob(
+        "saving",
+        1,
+        false,
+        "extractive-fallback",
+        CURRENT_AI_PIPELINE_VERSION,
+        true,
+      ),
+      true,
+    );
   });
 });

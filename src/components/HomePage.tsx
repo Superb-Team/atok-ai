@@ -135,6 +135,9 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
             job.status,
             job.fallbackVersion,
             job.repairingFallback,
+            job.enhancementMode,
+            job.aiPipelineVersion,
+            job.upgradingAi,
           ))
           .forEach((job) => {
             const timestamp = Date.parse(job.updatedAt) || Date.now();

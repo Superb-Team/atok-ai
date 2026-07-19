@@ -6,9 +6,16 @@ import {
   estimateTokenUpperBound,
   fingerprintText,
   packByTokenBudget,
+  operationalSourceTokenBudget,
   splitTranscriptByTokenBudget,
+  stripPlaceholderSections,
   type ProcessedSection,
 } from "./long-form-processing.ts";
+
+test("operational section budget stays bounded below a model context window", () => {
+  assert.equal(operationalSourceTokenBudget(240_000), 6_000);
+  assert.equal(operationalSourceTokenBudget(4_000), 4_000);
+});
 
 test("token estimate is conservative for ASCII and multibyte text", () => {
   assert.ok(estimateTokenUpperBound("hello world") >= 11);
@@ -83,4 +90,13 @@ test("composer includes every section once and preserves chronological markers",
   assert.equal(note.match(/Poin kedua\./g)?.length, 1);
   assert.ok(note.indexOf("[[ATOK_ASSET_1]]") < note.indexOf("[[ATOK_ASSET_2]]"));
   assert.match(note, /Section 2.*raw transcript preserved/s);
+});
+
+test("placeholder decision sections are omitted instead of published", () => {
+  const note = `# Rapat\n\n## Summary\nIsi.\n\n## Decisions\n*(Tidak ada keputusan final yang dikonfirmasi.)*\n\n## Action Items\n- Tindak lanjut.`;
+
+  assert.equal(
+    stripPlaceholderSections(note),
+    "# Rapat\n\n## Summary\nIsi.\n\n## Action Items\n- Tindak lanjut.",
+  );
 });

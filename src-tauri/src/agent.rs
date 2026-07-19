@@ -12,7 +12,7 @@ fn get_deepinfra_config() -> Result<(String, String, String), String> {
     let api_key = std::env::var("DEEPINFRA_API_KEY")
         .map_err(|_| "DEEPINFRA_API_KEY not configured in .env".to_string())?;
     let model =
-        std::env::var("DEEPINFRA_MODEL").unwrap_or_else(|_| "XiaomiMiMo/MiMo-V2.5".to_string());
+        std::env::var("DEEPINFRA_MODEL").unwrap_or_else(|_| "Qwen/Qwen3.6-35B-A3B".to_string());
     let base_url = std::env::var("DEEPINFRA_BASE_URL")
         .unwrap_or_else(|_| "https://api.deepinfra.com/v1/openai".to_string());
 
@@ -21,6 +21,23 @@ fn get_deepinfra_config() -> Result<(String, String, String), String> {
     }
 
     Ok((base_url, api_key, model))
+}
+
+fn parse_model_chain(primary: &str, fallbacks: Option<&str>) -> Vec<String> {
+    let mut models = Vec::new();
+    for model in std::iter::once(primary).chain(fallbacks.unwrap_or_default().split(',')) {
+        let model = model.trim();
+        if !model.is_empty() && !models.iter().any(|existing| existing == model) {
+            models.push(model.to_string());
+        }
+    }
+    models
+}
+
+fn configured_chat_models(primary: &str) -> Vec<String> {
+    let fallbacks = std::env::var("DEEPINFRA_FALLBACK_MODELS")
+        .unwrap_or_else(|_| "Qwen/Qwen3.5-397B-A17B".to_string());
+    parse_model_chain(primary, Some(&fallbacks))
 }
 
 fn get_agent_config() -> Result<(String, String), String> {
@@ -268,7 +285,7 @@ async fn post_chat_with_retry(
 // truncated with no detection. When finish_reason == "length", feed the partial
 // back as an assistant turn and ask the model to continue, up to this many times.
 const CHAT_MAX_CONTINUATIONS: u32 = 2;
-const DEFAULT_CHAT_DEADLINE_SECS: u64 = 300;
+const DEFAULT_CHAT_DEADLINE_SECS: u64 = 120;
 
 fn chat_request_deadline() -> Duration {
     let seconds = std::env::var("DEEPINFRA_CHAT_TIMEOUT_SECS")
@@ -305,11 +322,51 @@ pub async fn ai_chat_detailed(
     temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<ChatCompletionResult, String> {
-    let (base_url, api_key, model) = get_deepinfra_config()?;
+    let (base_url, api_key, primary_model) = get_deepinfra_config()?;
     let deadline = chat_request_deadline();
     let client = build_provider_client(deadline)?;
     let url = format!("{}/chat/completions", base_url);
 
+    let mut failures = Vec::new();
+    for model in configured_chat_models(&primary_model) {
+        match ai_chat_detailed_for_model(
+            &client,
+            &url,
+            &api_key,
+            &model,
+            &messages,
+            temperature,
+            max_tokens,
+            deadline,
+        )
+        .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                eprintln!(
+                    "{{\"event\":\"ai_model_failed\",\"model\":{:?},\"reason\":{:?}}}",
+                    model, error
+                );
+                failures.push(format!("{}: {}", model, error));
+            }
+        }
+    }
+    Err(format!(
+        "All configured chat models failed: {}",
+        failures.join(" | ")
+    ))
+}
+
+async fn ai_chat_detailed_for_model(
+    client: &Client,
+    url: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    temperature: Option<f64>,
+    max_tokens: Option<u32>,
+    deadline: Duration,
+) -> Result<ChatCompletionResult, String> {
     let mut messages_json: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -324,11 +381,11 @@ pub async fn ai_chat_detailed(
     let mut total_prompt_tokens = 0u64;
     let mut total_completion_tokens = 0u64;
     let mut final_finish_reason = "unknown".to_string();
-    let mut response_model = model.clone();
+    let mut response_model = model.to_string();
     let mut request_ids = Vec::new();
     let mut continuation_count = 0u32;
     for round in 0..=CHAT_MAX_CONTINUATIONS {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": messages_json,
             "temperature": temperature.unwrap_or(0.7),
@@ -340,6 +397,11 @@ pub async fn ai_chat_detailed(
             "repetition_penalty": 1.15,
             "stream": false,
         });
+        if model.starts_with("Qwen/Qwen3.") {
+            body["top_p"] = serde_json::json!(0.8);
+            body["repetition_penalty"] = serde_json::json!(1.0);
+            body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+        }
 
         let response = with_chat_deadline(
             post_chat_with_retry(&client, &url, &api_key, &body),
@@ -350,7 +412,11 @@ pub async fn ai_chat_detailed(
         let status = response.status();
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
-            return Err(format!("Chat error ({}): {}", status, error_text));
+            return Err(format!(
+                "Chat error ({}): {}",
+                status,
+                error_text.chars().take(500).collect::<String>()
+            ));
         }
 
         let data: serde_json::Value = response
@@ -1458,6 +1524,23 @@ mod tests {
         assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
         assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn model_chain_keeps_primary_first_and_deduplicates_fallbacks() {
+        let models = parse_model_chain(
+            "Qwen/Qwen3.6-35B-A3B",
+            Some(" Qwen/Qwen3.5-397B-A17B, Qwen/Qwen3.6-35B-A3B ,, backup/model "),
+        );
+
+        assert_eq!(
+            models,
+            vec![
+                "Qwen/Qwen3.6-35B-A3B",
+                "Qwen/Qwen3.5-397B-A17B",
+                "backup/model",
+            ]
+        );
     }
 
     #[tokio::test]

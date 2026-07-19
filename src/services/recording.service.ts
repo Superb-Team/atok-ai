@@ -26,8 +26,11 @@ export interface ProcessingJobSummary {
   status: 'transcribing' | 'extracting' | 'synthesizing' | 'saving' | 'complete' | 'partial' | 'failed';
   updatedAt: string;
   savedNoteId?: number;
+  enhancementMode?: 'ai' | 'hybrid' | 'extractive-fallback';
   fallbackVersion?: number;
   repairingFallback?: boolean;
+  aiPipelineVersion?: number;
+  upgradingAi?: boolean;
 }
 
 export class RecordingService {

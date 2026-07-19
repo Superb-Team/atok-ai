@@ -19,6 +19,37 @@ export interface ProcessedSection {
   isDegraded: boolean;
 }
 
+// Context capacity is not an operational request-size target. Smaller sections
+// finish faster, checkpoint independently, and bound the amount retried after
+// a provider failure. The estimate used here is conservative UTF-8 bytes.
+export function operationalSourceTokenBudget(providerBudget: number): number {
+  return Math.min(6_000, providerBudget);
+}
+
+export function stripPlaceholderSections(markdown: string): string {
+  const lines = markdown.split("\n");
+  const output: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    if (/^##\s+(?:Decisions|Keputusan)\s*$/iu.test(lines[index].trim())) {
+      let end = index + 1;
+      while (end < lines.length && !/^##\s+/u.test(lines[end].trim())) end += 1;
+      const body = lines.slice(index + 1, end).join(" ").replace(/[*_()]/g, " ").trim();
+      if (/^(?:tidak ada|no)\b.*\b(?:keputusan|decisions?)\b/iu.test(body)) {
+        while (output.length > 0 && output[output.length - 1].trim() === "") output.pop();
+        index = end;
+        continue;
+      }
+    }
+    output.push(lines[index]);
+    index += 1;
+  }
+  return output
+    .join("\n")
+    .replace(/([^\n])\n(##\s+)/g, "$1\n\n$2")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 // A tokenizer token cannot encode more information than the UTF-8 bytes that
 // represent its text. Counting bytes is deliberately conservative across Latin,
 // CJK, Arabic, emoji, code, and mixed-language transcripts. Request-level
