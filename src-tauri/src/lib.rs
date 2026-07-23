@@ -1,33 +1,15 @@
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
-// ==================== Shared types ====================
-
-#[derive(serde::Serialize, Clone)]
-pub struct DeviceStatus {
-    pub mic_available: bool,
-    pub mic_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mic_display_name: Option<String>,
-    pub system_audio_available: bool,
-    pub system_audio_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_audio_display_name: Option<String>,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct AudioDeviceInfo {
-    pub raw_name: String,
-    pub display_name: String,
-    pub device_type: String,
-    pub is_default: bool,
-}
+mod audio;
+pub use audio::{AudioDeviceInfo, DeviceStatus};
 
 mod agent;
 mod audio_aec;
 mod audio_dsp;
 mod audio_import;
 mod auth;
+mod config;
 mod database;
 mod mcp_auth;
 mod models;
@@ -159,6 +141,8 @@ async fn notify_recording_started(
     audio_path: Option<String>,
     language: Option<String>,
     timestamp: Option<i64>,
+    recorded_at: Option<String>,
+    timezone: Option<String>,
 ) -> Result<(), String> {
     // audio_path lets the main window start processing immediately off this
     // event; without it the listener can only show the loading card and the
@@ -170,6 +154,8 @@ async fn notify_recording_started(
             "audioPath": audio_path,
             "language": language,
             "timestamp": timestamp,
+            "recordedAt": recorded_at,
+            "timezone": timezone,
         }),
     )
     .map_err(|e| format!("Failed to emit recording-started event: {}", e))?;
@@ -192,25 +178,14 @@ async fn get_audio_device_status() -> Result<DeviceStatus, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let mut path = cwd.clone();
-    loop {
-        let env_path = path.join(".env");
-        if env_path.exists() {
-            let _ = dotenvy::from_filename(env_path);
-            break;
-        }
-        if !path.pop() {
-            println!("WARNING: .env file not found, using system environment only");
-            break;
-        }
-    }
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_mic_recorder::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            match config::load_environment(app)? {
+                Some(path) => println!("Loaded environment from {}", path.display()),
+                None => println!("WARNING: no environment file found"),
+            }
             // If DB is unreachable, commands return clear errors rather than failing setup.
             let db = tauri::async_runtime::block_on(database::init_database());
             app.handle().manage(db);
@@ -226,8 +201,7 @@ pub fn run() {
                     if let Ok(recorder) = RECORDER.lock() {
                         let _ = recorder.stop_recording();
                     }
-                    if let Some(popup) = window.app_handle().get_webview_window("recording-popup")
-                    {
+                    if let Some(popup) = window.app_handle().get_webview_window("recording-popup") {
                         let _ = popup.destroy();
                     }
                 }

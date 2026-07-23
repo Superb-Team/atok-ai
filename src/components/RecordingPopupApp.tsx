@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import type { AudioDeviceInfo } from '@/services/recording.service';
+import type { RecordingNoteContext } from '@/services/recording-note-metadata';
 
 declare module 'react' {
   interface CSSProperties {
@@ -34,6 +35,7 @@ const RecordingPopupApp: React.FC = () => {
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const dragAreaRef = useRef<HTMLDivElement>(null);
   const isRecordingRef = useRef(false);
+  const recordingContextRef = useRef<RecordingNoteContext | null>(null);
 
   // Transcription language. A ref mirrors it so the close handler (registered once)
   // reads the current value instead of a stale closure.
@@ -116,6 +118,7 @@ const RecordingPopupApp: React.FC = () => {
             const savedPath = await recordingService.stopRecording();
             const { generateNoteTitle } = await import('@/services/audio-processor.service');
             const noteTitle = generateNoteTitle();
+            const context = recordingContextRef.current;
             const timestamp = Date.now();
             // localStorage is the fallback handoff; the event below is the fast
             // path that lets the main window start processing immediately.
@@ -124,6 +127,8 @@ const RecordingPopupApp: React.FC = () => {
               noteTitle,
               language: selectedLanguageRef.current,
               timestamp,
+              recordedAt: context?.recordedAt,
+              timezone: context?.timezone,
             }));
             try {
               const { invoke } = await import('@tauri-apps/api/core');
@@ -132,6 +137,8 @@ const RecordingPopupApp: React.FC = () => {
                 audioPath: savedPath,
                 language: selectedLanguageRef.current,
                 timestamp,
+                recordedAt: context?.recordedAt,
+                timezone: context?.timezone,
               });
             } catch {}
           } catch (err) {
@@ -178,7 +185,11 @@ const RecordingPopupApp: React.FC = () => {
     if (isRecording || isFinalizing) return;
     try {
       const { recordingService } = await import('@/services/recording.service');
-      await recordingService.startRecording(selectedMic || undefined, selectedLanguage);
+      const started = await recordingService.startRecording(selectedMic || undefined, selectedLanguage);
+      recordingContextRef.current = {
+        recordedAt: started.recordedAt,
+        timezone: started.timezone,
+      };
       setIsRecording(true);
       setTime(0);
     } catch (err) {
@@ -246,6 +257,7 @@ const RecordingPopupApp: React.FC = () => {
     }
 
     if (savedPath && noteTitle) {
+      const context = recordingContextRef.current;
       const timestamp = Date.now();
       // localStorage is the fallback handoff; the event below is the fast path
       // that lets the main window start processing immediately.
@@ -253,7 +265,9 @@ const RecordingPopupApp: React.FC = () => {
         audioPath: savedPath,
         noteTitle,
         language: selectedLanguage,
-        timestamp
+        timestamp,
+        recordedAt: context?.recordedAt,
+        timezone: context?.timezone,
       }));
       try {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -262,6 +276,8 @@ const RecordingPopupApp: React.FC = () => {
           audioPath: savedPath,
           language: selectedLanguage,
           timestamp,
+          recordedAt: context?.recordedAt,
+          timezone: context?.timezone,
         });
       } catch {}
     }

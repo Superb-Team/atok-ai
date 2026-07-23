@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Note, CreateNoteRequest } from "@/types/note.types";
+import type { Note, CreateNoteRequest, UpdateNoteRequest } from "@/types/note.types";
+
+export class NoteConflictError extends Error {
+  constructor(message = "This note changed after it was opened.") {
+    super(message);
+    this.name = "NoteConflictError";
+  }
+}
 
 export const noteService = {
   async getNotes(userId: string): Promise<Note[]> {
@@ -41,7 +48,7 @@ export const noteService = {
   async updateNote(
     noteId: number,
     userId: string,
-    changes: { title?: string; content?: string; tags?: string[]; color?: string },
+    changes: UpdateNoteRequest,
   ): Promise<Note> {
     try {
       return await invoke<Note>("update_note", {
@@ -49,6 +56,9 @@ export const noteService = {
         request: { id: noteId, ...changes },
       });
     } catch (error) {
+      if (typeof error === "string" && error.startsWith("NOTE_CONFLICT:")) {
+        throw new NoteConflictError(error.replace(/^NOTE_CONFLICT:\s*/, ""));
+      }
       throw toError(error, "Failed to update note");
     }
   },

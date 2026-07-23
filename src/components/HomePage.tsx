@@ -86,7 +86,14 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
     // Shared between the event fast path and the localStorage poll so the same
     // take is never processed twice (both carry the handoff timestamp).
-    const startProcessing = (audioPath: string, noteTitle: string, language: string | undefined, timestamp: number) => {
+    const startProcessing = (
+      audioPath: string,
+      noteTitle: string,
+      language: string | undefined,
+      timestamp: number,
+      recordedAt?: string,
+      timezone?: string,
+    ) => {
       const handoffId = `${audioPath}:${timestamp}`;
       if (seenRecordingHandoffs.current.has(handoffId)) return;
       seenRecordingHandoffs.current.add(handoffId);
@@ -94,7 +101,12 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       if (activeAudioPaths.current.has(audioPath)) return;
       activeAudioPaths.current.add(audioPath);
       setProcessingNotes(prev => new Set(prev).add(noteTitle));
-      processAudioRecording(audioPath, noteTitle, language);
+      processAudioRecording(
+        audioPath,
+        noteTitle,
+        language,
+        recordedAt && timezone ? { recordedAt, timezone } : undefined,
+      );
     };
 
     // Fallback handoff: the poll covers ImportAudioDialog (which only writes
@@ -103,8 +115,8 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       const audioData = localStorage.getItem('audio_to_process');
       if (audioData) {
         try {
-          const { audioPath, noteTitle, language, timestamp } = JSON.parse(audioData);
-          startProcessing(audioPath, noteTitle, language, timestamp);
+          const { audioPath, noteTitle, language, timestamp, recordedAt, timezone } = JSON.parse(audioData);
+          startProcessing(audioPath, noteTitle, language, timestamp, recordedAt, timezone);
         } catch {
           localStorage.removeItem('audio_to_process');
         }
@@ -117,9 +129,9 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         return listen('recording-started', handler);
       },
       (event) => {
-        const { noteTitle, audioPath, language, timestamp } = event.payload ?? {};
+        const { noteTitle, audioPath, language, timestamp, recordedAt, timezone } = event.payload ?? {};
         if (noteTitle && audioPath && typeof timestamp === 'number') {
-          startProcessing(audioPath, noteTitle, language ?? undefined, timestamp);
+          startProcessing(audioPath, noteTitle, language ?? undefined, timestamp, recordedAt, timezone);
         } else if (noteTitle) {
           setProcessingNotes(prev => new Set(prev).add(noteTitle));
         }
@@ -141,7 +153,14 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
           ))
           .forEach((job) => {
             const timestamp = Date.parse(job.updatedAt) || Date.now();
-            startProcessing(job.audioPath, job.noteTitle, job.language, timestamp);
+            startProcessing(
+              job.audioPath,
+              job.noteTitle,
+              job.language,
+              timestamp,
+              job.recordedAt,
+              job.timezone,
+            );
           });
       }).catch(() => {}),
     );
@@ -152,10 +171,15 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     };
   }, [loadNotes]);
 
-  const processAudioRecording = async (audioPath: string, noteTitle: string, language?: string) => {
+  const processAudioRecording = async (
+    audioPath: string,
+    noteTitle: string,
+    language?: string,
+    context?: { recordedAt: string; timezone: string },
+  ) => {
     try {
       const { processAudioRecording: processAudio } = await import('@/services/audio-processor.service');
-      const result = await processAudio(audioPath, noteTitle, language);
+      const result = await processAudio(audioPath, noteTitle, language, context);
 
       if (!result.success) {
         throw new Error(result.error || 'Processing failed');

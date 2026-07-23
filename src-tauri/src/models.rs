@@ -151,6 +151,8 @@ pub struct NoteResponse {
     pub is_archived: bool,
     pub color: Option<String>,
     pub reminder_at: Option<DateTime<Utc>>,
+    pub recorded_at: Option<DateTime<Utc>>,
+    pub recording_timezone: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -161,6 +163,8 @@ pub struct CreateNoteRequest {
     pub content: Option<String>,
     pub tags: Option<Vec<String>>,
     pub color: Option<String>,
+    pub recorded_at: Option<String>,
+    pub recording_timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +176,7 @@ pub struct UpdateNoteRequest {
     pub is_favorite: Option<bool>,
     pub is_archived: Option<bool>,
     pub color: Option<String>,
+    pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
 // ==================== Task Models ====================
@@ -514,6 +519,8 @@ mod tests {
             is_archived: false,
             color: Some("#FFFFFF".to_string()),
             reminder_at: None,
+            recorded_at: None,
+            recording_timezone: None,
             created_at: now,
             updated_at: now,
         };

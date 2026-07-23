@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Atok.ai records microphone audio for meeting notes and transcription.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Atok.ai captures system audio for meeting notes and transcription.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Atok.ai captures system audio for meeting notes and transcription.</string>
+</dict>
+</plist>

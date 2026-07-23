@@ -2,7 +2,7 @@
 //!
 //! - Windows: WASAPI loopback + mic (windows_audio.rs)
 //! - Linux:   parec (PulseAudio/PipeWire) + cpal mic → disk-backed chunked pipeline
-//! - macOS:   ScreenCaptureKit + cpal mic → ringbuf batch encoding
+//! - macOS:   ScreenCaptureKit + cpal mic → disk-backed chunked pipeline
 //! - Fallback: cpal mic only → ringbuf batch encoding
 
 use std::io::{BufWriter, Write};
@@ -14,12 +14,15 @@ use tokio::sync::oneshot;
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
 
-use crate::audio_aec::{AecConfig, AudioAec, AEC_SAMPLE_RATE};
+#[cfg(target_os = "linux")]
+use crate::audio_aec::AEC_SAMPLE_RATE;
+use crate::audio_aec::{AecConfig, AudioAec};
 use crate::audio_dsp::AudioDsp;
 
 type RecordingResult = Result<PathBuf, String>;
 type CompletionReceiver = oneshot::Receiver<RecordingResult>;
 
+#[cfg(not(target_os = "macos"))]
 const MIC_RINGBUF_BYTES: usize = 960_000; // 10s of 48kHz mono i16 LE
 const CHUNK_SECONDS: u64 = 180;
 const PUMP_CHUNK_BYTES: usize = 8192;
@@ -141,18 +144,24 @@ impl DesktopAudioRecorder {
 
         #[cfg(target_os = "macos")]
         {
-            drop(chunk_tx); // macOS is a batch path; live transcription not supported yet
-            match Self::record_macos(&mp3_path, &is_recording, aec_enabled, mic_name) {
-                Ok(()) => return Ok(mp3_path),
-                Err(e) => eprintln!("macOS recording failed: {}, falling back to cpal", e),
-            }
+            crate::audio::platform::macos::record(
+                &mp3_path,
+                &is_recording,
+                aec_enabled,
+                mic_name,
+                chunk_tx,
+            )?;
+            Ok(mp3_path)
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         drop(chunk_tx);
 
-        Self::record_with_cpal(&mp3_path, &is_recording, mic_name)?;
-        Ok(mp3_path)
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::record_with_cpal(&mp3_path, &is_recording, mic_name)?;
+            Ok(mp3_path)
+        }
     }
 
     // ==================== Linux: parec (system) + cpal (mic) ====================
@@ -303,7 +312,7 @@ impl DesktopAudioRecorder {
     /// Mic capture into 3-minute rotating chunk files. The cpal callback is
     /// wait-free — it only converts to i16 LE and pushes to a ring buffer; a
     /// dedicated drain thread does all file I/O and rotation off the audio thread.
-    fn cpal_record_chunked(
+    pub(crate) fn cpal_record_chunked(
         session_dir: PathBuf,
         mic_device: cpal::Device,
         mic_cfg: cpal::SupportedStreamConfig,
@@ -535,7 +544,7 @@ impl DesktopAudioRecorder {
 
     /// Write the current wall-clock (epoch millis) to `session_dir/{name}` so the
     /// chunk worker can compute the start offset between the sys and mic streams.
-    fn write_start_meta(session_dir: &Path, name: &str) {
+    pub(crate) fn write_start_meta(session_dir: &Path, name: &str) {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -581,9 +590,8 @@ impl DesktopAudioRecorder {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        let read_millis = |p: &Path| -> Option<u64> {
-            std::fs::read_to_string(p).ok()?.trim().parse().ok()
-        };
+        let read_millis =
+            |p: &Path| -> Option<u64> { std::fs::read_to_string(p).ok()?.trim().parse().ok() };
         let (Some(sys_start), Some(mic_start)) = (read_millis(&sys_meta), read_millis(&mic_meta))
         else {
             return (0, 0);
@@ -631,7 +639,7 @@ impl DesktopAudioRecorder {
     /// and its path is sent on the channel so `transcribe_chunks_live` can
     /// upload and transcribe it while recording continues.
     #[allow(clippy::too_many_arguments)]
-    fn chunk_worker(
+    pub(crate) fn chunk_worker(
         session_dir: PathBuf,
         mp3_path: PathBuf,
         sample_rate: u32,
@@ -990,7 +998,7 @@ impl DesktopAudioRecorder {
         Self::verify_output(mp3_path)
     }
 
-    fn spawn_blocking_with_timeout<F, T>(f: F, timeout: std::time::Duration) -> Option<T>
+    pub(crate) fn spawn_blocking_with_timeout<F, T>(f: F, timeout: std::time::Duration) -> Option<T>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -1003,228 +1011,14 @@ impl DesktopAudioRecorder {
         rx.recv_timeout(timeout).ok()
     }
 
-    /// Pump thread body: drain a ringbuf consumer into a `Vec<u8>` until the
-    /// `done` flag is set AND the ringbuf is empty. Returns the captured bytes
-    /// in producer order. Pump is sleep-friendly (no busy-wait).
-    ///
-    /// macOS-only: `sys` is captured to a file by Swift and only the mic
-    /// ringbuf is drained here.
-    #[cfg(target_os = "macos")]
-    fn pump_audio(
-        mut cons: impl Consumer<Item = u8>,
-        done: Arc<AtomicBool>,
-    ) -> Result<Vec<u8>, String> {
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; PUMP_CHUNK_BYTES];
-        loop {
-            let n = cons.pop_slice(&mut tmp);
-            if n > 0 {
-                buf.extend_from_slice(&tmp[..n]);
-                continue;
-            }
-            if done.load(Ordering::SeqCst) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(PUMP_SLEEP_MS));
-        }
-        Ok(buf)
-    }
-
     #[cfg(target_os = "linux")]
     fn linux_default_monitor_source() -> Option<String> {
         crate::linux_pulse::default_sink_and_source().map(|(sink, _)| format!("{}.monitor", sink))
     }
 
-    // ==================== macOS: ScreenCaptureKit + cpal mic ====================
-
-    #[cfg(target_os = "macos")]
-    fn record_macos(
-        mp3_path: &Path,
-        is_recording: &Arc<AtomicBool>,
-        aec_enabled: bool,
-        mic_name: Option<&str>,
-    ) -> Result<(), String> {
-        use cpal::traits::{DeviceTrait, StreamTrait};
-        use cpal::SampleFormat;
-        use swift_rs::swift;
-
-        swift! {
-            fn sc_start_system_audio(path: *const u8, path_len: u32) -> bool;
-            fn sc_stop_system_audio() -> bool;
-        }
-
-        eprintln!("[recorder] macOS ScreenCaptureKit recording start");
-
-        let sample_rate = AEC_SAMPLE_RATE;
-        let channels = 2u32;
-
-        // ScreenCaptureKit writes sys audio to a file via Swift; mic is captured
-        // through a ringbuf.
-        let sys_raw = "/tmp/atok_macos_system.raw";
-        let _ = std::fs::remove_file(sys_raw);
-
-        let path_bytes = sys_raw.as_bytes();
-        let success =
-            unsafe { sc_start_system_audio(path_bytes.as_ptr(), path_bytes.len() as u32) };
-        if !success {
-            return Err("ScreenCaptureKit failed. Grant Screen Recording permission.".into());
-        }
-
-        let host = cpal::default_host();
-        let mic_device = Self::resolve_input_device(&host, mic_name)?;
-
-        let mic_cfg_range = mic_device
-            .supported_input_configs()
-            .map_err(|e| format!("Mic supported_input_configs: {}", e))?
-            .find(|c| c.sample_format() == SampleFormat::F32)
-            .ok_or("Mic does not support F32")?;
-
-        let mic_cfg = Self::with_preferred_sample_rate(mic_cfg_range, sample_rate);
-        let mic_sr = mic_cfg.sample_rate().0;
-        let mic_ch = mic_cfg.channels() as u32;
-
-        eprintln!("[recorder] macOS mic: {}Hz, {}ch", mic_sr, mic_ch);
-
-        let mic_rb = HeapRb::<u8>::new(MIC_RINGBUF_BYTES);
-        let (mic_prod, mic_cons) = mic_rb.split();
-        let producer_done = Arc::new(AtomicBool::new(false));
-
-        let mic_stream = {
-            let mut scratch: Vec<u8> = Vec::with_capacity(PUMP_CHUNK_BYTES * 4);
-            let mut mic_prod = mic_prod;
-            mic_device
-                .build_input_stream(
-                    &mic_cfg.config(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        scratch.clear();
-                        for &s in data {
-                            let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                            let b = s16.to_le_bytes();
-                            scratch.push(b[0]);
-                            scratch.push(b[1]);
-                        }
-                        let _ = mic_prod.push_slice(&scratch);
-                    },
-                    move |err| eprintln!("[recorder] Mic stream error: {}", err),
-                    None,
-                )
-                .map_err(|e| format!("Mic stream build failed: {}", e))?
-        };
-
-        mic_stream
-            .play()
-            .map_err(|e| format!("Mic play failed: {}", e))?;
-        eprintln!("[recorder] macOS streams playing");
-
-        let mic_pump_handle = std::thread::Builder::new()
-            .name("mic-pump".into())
-            .spawn(move || Self::pump_audio(mic_cons, producer_done.clone()))
-            .map_err(|e| format!("Failed to spawn mic pump: {}", e))?;
-
-        while is_recording.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
-        unsafe {
-            sc_stop_system_audio();
-        }
-        drop(mic_stream);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        producer_done.store(true, Ordering::SeqCst);
-
-        let mic_data = mic_pump_handle
-            .join()
-            .map_err(|_| "mic pump thread panicked".to_string())??;
-        let sys_data = std::fs::read(sys_raw).unwrap_or_default();
-        let _ = std::fs::remove_file(sys_raw);
-
-        eprintln!(
-            "[recorder] macOS captured: sys={} bytes, mic={} bytes (mic via ringbuf)",
-            sys_data.len(),
-            mic_data.len()
-        );
-
-        let has_sys = sys_data.len() > 1024;
-        let has_mic = mic_data.len() > 1024;
-
-        if !has_sys && !has_mic {
-            return Err("No audio captured on macOS".into());
-        }
-
-        let mic_final = if has_sys && has_mic && mic_sr != sample_rate {
-            Self::resample_linear(&mic_data, mic_sr, sample_rate, mic_ch)
-        } else {
-            mic_data.clone()
-        };
-
-        // AEC must run before denoising, after resample (both at 48kHz s16le here).
-        let mic_final =
-            if aec_enabled && has_sys && has_mic && !mic_final.is_empty() && !sys_data.is_empty() {
-                let mut aec = AudioAec::new(AecConfig {
-                    enabled: true,
-                    capture_channels: mic_ch as i32,
-                    render_channels: channels as i32,
-                    ..Default::default()
-                });
-                if aec.is_enabled() {
-                    eprintln!("[recorder] macOS AEC: processing sys+mic");
-                    aec.process_chunk(&sys_data, &mic_final)
-                } else {
-                    mic_final
-                }
-            } else {
-                mic_final
-            };
-
-        let mic_final = if has_mic {
-            let mic_rate = if has_sys && has_mic {
-                sample_rate
-            } else {
-                mic_sr
-            };
-            Self::denoise_mic_pcm(&mic_final, mic_rate, mic_ch)
-        } else {
-            mic_final
-        };
-
-        let mic_stereo = if mic_ch == 1 && has_sys && has_mic {
-            Self::mono_to_stereo(&mic_final)
-        } else {
-            mic_final
-        };
-
-        if has_sys && has_mic {
-            let mut dsp = AudioDsp::new(0.0);
-            let mixed = dsp.process(&sys_data, &mic_stereo);
-            Self::encode_i16_to_mp3(&mixed, mp3_path, sample_rate, channels)?;
-        } else if has_sys {
-            Self::pcm_to_mp3(&sys_data, mp3_path, sample_rate, channels)?;
-        } else {
-            Self::pcm_to_mp3(&mic_final, mp3_path, mic_sr, mic_ch)?;
-        }
-
-        eprintln!("[recorder] macOS encoding done");
-        Self::verify_output(mp3_path)
-    }
-
     // ==================== Shared: Encoding & Utils ====================
 
-    #[cfg(target_os = "macos")]
-    fn pcm_to_mp3(
-        pcm_data: &[u8],
-        output: &Path,
-        sample_rate: u32,
-        channels: u32,
-    ) -> Result<(), String> {
-        let samples: Vec<i16> = pcm_data
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        Self::encode_i16_to_mp3(&samples, output, sample_rate, channels)
-    }
-
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(test)]
     fn encode_i16_to_mp3(
         samples: &[i16],
         output: &Path,
@@ -1361,10 +1155,10 @@ impl DesktopAudioRecorder {
         stereo
     }
 
-    /// One-shot mic denoise (fresh RNNoise state per call). Used by the macOS
-    /// batch path and the unit tests; the Linux chunked path uses the
-    /// state-persisting [`Self::denoise_mic_pcm_with_state`] instead.
-    #[cfg(any(target_os = "macos", test))]
+    /// One-shot mic denoise (fresh RNNoise state per call) for unit coverage.
+    /// Runtime chunking uses the state-persisting
+    /// [`Self::denoise_mic_pcm_with_state`] instead.
+    #[cfg(test)]
     fn denoise_mic_pcm(pcm: &[u8], sample_rate: u32, channels: u32) -> Vec<u8> {
         let channel_count = channels as usize;
         if sample_rate != 48_000 || !(1..=2).contains(&channel_count) || pcm.len() < 2 {
@@ -1420,7 +1214,10 @@ impl DesktopAudioRecorder {
     /// the system default. Note: on Linux the device picker may show PulseAudio
     /// source names that don't match cpal/ALSA names — those fall back to default.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn resolve_input_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device, String> {
+    pub(crate) fn resolve_input_device(
+        host: &cpal::Host,
+        name: Option<&str>,
+    ) -> Result<cpal::Device, String> {
         use cpal::traits::{DeviceTrait, HostTrait};
         if let Some(want) = name.filter(|n| !n.is_empty()) {
             if let Ok(mut devices) = host.input_devices() {
@@ -1439,7 +1236,7 @@ impl DesktopAudioRecorder {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn with_preferred_sample_rate(
+    pub(crate) fn with_preferred_sample_rate(
         config: cpal::SupportedStreamConfigRange,
         preferred_sample_rate: u32,
     ) -> cpal::SupportedStreamConfig {
@@ -1646,6 +1443,7 @@ impl DesktopAudioRecorder {
 
     // ==================== cpal Fallback (mic only, all platforms) ====================
 
+    #[cfg(not(target_os = "macos"))]
     fn record_with_cpal(
         mp3_path: &Path,
         is_recording: &Arc<AtomicBool>,
@@ -1738,6 +1536,7 @@ impl DesktopAudioRecorder {
     /// but encoding itself is single-threaded here). Drains i16 LE bytes from
     /// the ringbuf, accumulates to 1152-sample blocks, feeds LAME, and
     /// finalizes the MP3 file on exit.
+    #[cfg(not(target_os = "macos"))]
     fn cpal_encoding_thread(
         mut cons: impl Consumer<Item = u8>,
         encoder: Arc<Mutex<mp3lame_encoder::Encoder>>,
@@ -1845,6 +1644,7 @@ impl DesktopAudioRecorder {
         b.build().map_err(|e| format!("{:?}", e))
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn cpal_finalize_encoder(
         encoder: &Arc<Mutex<mp3lame_encoder::Encoder>>,
         mp3_file: &Arc<Mutex<BufWriter<std::fs::File>>>,
@@ -1866,7 +1666,7 @@ impl DesktopAudioRecorder {
         Ok(())
     }
 
-    fn verify_output(path: &Path) -> Result<(), String> {
+    pub(crate) fn verify_output(path: &Path) -> Result<(), String> {
         if path.exists() {
             let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             if size < 100 {
@@ -1900,7 +1700,10 @@ mod tests {
     #[test]
     fn trim_lead_bytes_covers_offset_in_whole_frames() {
         // 250ms @ 48kHz stereo S16 = 12_000 frames * 4 bytes.
-        assert_eq!(DesktopAudioRecorder::trim_lead_bytes(250, 48_000, 2), 48_000);
+        assert_eq!(
+            DesktopAudioRecorder::trim_lead_bytes(250, 48_000, 2),
+            48_000
+        );
         assert_eq!(DesktopAudioRecorder::trim_lead_bytes(0, 48_000, 2), 0);
         // 1ms @ 44.1kHz mono rounds down to 44 frames * 2 bytes.
         assert_eq!(DesktopAudioRecorder::trim_lead_bytes(1, 44_100, 1), 88);
@@ -1943,7 +1746,10 @@ mod tests {
         let done = Arc::new(AtomicBool::new(false));
         let (sys_trim, mic_trim) =
             DesktopAudioRecorder::compute_start_trims(&dir, 48_000, 2, 44_100, 1, &done);
-        assert_eq!(sys_trim, DesktopAudioRecorder::trim_lead_bytes(100, 48_000, 2));
+        assert_eq!(
+            sys_trim,
+            DesktopAudioRecorder::trim_lead_bytes(100, 48_000, 2)
+        );
         assert_eq!(mic_trim, 0);
 
         // Missing metas (e.g. mic-only session) → no trim, no waiting forever.
@@ -2043,5 +1849,30 @@ mod tests {
             mic_samples * 2,
             out.len()
         );
+    }
+
+    #[test]
+    fn system_only_chunk_preserves_stereo_frame_count() {
+        let stereo_frames = 4096usize;
+        let system: Vec<u8> = (0..stereo_frames * 2)
+            .map(|index| ((index as f32 * 0.03).sin() * 6000.0) as i16)
+            .flat_map(i16::to_le_bytes)
+            .collect();
+        let mut dsp = AudioDsp::new(0.0);
+        let mut denoisers: Vec<Box<nnnoiseless::DenoiseState>> = Vec::new();
+
+        let out = DesktopAudioRecorder::process_chunk_batch(
+            &system,
+            &[],
+            48_000,
+            48_000,
+            2,
+            1,
+            &mut dsp,
+            &mut denoisers,
+            true,
+        );
+
+        assert_eq!(out.len(), stereo_frames * 2);
     }
 }

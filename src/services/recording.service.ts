@@ -1,5 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { appDataDir, join } from '@tauri-apps/api/path';
+import {
+  createRecordingNoteContext,
+  type RecordingNoteContext,
+} from '@/services/recording-note-metadata';
 
 export interface DeviceStatus {
   mic_available: boolean;
@@ -25,12 +29,18 @@ export interface ProcessingJobSummary {
   language: string;
   status: 'transcribing' | 'extracting' | 'synthesizing' | 'saving' | 'complete' | 'partial' | 'failed';
   updatedAt: string;
+  recordedAt?: string;
+  timezone?: string;
   savedNoteId?: number;
   enhancementMode?: 'ai' | 'hybrid' | 'extractive-fallback';
   fallbackVersion?: number;
   repairingFallback?: boolean;
   aiPipelineVersion?: number;
   upgradingAi?: boolean;
+}
+
+export interface RecordingStartInfo extends RecordingNoteContext {
+  audioPath: string;
 }
 
 export class RecordingService {
@@ -72,11 +82,12 @@ export class RecordingService {
    * `language` is an ISO-639-1 code (e.g. "id", "en") pinned for Whisper so quiet
    * chunks don't get misdetected into the wrong language during transcription.
    */
-  static async startRecording(micDevice?: string, language?: string): Promise<string> {
+  static async startRecording(micDevice?: string, language?: string): Promise<RecordingStartInfo> {
     const recordingsDir = await this.getRecordingsDir();
     await invoke('ensure_recordings_dir', { path: recordingsDir });
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const context = createRecordingNoteContext();
+    const timestamp = context.recordedAt.replace(/[:.]/g, '-');
     const outputPath = await join(recordingsDir, `recording-${timestamp}.mp3`);
 
     await invoke('start_desktop_recording', {
@@ -86,7 +97,7 @@ export class RecordingService {
     });
     this.currentRecordingPath = outputPath;
 
-    return outputPath;
+    return { audioPath: outputPath, ...context };
   }
 
   /**

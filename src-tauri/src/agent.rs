@@ -389,6 +389,7 @@ pub async fn ai_chat_detailed(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ai_chat_detailed_for_model(
     client: &Client,
     url: &str,
@@ -433,7 +434,7 @@ async fn ai_chat_detailed_for_model(
         apply_model_chat_settings(&mut body, model);
 
         let response = with_chat_deadline(
-            post_chat_with_retry(&client, &url, &api_key, &body),
+            post_chat_with_retry(client, url, api_key, &body),
             deadline,
         )
         .await?;

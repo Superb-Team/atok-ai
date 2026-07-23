@@ -30,11 +30,15 @@ export function stripPlaceholderSections(markdown: string): string {
   const lines = markdown.split("\n");
   const output: string[] = [];
   for (let index = 0; index < lines.length;) {
-    if (/^##\s+(?:Decisions|Keputusan)\s*$/iu.test(lines[index].trim())) {
+    if (/^##\s+(?:Decisions|Keputusan|Action Items|Tindak Lanjut)\s*$/iu.test(lines[index].trim())) {
       let end = index + 1;
       while (end < lines.length && !/^##\s+/u.test(lines[end].trim())) end += 1;
       const body = lines.slice(index + 1, end).join(" ").replace(/[*_()]/g, " ").trim();
-      if (/^(?:tidak ada|no)\b.*\b(?:keputusan|decisions?)\b/iu.test(body)) {
+      if (
+        !body
+        || /^(?:tidak ada|belum ada|no|none)\b.*\b(?:keputusan|decisions?|tindak lanjut|action items?|follow-?ups?)\b/iu.test(body)
+        || /^(?:no explicit action items?|nothing to follow up)\b/iu.test(body)
+      ) {
         while (output.length > 0 && output[output.length - 1].trim() === "") output.pop();
         index = end;
         continue;
@@ -174,26 +178,31 @@ export function packByTokenBudget(values: string[], maxTokens: number): string[]
   return batches;
 }
 
-function indentSectionHeadings(markdown: string): string {
-  return markdown.replace(/^(#{1,6})\s+/gm, (_match, hashes: string) => {
-    const depth = Math.min(hashes.length + 2, 6);
-    return `${"#".repeat(depth)} `;
-  });
+function normalizeTopicHeadings(markdown: string): string {
+  return markdown
+    .replace(/^#{1,6}\s+(?:Section|Part|Bagian)\s+\d+\s*$/gimu, "")
+    .replace(/^#{1,6}\s+(.+)$/gm, "### $1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export function composeLongFormNote(
   globalMarkdown: string,
   sections: ProcessedSection[],
+  language = "en",
 ): string {
   const ordered = [...sections].sort((a, b) => a.index - b.index);
   const details = ordered.map((section) => {
     const warning = section.isDegraded
-      ? `\n\n> Section ${section.index + 1} could not be fully enhanced; raw transcript preserved for completeness.`
+      ? `\n\n> ${language === "id"
+        ? "Bagian ini tidak dapat disempurnakan sepenuhnya; transkrip mentah dipertahankan agar detail tidak hilang."
+        : "This part could not be fully enhanced; its raw transcript is preserved so no detail is lost."}`
       : "";
-    return `### Section ${section.index + 1}\n\n${indentSectionHeadings(section.markdown).trim()}${warning}`;
+    return `${normalizeTopicHeadings(section.markdown)}${warning}`.trim();
   });
+  const detailsHeading = language === "id" ? "## Pembahasan Terperinci" : "## Detailed Discussion";
 
-  return [globalMarkdown.trim(), "## Detailed Notes", ...details]
+  return [globalMarkdown.trim(), detailsHeading, ...details]
     .filter(Boolean)
     .join("\n\n")
     .trim();

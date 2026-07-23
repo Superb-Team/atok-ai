@@ -15,7 +15,7 @@ name = "atok_ai_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "=2.6.3", features = [] }
 swift-rs = { version = "1.0", features = ["build"] }
 
 [features]
@@ -23,10 +23,9 @@ default = ["aec"]
 aec = ["dep:webrtc-audio-processing"]
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-opener = "2"
-tauri-plugin-mic-recorder = "2.0.0"
-tauri-plugin-dialog = "2"
+tauri = { version = "=2.11.5", features = ["protocol-asset"] }
+tauri-plugin-opener = "=2.5.4"
+tauri-plugin-dialog = "=2.7.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, Component } from "react";
+import { useEffect, useMemo, useRef, useState, Component } from "react";
 import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
@@ -6,6 +6,7 @@ import { ArrowLeft, Star, Trash2, Edit, Paperclip } from "lucide-react";
 import { noteAssetService } from "@/services/note-asset.service";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
+import { NoteEditSession } from "@/components/note-editor/NoteEditSession";
 
 class ErrorBoundary extends Component<{ fallback: React.ReactNode; children: React.ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
@@ -47,13 +48,12 @@ function stripLeadingDuplicateHeading(content: string, title: string): string {
 interface NoteViewPageProps {
   noteId: number;
   onBack: () => void;
-  onEdit?: (note: Note) => void;
 }
 
 const headerIconButton =
   "inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60";
 
-export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPageProps) {
+export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
   const [note, setNote] = useState<Note | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -61,6 +61,8 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
   const [deleting, setDeleting] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const finishEditorRef = useRef<(() => Promise<boolean>) | null>(null);
 
   const bodyContent = useMemo(
     () => (note?.content ? stripLeadingDuplicateHeading(note.content, note.title) : ""),
@@ -68,6 +70,7 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
   );
 
   useEffect(() => {
+    setIsEditing(false);
     loadNote();
   }, [noteId]);
 
@@ -116,7 +119,10 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
 
       const asset = await noteAssetService.importAsset(sourcePath);
       const content = noteAssetService.appendAssetToContent(note.content ?? "", asset);
-      await noteService.updateNote(note.id, user.id, { content });
+      await noteService.updateNote(note.id, user.id, {
+        content,
+        expected_updated_at: note.updated_at,
+      });
       await loadNote();
     } catch (err) {
       setAttachError(err instanceof Error ? err.message : String(err));
@@ -128,6 +134,14 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
   const handleDelete = () => {
     if (!note || deleting) return;
     setShowDeleteConfirm(true);
+  };
+
+  const handleBack = async () => {
+    if (isEditing && finishEditorRef.current) {
+      const saved = await finishEditorRef.current();
+      if (!saved) return;
+    }
+    onBack();
   };
 
   const confirmDelete = async () => {
@@ -182,7 +196,7 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
           <p className="mb-6 text-sm text-destructive">{error || "Note not found"}</p>
           <button
             type="button"
-            onClick={onBack}
+            onClick={() => void handleBack()}
             className="inline-flex items-center gap-2 rounded-lg border border-input bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent active:scale-[0.98]"
           >
             <ArrowLeft className="h-4 w-4" strokeWidth={1.75} />
@@ -193,15 +207,26 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
     );
   }
 
-  const formatDate = (dateString: string) => {
+  const formatDate = (dateString: string, timeZone?: string) => {
     const date = new Date(dateString);
-    return date.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    try {
+      return date.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        ...(timeZone ? { timeZone } : {}),
+      });
+    } catch {
+      return date.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    }
   };
 
   return (
@@ -237,7 +262,7 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
             <div className="flex items-center justify-between">
               <button
                 type="button"
-                onClick={onBack}
+                onClick={() => void handleBack()}
                 className="inline-flex h-9 items-center gap-2 rounded-lg px-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.98]"
               >
                 <ArrowLeft className="h-4 w-4" strokeWidth={1.75} />
@@ -245,52 +270,54 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
               </button>
 
               <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={handleAttach}
-                  disabled={attaching}
-                  className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.98] disabled:opacity-50"
-                  aria-label="Attach file"
-                >
-                  <Paperclip className="h-4 w-4" strokeWidth={1.75} />
-                  {attaching ? "Attaching…" : "Attach"}
-                </button>
+                {!isEditing && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleAttach}
+                      disabled={attaching}
+                      className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.98] disabled:opacity-50"
+                      aria-label="Attach file"
+                    >
+                      <Paperclip className="h-4 w-4" strokeWidth={1.75} />
+                      {attaching ? "Attaching…" : "Attach"}
+                    </button>
 
-                <button
-                  type="button"
-                  onClick={handleToggleFavorite}
-                  className={
-                    note.is_favorite
-                      ? "inline-flex h-9 w-9 items-center justify-center rounded-lg text-primary transition-colors hover:bg-primary/10 active:scale-[0.96]"
-                      : headerIconButton
-                  }
-                  aria-label={note.is_favorite ? "Remove from favorites" : "Add to favorites"}
-                >
-                  <Star
-                    className={`h-4 w-4 ${note.is_favorite ? "fill-current" : ""}`}
-                    strokeWidth={1.75}
-                  />
-                </button>
+                    <button
+                      type="button"
+                      onClick={handleToggleFavorite}
+                      className={
+                        note.is_favorite
+                          ? "inline-flex h-9 w-9 items-center justify-center rounded-lg text-primary transition-colors hover:bg-primary/10 active:scale-[0.96]"
+                          : headerIconButton
+                      }
+                      aria-label={note.is_favorite ? "Remove from favorites" : "Add to favorites"}
+                    >
+                      <Star
+                        className={`h-4 w-4 ${note.is_favorite ? "fill-current" : ""}`}
+                        strokeWidth={1.75}
+                      />
+                    </button>
 
-                {onEdit && (
-                  <button
-                    type="button"
-                    onClick={() => onEdit(note)}
-                    className={headerIconButton}
-                    aria-label="Edit note"
-                  >
-                    <Edit className="h-4 w-4" strokeWidth={1.75} />
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditing(true)}
+                      className={headerIconButton}
+                      aria-label="Edit note"
+                    >
+                      <Edit className="h-4 w-4" strokeWidth={1.75} />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleDelete}
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive active:scale-[0.96]"
+                      aria-label="Delete note"
+                    >
+                      <Trash2 className="h-4 w-4" strokeWidth={1.75} />
+                    </button>
+                  </>
                 )}
-
-                <button
-                  type="button"
-                  onClick={handleDelete}
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive active:scale-[0.96]"
-                  aria-label="Delete note"
-                >
-                  <Trash2 className="h-4 w-4" strokeWidth={1.75} />
-                </button>
               </div>
             </div>
           </div>
@@ -298,6 +325,17 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
 
         {/* Content: the note reads like a document, not a boxed widget. */}
         <div className="flex-1 overflow-y-auto">
+          {isEditing ? (
+            <NoteEditSession
+              note={note}
+              userId={authService.getUser()?.id ?? ""}
+              onSaved={setNote}
+              onDone={() => setIsEditing(false)}
+              registerFinish={(finish) => {
+                finishEditorRef.current = finish;
+              }}
+            />
+          ) : (
           <article className="mx-auto max-w-4xl px-10 pb-24 pt-12">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11.5px] text-muted-foreground">
               {note.color && (
@@ -307,7 +345,18 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
                   style={{ backgroundColor: note.color }}
                 />
               )}
-              <span>Created {formatDate(note.created_at)}</span>
+              {note.recorded_at ? (
+                <>
+                  <span>
+                    Recorded {formatDate(note.recorded_at, note.recording_timezone)}
+                  </span>
+                  <span className="text-muted-foreground/60">
+                    Created {formatDate(note.created_at)}
+                  </span>
+                </>
+              ) : (
+                <span>Created {formatDate(note.created_at)}</span>
+              )}
               {note.updated_at !== note.created_at && (
                 <span className="text-muted-foreground/60">
                   Updated {formatDate(note.updated_at)}
@@ -346,6 +395,7 @@ export default function NoteViewPage({ noteId, onBack, onEdit }: NoteViewPagePro
               )}
             </div>
           </article>
+          )}
         </div>
       </div>
     </>

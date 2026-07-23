@@ -75,30 +75,34 @@ test("batch packer never creates an over-budget reduce batch", () => {
   assert.ok(batches.every((batch) => estimateTokenUpperBound(batch.join("\n\n")) <= 700));
 });
 
-test("composer includes every section once and preserves chronological markers", () => {
+test("composer preserves every detail without exposing internal section numbers", () => {
   const sections: ProcessedSection[] = [
     {
       id: "section-0001",
       index: 0,
-      markdown: "Poin pertama.\n\n[[ATOK_ASSET_1]]",
+      markdown: "## Progres Sales Engine\n\nPoin pertama.\n\n[[ATOK_ASSET_1]]",
       markers: ["[[ATOK_ASSET_1]]"],
       isDegraded: false,
     },
     {
       id: "section-0002",
       index: 1,
-      markdown: "Poin kedua.\n\n[[ATOK_ASSET_2]]",
+      markdown: "## Strategi Konten\n\nPoin kedua.\n\n[[ATOK_ASSET_2]]",
       markers: ["[[ATOK_ASSET_2]]"],
       isDegraded: true,
     },
   ];
 
-  const note = composeLongFormNote("# Rapat\n\n## Summary\nRingkasan.", sections);
+  const note = composeLongFormNote("# Rapat\n\n## Ringkasan\nRingkasan.", sections, "id");
 
   assert.equal(note.match(/Poin pertama\./g)?.length, 1);
   assert.equal(note.match(/Poin kedua\./g)?.length, 1);
   assert.ok(note.indexOf("[[ATOK_ASSET_1]]") < note.indexOf("[[ATOK_ASSET_2]]"));
-  assert.match(note, /Section 2.*raw transcript preserved/s);
+  assert.match(note, /^## Pembahasan Terperinci$/m);
+  assert.match(note, /^### Progres Sales Engine$/m);
+  assert.match(note, /^### Strategi Konten$/m);
+  assert.doesNotMatch(note, /(?:Section|Bagian)\s+\d+/i);
+  assert.match(note, /transkrip mentah dipertahankan/i);
 });
 
 test("placeholder decision sections are omitted instead of published", () => {
@@ -107,5 +111,14 @@ test("placeholder decision sections are omitted instead of published", () => {
   assert.equal(
     stripPlaceholderSections(note),
     "# Rapat\n\n## Summary\nIsi.\n\n## Action Items\n- Tindak lanjut.",
+  );
+});
+
+test("placeholder action-item sections are omitted instead of published", () => {
+  const note = `# Rapat\n\n## Ringkasan\nIsi.\n\n## Tindak Lanjut\n(No explicit action items with owners/deadlines recorded in notes)\n\n## Pembahasan\nDetail.`;
+
+  assert.equal(
+    stripPlaceholderSections(note),
+    "# Rapat\n\n## Ringkasan\nIsi.\n\n## Pembahasan\nDetail.",
   );
 });

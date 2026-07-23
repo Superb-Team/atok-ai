@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { noteService } from "@/services/note.service";
+import { NoteConflictError, noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import { noteAssetService, type RecordingAsset } from "@/services/note-asset.service";
 import {
@@ -21,6 +21,12 @@ import {
   shouldReviewGeneratedNote,
   shouldUpgradeExtractiveFallback,
 } from "@/services/processing-review-policy";
+import {
+  deriveRecordingNoteTitle,
+  inferRecordingNoteContext,
+  replaceDocumentTitle,
+  type RecordingNoteContext,
+} from "@/services/recording-note-metadata";
 
 // ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -32,6 +38,29 @@ const LANGUAGE_NAMES: Record<string, string> = {
   es: "Spanish",
   ar: "Arabic",
 };
+
+function noteSectionLabels(language: string) {
+  if (language === "id") {
+    return {
+      summary: "Ringkasan",
+      keyPoints: "Poin Utama",
+      details: "Pembahasan",
+      decisions: "Keputusan",
+      actions: "Tindak Lanjut",
+    };
+  }
+  return {
+    summary: "Summary",
+    keyPoints: "Key Points",
+    details: "Discussion",
+    decisions: "Decisions",
+    actions: "Action Items",
+  };
+}
+
+function recordingContextInstruction(context: RecordingNoteContext): string {
+  return `Recording started at ${context.recordedAt} in timezone ${context.timezone}. Never treat this as spoken transcript content and do not put the date in the generated H1; the application appends the localized date deterministically.`;
+}
 
 // max_tokens only hurts when the model loops until it exhausts the budget
 // (which has happened — that's why collapseRepeatedLines exists). Scale the
@@ -95,10 +124,13 @@ interface ProcessingManifest {
   audioPath: string;
   noteTitle: string;
   language: string;
+  recordedAt?: string;
+  timezone?: string;
   status: ProcessingStatus;
   transcript?: string;
   sections: ManifestSection[];
   savedNoteId?: number;
+  savedNoteUpdatedAt?: string;
   failureNoteId?: number;
   enhancementMode?: "ai" | "hybrid" | "extractive-fallback";
   fallbackVersion?: number;
@@ -280,9 +312,16 @@ async function processSectionReliably(
   }
 }
 
-function globalReduceMessages(content: string, langName: string, final: boolean) {
+function globalReduceMessages(
+  content: string,
+  langName: string,
+  language: string,
+  context: RecordingNoteContext,
+  final: boolean,
+) {
+  const labels = noteSectionLabels(language);
   const instruction = final
-    ? `Create the compact global front matter for one meeting note in ${langName}. Return ONLY markdown with: # title, ## Summary, ## Key Points, ## Decisions, and ## Action Items. Omit empty sections completely; never emit placeholders such as "no decisions". Preserve concrete facts and their uncertainty, deduplicate, never invent, and do not reproduce detailed section notes. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Put something under Decisions only when the source explicitly records agreement or a decision.`
+    ? `Create compact front matter for one meeting note in ${langName}. The first line must be one concrete, topic-specific H1 grounded in the source. Never use generic titles or template placeholders. Use H2 headings named "${labels.summary}", "${labels.keyPoints}", "${labels.decisions}", and "${labels.actions}". Omit empty sections completely; never emit placeholders such as "no decisions". Preserve concrete facts and uncertainty, deduplicate, never invent, and do not reproduce detailed section notes. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Put something under "${labels.decisions}" only when the source explicitly records agreement or a decision. ${recordingContextInstruction(context)}`
     : `Extract compact global facts from these sequential meeting-section notes in ${langName}. Return only concise markdown bullets grouped as Topics, Decisions, and Action Items. Preserve names, dates, numbers, owners, deadlines, and every uncertainty qualifier. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Never invent and do not reproduce detailed prose.`;
   return [
     { role: "system", content: instruction },
@@ -293,6 +332,8 @@ function globalReduceMessages(content: string, langName: string, final: boolean)
 async function synthesizeGlobalNote(
   sectionNotes: string[],
   langName: string,
+  language: string,
+  context: RecordingNoteContext,
   budget: LongFormBudget,
 ): Promise<string> {
   const qualityCheckedChat = async (
@@ -302,7 +343,7 @@ async function synthesizeGlobalNote(
     let lastIssues = "unknown";
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const result = await detailedChat(
-        globalReduceMessages(content, langName, final),
+        globalReduceMessages(content, langName, language, context, final),
         0.1,
         budget.globalOutputTokens,
       );
@@ -359,6 +400,7 @@ export function processAudioRecording(
   audioPath: string,
   noteTitle: string,
   language?: string,
+  context?: RecordingNoteContext,
 ): Promise<AudioProcessingResult> {
   return recordingProcessingGuard.run(audioPath, async () => {
     const runId = globalThis.crypto.randomUUID();
@@ -367,7 +409,7 @@ export function processAudioRecording(
       return { noteTitle, enhancedText: "", success: true };
     }
     try {
-      return await processAudioRecordingOnce(audioPath, noteTitle, language);
+      return await processAudioRecordingOnce(audioPath, noteTitle, language, context);
     } finally {
       await invoke("release_processing_job", { audioPath, runId }).catch(() => {});
     }
@@ -378,6 +420,7 @@ async function processAudioRecordingOnce(
   audioPath: string,
   noteTitle: string,
   language?: string,
+  context?: RecordingNoteContext,
 ): Promise<AudioProcessingResult> {
   const t0 = performance.now();
   const timings: Record<string, number> = {};
@@ -394,6 +437,15 @@ async function processAudioRecordingOnce(
     const lang = language ?? "id";
     const langName = LANGUAGE_NAMES[lang] || "the same language as the transcript";
     manifest = await loadProcessingManifest(audioPath);
+    const resolvedContext = context
+      ?? (manifest?.recordedAt && manifest.timezone
+        ? { recordedAt: manifest.recordedAt, timezone: manifest.timezone }
+        : undefined)
+      ?? inferRecordingNoteContext(audioPath)
+      ?? {
+        recordedAt: manifest?.createdAt ?? new Date().toISOString(),
+        timezone: "UTC",
+      };
     if (!manifest) {
       const now = new Date().toISOString();
       manifest = {
@@ -402,6 +454,8 @@ async function processAudioRecordingOnce(
         audioPath,
         noteTitle,
         language: lang,
+        recordedAt: resolvedContext.recordedAt,
+        timezone: resolvedContext.timezone,
         status: "transcribing",
         sections: [],
         createdAt: now,
@@ -411,6 +465,8 @@ async function processAudioRecordingOnce(
     } else {
       manifest.noteTitle = noteTitle;
       manifest.language = lang;
+      manifest.recordedAt = resolvedContext.recordedAt;
+      manifest.timezone = resolvedContext.timezone;
       repairWithStructuredFallback = shouldRepairWithStructuredFallback(
         manifest.status,
         manifest.savedNoteId,
@@ -541,6 +597,7 @@ async function processAudioRecordingOnce(
     const tEnhance = performance.now();
     let enhancedText: string;
     let reviewSource = markedTranscript;
+    const labels = noteSectionLabels(lang);
     try {
       if (repairWithStructuredFallback) {
         processingDegraded = true;
@@ -603,19 +660,31 @@ async function processAudioRecordingOnce(
           const synthesisInputs = assetContext
             ? [...sectionNotes, `SCREENSHOT CONTEXT (supporting evidence only)\n${assetContext}`]
             : sectionNotes;
-          globalNote = await synthesizeGlobalNote(synthesisInputs, langName, budget);
+          globalNote = await synthesizeGlobalNote(
+            synthesisInputs,
+            langName,
+            lang,
+            resolvedContext,
+            budget,
+          );
         } catch (globalError) {
           processingDegraded = true;
           processingError = `Global synthesis failed: ${String(globalError)}`;
-          globalNote = `# ${noteTitle}\n\n## Summary\n\nLong recording processed into ${sections.length} detailed sections. Global synthesis could not be completed; all section content is preserved below.`;
+          const fallbackSummary = lang === "id"
+            ? `Rekaman panjang diproses menjadi ${sections.length} bagian terperinci. Seluruh detail yang berhasil diekstrak dipertahankan di bawah.`
+            : `The long recording was processed into ${sections.length} detailed parts. All extracted detail is preserved below.`;
+          globalNote = `# ${noteTitle}\n\n## ${labels.summary}\n\n${fallbackSummary}`;
         }
-        enhancedText = composeLongFormNote(globalNote, processedSections);
+        enhancedText = composeLongFormNote(globalNote, processedSections, lang);
       } else {
         const single = await detailedChat(
           [
             {
             role: "system",
             content: `You are an expert meeting-notes writer. Turn this voice-recording transcript into a clean, well-structured, and COMPREHENSIVE note.
+
+RECORDING METADATA:
+${recordingContextInstruction(resolvedContext)}
 
 RULES:
 - ONLY use information actually in the transcript — never invent speakers, names, numbers, or content
@@ -626,25 +695,13 @@ RULES:
 - Ignore transcription-noise filler such as "thank you", "terima kasih", "like and subscribe" — that is leftover noise, not real content
 - Never repeat the same bullet point or sentence. Each Key Point / Decision / Action Item must appear exactly once — if you notice you're about to restate something already written, stop that section instead
 - Decisions and Action Items: max 15 items each, one line per item, ONLY things explicitly stated in the transcript. If you notice you are producing a repeating pattern of similar lines, STOP that section immediately
-- Never append meta commentary, disclaimers, or notes about transcript quality or what you excluded — silently skip noise${screenshotRules}
+- Never append meta commentary, disclaimers, or notes about transcript quality or what you excluded — silently skip noise
+- The first line must be a concise H1 describing the actual main topic. Never use generic titles or placeholders such as [Main Topic], [Tanggal], or [Date].
+- Use the exact H2 headings "${labels.summary}", "${labels.keyPoints}", "${labels.details}", "${labels.decisions}", and "${labels.actions}" where they have real content.
+- Under "${labels.details}", group the discussion beneath descriptive H3 sub-headings based on actual topics, projects, or people. Never use numbered labels such as "Section 1" or "Part 1".
+- Omit sections with no real content. Never write empty sections or text saying that no items were found.${screenshotRules}
 
-FORMAT (omit any section with no real content — never write empty sections or filler):
-# [Main Topic]
-
-## Summary
-[3-5 sentence overview of what was discussed and why]
-
-## Key Points
-- [the main points, one per bullet]
-
-## Details
-[Thorough, organized walkthrough grouped by sub-topic; keep the specifics. Use sub-headings when there are distinct themes.]
-
-## Decisions
-- [decisions actually made, if any]
-
-## Action Items
-- [stated follow-ups — who / what / when, if any]
+The summary should be 3-5 sentences. Keep key points concise, but make the discussion comprehensive enough that every clear fact, status, concern, proposal, number, owner, and deadline remains represented exactly once.
 
 If the transcript is mostly noise or unintelligible, say so briefly and extract only the clear parts.`,
             },
@@ -666,7 +723,7 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
             budget,
           );
           enhancedText = composeLongFormNote(
-            `# ${noteTitle}\n\n## Summary\n\nThe detailed note is preserved below.`,
+            `# ${noteTitle}\n\n## ${labels.summary}\n\n${lang === "id" ? "Detail catatan dipertahankan di bawah." : "The detailed note is preserved below."}`,
             [{
               id: "section-0001",
               index: 0,
@@ -674,6 +731,7 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
               markers: markedTranscript.match(/\[\[ATOK_ASSET_\d+\]\]/g) ?? [],
               isDegraded: recovered.isDegraded,
             }],
+            lang,
           );
           processingDegraded = processingDegraded || recovered.isDegraded;
           if (recovered.isDegraded) {
@@ -721,7 +779,7 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       enhancedText = collapseRepeatedLines(enhancedText);
       mark("review", tReview);
     }
-    enhancedText = stripMetaCommentary(enhancedText);
+    enhancedText = stripPlaceholderSections(stripMetaCommentary(enhancedText));
     if (assets.length > 0) {
       enhancedText = applyAssetMarkers(enhancedText, assets);
     }
@@ -741,12 +799,20 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
     const user = authService.getUser();
     if (!user) throw new Error("User not authenticated");
 
-    const finalTitle = deriveNoteTitle(enhancedText, transcript, noteTitle);
+    const finalTitle = deriveRecordingNoteTitle(
+      enhancedText,
+      transcript,
+      noteTitle,
+      resolvedContext,
+      lang,
+    );
+    enhancedText = replaceDocumentTitle(enhancedText, finalTitle);
     const hasFailedSection = manifest.sections.some((section) => section.status === "failed");
     const needsReview = processingDegraded || hasFailedSection;
 
     manifest.status = "saving";
     await saveProcessingManifest(manifest);
+    let noteWasManuallyEdited = false;
     if (!manifest.savedNoteId) {
       const savedNote = await saveNote(
         finalTitle,
@@ -754,29 +820,56 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
         ["voice-recording", "transcription", ...(needsReview ? ["needs-review"] : [])],
         user.id,
         manifest.jobId,
+        resolvedContext,
       );
       manifest.savedNoteId = savedNote.id;
+      manifest.savedNoteUpdatedAt = savedNote.updated_at;
       // Persist the note id before optional indexing so a crash cannot create a
       // duplicate note when this job resumes.
       await saveProcessingManifest(manifest);
+    } else if (manifest.savedNoteUpdatedAt) {
+      try {
+        const savedNote = await noteService.updateNote(manifest.savedNoteId, user.id, {
+          title: finalTitle,
+          content: enhancedText,
+          tags: ["voice-recording", "transcription", ...(needsReview ? ["needs-review"] : [])],
+          expected_updated_at: manifest.savedNoteUpdatedAt,
+        });
+        manifest.savedNoteUpdatedAt = savedNote.updated_at;
+      } catch (error) {
+        if (!(error instanceof NoteConflictError)) throw error;
+        noteWasManuallyEdited = true;
+        console.warn(JSON.stringify({
+          event: "recording_note_manual_edit_preserved",
+          jobId: manifest.jobId,
+          noteId: manifest.savedNoteId,
+        }));
+      }
     } else {
-      await noteService.updateNote(manifest.savedNoteId, user.id, {
-        title: finalTitle,
-        content: enhancedText,
-        tags: ["voice-recording", "transcription", ...(needsReview ? ["needs-review"] : [])],
-      });
+      // Older manifests do not contain the version that was originally saved.
+      // Updating them blindly could erase a user's later manual edits.
+      noteWasManuallyEdited = true;
+      console.warn(JSON.stringify({
+        event: "recording_note_legacy_version_unknown",
+        jobId: manifest.jobId,
+        noteId: manifest.savedNoteId,
+      }));
     }
 
     // Step 4: Insert to RAG (optional, non-fatal)
-    if (!needsReview) {
+    if (!needsReview && !noteWasManuallyEdited) {
       try {
         await invoke<boolean>("agent_insert_document", {
           userId: user.id,
           text: enhancedText,
           metadata: {
             type: "voice_recording",
-            date: new Date().toISOString().split("T")[0],
+            date: resolvedContext.recordedAt.split("T")[0],
+            recorded_at: resolvedContext.recordedAt,
+            timezone: resolvedContext.timezone,
             source: "whisper_transcription",
+            note_id: manifest.savedNoteId,
+            note_updated_at: manifest.savedNoteUpdatedAt,
           },
         });
       } catch {
@@ -806,7 +899,7 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       timingsMs: timings,
     }));
 
-    return { noteTitle, enhancedText, success: true };
+    return { noteTitle: finalTitle, enhancedText, success: true };
   } catch (error) {
     if (manifest) {
       manifest.status = "failed";
@@ -828,6 +921,7 @@ async function saveNote(
   tags: string[],
   userId?: string,
   jobId?: string,
+  context?: RecordingNoteContext,
 ) {
   if (!userId) {
     const user = authService.getUser();
@@ -839,6 +933,8 @@ async function saveNote(
     content,
     tags,
     color: "#E0F2FE",
+    recorded_at: context?.recordedAt,
+    recording_timezone: context?.timezone,
   };
   return jobId
     ? noteService.createRecordingNote(userId, jobId, request)
@@ -994,53 +1090,4 @@ export function generateNoteTitle(): string {
     second: "2-digit",
   });
   return `Recording - ${timestamp}`;
-}
-
-function deriveNoteTitle(enhancedText: string, transcript: string, fallbackTitle: string): string {
-  const heading = enhancedText.match(/^#\s+(.+)$/m)?.[1];
-  const firstMeaningfulLine = enhancedText
-    .split("\n")
-    .map((line) => cleanTitleCandidate(line))
-    .find((line) => isUsefulTitle(line));
-  const transcriptCandidate = cleanTitleCandidate(transcript).slice(0, 80);
-
-  const title = [heading, firstMeaningfulLine, transcriptCandidate]
-    .map((candidate) => cleanTitleCandidate(candidate ?? ""))
-    .find((candidate) => isUsefulTitle(candidate));
-
-  return title ? capRunawayTitle(title) : fallbackTitle;
-}
-
-// firstMeaningfulLine has no upper bound — if the transcript failed to enhance
-// and came back as one unbroken line, that entire line (easily thousands of
-// chars) would otherwise become the title. This only ever engages on that
-// pathological case; real AI-generated headings are always well under this.
-const MAX_TITLE_LENGTH = 120;
-
-function capRunawayTitle(value: string): string {
-  if (value.length <= MAX_TITLE_LENGTH) return value;
-  const truncated = value.slice(0, MAX_TITLE_LENGTH);
-  const lastSpace = truncated.lastIndexOf(" ");
-  return (lastSpace > 40 ? truncated.slice(0, lastSpace) : truncated).trim();
-}
-
-function cleanTitleCandidate(value: string): string {
-  return value
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^[-*•]\s+/, "")
-    .replace(/\*\*/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isUsefulTitle(value: string): boolean {
-  if (value.length < 6) return false;
-  const lower = value.toLowerCase();
-  return ![
-    "summary",
-    "key points",
-    "details",
-    "transcript",
-    "main topic",
-  ].includes(lower);
 }

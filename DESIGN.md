@@ -8,6 +8,13 @@ This document is the single source of truth for the recording/transcription over
 It records (1) the verified defect inventory, (2) research-grounded decisions for the
 three product goals, and (3) a prioritized, reversible implementation roadmap.
 
+> **macOS-first execution note (2026-07-23):** The implementation has moved beyond parts of
+> the as-built snapshot and defect list below. Use
+> [`tasks/macos-audio-refactor-plan.md`](tasks/macos-audio-refactor-plan.md) for the current
+> macOS modularization sequence, Linux regression gates, rollback boundaries, and qualification
+> criteria. This document still owns the cross-platform product goals until the refactor lands and
+> the final as-built architecture replaces both planning snapshots.
+
 The three product goals (from the owner):
 
 1. **Mic level "just right"** — microphone not too hot/harsh; consistent level across a long meeting.
