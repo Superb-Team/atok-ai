@@ -136,7 +136,47 @@ pub async fn capture_screenshot(assets_dir: String) -> Result<ImportedAsset, Str
         })
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let display_name = "screenshot.png".to_string();
+        let dest = unique_asset_path(Path::new(&assets_dir), &display_name);
+        let dest_c = dest.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            if let Some(parent) = dest_c.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Create assets dir: {}", e))?;
+            }
+
+            // `screencapture` uses the app's native Screen Recording permission,
+            // works without an extra dependency, and `-m` captures the main
+            // display as one deterministic file on multi-monitor Macs.
+            let output = std::process::Command::new("/usr/sbin/screencapture")
+                .args(["-x", "-m", "-t", "png"])
+                .arg(&dest_c)
+                .output()
+                .map_err(|e| format!("Start macOS screenshot capture: {}", e))?;
+
+            if !output.status.success() || !dest_c.is_file() {
+                let _ = std::fs::remove_file(&dest_c);
+                return Err(
+                    "macOS could not capture the screen. Allow Screen Recording for atok-ai in System Settings > Privacy & Security > Screen Recording, then try again."
+                        .to_string(),
+                );
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
+
+        Ok(ImportedAsset {
+            saved_path: dest.to_string_lossy().into_owned(),
+            kind: "image".to_string(),
+            display_name,
+        })
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = assets_dir;
         Err("Screenshot capture is not supported on this OS yet".to_string())

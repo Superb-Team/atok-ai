@@ -231,7 +231,7 @@
 }
 
 .recording-popup-ui button:focus-visible {
-  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.55), 0 0 0 5px rgba(16, 185, 129, 0.18);
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 55%, transparent);
 }
 
 .recording-popup-ui button:disabled {

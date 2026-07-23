@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
-import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import type { AudioDeviceInfo } from '@/services/recording.service';
 import type { RecordingNoteContext } from '@/services/recording-note-metadata';
+import { recorderErrorMessage, type RecorderAction } from '@/services/recorder-feedback';
 
 declare module 'react' {
   interface CSSProperties {
@@ -34,7 +34,8 @@ const RecordingPopupApp: React.FC = () => {
   const [time, setTime] = useState(0);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
-  const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{ message: string; tone: 'error' | 'success' } | null>(null);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragAreaRef = useRef<HTMLDivElement>(null);
   const isRecordingRef = useRef(false);
   const recordingContextRef = useRef<RecordingNoteContext | null>(null);
@@ -43,6 +44,21 @@ const RecordingPopupApp: React.FC = () => {
   // reads the current value instead of a stale closure.
   const [selectedLanguage, setSelectedLanguage] = useState<string>('id');
   const selectedLanguageRef = useRef<string>('id');
+
+  const showFeedback = (message: string, tone: 'error' | 'success', duration = 4500) => {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    setFeedback({ message, tone });
+    feedbackTimerRef.current = setTimeout(() => setFeedback(null), duration);
+  };
+
+  const showRecorderError = (action: RecorderAction, error: unknown) => {
+    console.error(`Recorder ${action} failed:`, error);
+    showFeedback(recorderErrorMessage(action, error), 'error');
+  };
+
+  useEffect(() => () => {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+  }, []);
 
   const [micAvailable, setMicAvailable] = useState(false);
   const [sysAudioAvailable, setSysAudioAvailable] = useState(false);
@@ -183,7 +199,10 @@ const RecordingPopupApp: React.FC = () => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     const resolveTheme = () => {
       const preference = localStorage.getItem('theme') ?? 'system';
-      setIsDarkMode(preference === 'dark' || (preference === 'system' && mq.matches));
+      const dark = preference === 'dark' || (preference === 'system' && mq.matches);
+      setIsDarkMode(dark);
+      document.documentElement.classList.toggle('dark', dark);
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
     };
     const handler = () => resolveTheme();
     resolveTheme();
@@ -192,6 +211,8 @@ const RecordingPopupApp: React.FC = () => {
     return () => {
       mq.removeEventListener('change', handler);
       window.removeEventListener('storage', handler);
+      document.documentElement.classList.remove('dark');
+      document.documentElement.style.colorScheme = '';
     };
   }, []);
 
@@ -209,7 +230,7 @@ const RecordingPopupApp: React.FC = () => {
       setTime(0);
     } catch (err) {
       console.error("Failed to start recording:", err);
-      setAlertMessage(`Failed to start recording: ${err}`);
+      showRecorderError('start', err);
     }
   };
 
@@ -222,7 +243,7 @@ const RecordingPopupApp: React.FC = () => {
       setIsPaused(nextPaused);
     } catch (err) {
       console.error('Failed to change pause state:', err);
-      setAlertMessage(`Failed to ${nextPaused ? 'pause' : 'resume'} recording: ${err}`);
+      showRecorderError(nextPaused ? 'pause' : 'resume', err);
     }
   };
 
@@ -249,10 +270,10 @@ const RecordingPopupApp: React.FC = () => {
 
       await noteAssetService.recordScreenshotAsset(audioPath, asset.saved_path, elapsedMs);
       setShotFlash(true);
+      showFeedback('Screenshot saved', 'success', 1800);
       setTimeout(() => setShotFlash(false), 1200);
     } catch (err) {
-      console.error('Screenshot failed:', err);
-      setAlertMessage(`Screenshot failed: ${err}`);
+      showRecorderError('screenshot', err);
     } finally {
       setIsCapturing(false);
     }
@@ -278,7 +299,7 @@ const RecordingPopupApp: React.FC = () => {
         // idle state (not LIVE) so the user can't "finish" again and reprocess a
         // corrupt take; surface the error instead.
         console.error("Failed to stop recording:", err);
-        setAlertMessage(`Failed to stop recording: ${err}`);
+        showRecorderError('finish', err);
         return;
       } finally {
         setIsFinalizing(false);
@@ -341,7 +362,7 @@ const RecordingPopupApp: React.FC = () => {
         muted: '#a1a1aa',
         subtle: '#71717a',
         accent: '#f5f5f7',
-        shadow: '0 12px 32px rgba(0, 0, 0, 0.32)',
+        shadow: '0 3px 10px rgba(0, 0, 0, 0.24)',
       }
     : {
         surface: 'rgba(250, 250, 250, 0.97)',
@@ -351,7 +372,7 @@ const RecordingPopupApp: React.FC = () => {
         muted: '#52525b',
         subtle: '#8e8e93',
         accent: '#09090b',
-        shadow: '0 12px 32px rgba(0, 0, 0, 0.16)',
+        shadow: '0 3px 10px rgba(0, 0, 0, 0.12)',
       };
 
   const MicIcon = () => (
@@ -373,16 +394,6 @@ const RecordingPopupApp: React.FC = () => {
 
   return (
     <>
-      <ConfirmDialog
-        open={alertMessage !== null}
-        onOpenChange={(open) => { if (!open) setAlertMessage(null); }}
-        title="Recording error"
-        description={alertMessage ?? ""}
-        confirmText="OK"
-        mode="alert"
-        variant="destructive"
-      />
-
       {/* Full window transparent container */}
       <div
         className="recording-popup-ui"
@@ -613,12 +624,16 @@ const RecordingPopupApp: React.FC = () => {
             } as React.CSSProperties}
           >
             <div
+              title={feedback?.message}
               style={{
                 backgroundColor: palette.raised,
-                border: `1px solid ${palette.border}`,
+                border: `1px solid ${
+                  feedback?.tone === 'error' ? 'rgba(239,68,68,0.48)' : palette.border
+                }`,
                 borderRadius: '9999px',
-                padding: '10px 32px',
+                padding: '10px 22px',
                 minWidth: '200px',
+                maxWidth: feedback ? '300px' : '220px',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -627,13 +642,24 @@ const RecordingPopupApp: React.FC = () => {
               <span
                 style={{
                   fontFamily: '"SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", ui-monospace, monospace',
-                  fontSize: '17px',
+                  fontSize: feedback ? '12px' : '17px',
                   fontWeight: 700,
-                  letterSpacing: '0.12em',
-                  color: isRecording && !isPaused ? palette.text : palette.subtle,
+                  letterSpacing: feedback ? '0.02em' : '0.12em',
+                  color:
+                    feedback?.tone === 'error'
+                      ? '#ef4444'
+                      : feedback?.tone === 'success'
+                        ? palette.text
+                        : isRecording && !isPaused
+                          ? palette.text
+                          : palette.subtle,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  maxWidth: '260px',
                 }}
               >
-                {isFinalizing ? 'SAVING...' : formatTime(time)}
+                {feedback?.message ?? (isFinalizing ? 'SAVING...' : formatTime(time))}
               </span>
             </div>
           </div>
