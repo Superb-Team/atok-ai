@@ -92,17 +92,24 @@ function App() {
 
   const handleOpenPopup = async () => {
     try {
+      const existing = await WebviewWindow.getByLabel('recording-popup');
+      if (existing) {
+        await existing.show();
+        await existing.setFocus();
+        return;
+      }
+
       const webview = new WebviewWindow('recording-popup', {
         url: 'recording-popup.html',
         title: 'Atok.ai Recording Studio',
-        width: 960,
-        height: 100,
+        width: 1040,
+        height: 88,
         x: 100,
         y: 50,
-        minWidth: 850,
-        minHeight: 100,
-        maxWidth: 1200,
-        maxHeight: 120,
+        minWidth: 920,
+        minHeight: 88,
+        maxWidth: 1120,
+        maxHeight: 88,
         center: false,
         resizable: false,
         decorations: false,
@@ -110,9 +117,14 @@ function App() {
         skipTaskbar: true,
         transparent: true,
         shadow: false,
+        visible: false,
         dragDropEnabled: false,
       });
 
+      webview.once('tauri://created', async () => {
+        await webview.show();
+        await webview.setFocus();
+      });
       webview.once('tauri://error', (e) => {
         console.error('Failed to create recording popup:', e);
       });

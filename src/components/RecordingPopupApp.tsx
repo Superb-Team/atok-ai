@@ -23,14 +23,16 @@ const LANGUAGES: { code: string; label: string }[] = [
   { code: 'ar', label: 'AR' },
   { code: '', label: 'AUTO' },
 ];
+const MIC_STORAGE_KEY = 'recording-mic-device';
 
 const RecordingPopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [shotFlash, setShotFlash] = useState(false);
   const [time, setTime] = useState(0);
-  const [_isDarkMode, setIsDarkMode] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const dragAreaRef = useRef<HTMLDivElement>(null);
@@ -62,8 +64,12 @@ const RecordingPopupApp: React.FC = () => {
         setSysDisplayName(status.system_audio_display_name ?? 'System Audio');
         setMicDevices(devices);
 
-        const defaultDevice = devices.find((d) => d.is_default);
-        if (defaultDevice) {
+        const savedMic = localStorage.getItem(MIC_STORAGE_KEY);
+        const savedDevice = devices.find((device) => device.raw_name === savedMic);
+        const defaultDevice = devices.find((device) => device.is_default);
+        if (savedDevice) {
+          setSelectedMic(savedDevice.raw_name);
+        } else if (defaultDevice) {
           setSelectedMic(defaultDevice.raw_name);
         } else if (devices.length > 0) {
           setSelectedMic(devices[0].raw_name);
@@ -167,18 +173,26 @@ const RecordingPopupApp: React.FC = () => {
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (isRecording) {
+    if (isRecording && !isPaused) {
       interval = setInterval(() => setTime(prev => prev + 0.01), 10);
     }
     return () => clearInterval(interval);
-  }, [isRecording]);
+  }, [isRecording, isPaused]);
 
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const handler = (e: MediaQueryListEvent) => setIsDarkMode(e.matches);
-    setIsDarkMode(mq.matches);
+    const resolveTheme = () => {
+      const preference = localStorage.getItem('theme') ?? 'system';
+      setIsDarkMode(preference === 'dark' || (preference === 'system' && mq.matches));
+    };
+    const handler = () => resolveTheme();
+    resolveTheme();
     mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
+    window.addEventListener('storage', handler);
+    return () => {
+      mq.removeEventListener('change', handler);
+      window.removeEventListener('storage', handler);
+    };
   }, []);
 
   const handleRecord = async () => {
@@ -191,10 +205,24 @@ const RecordingPopupApp: React.FC = () => {
         timezone: started.timezone,
       };
       setIsRecording(true);
+      setIsPaused(false);
       setTime(0);
     } catch (err) {
       console.error("Failed to start recording:", err);
       setAlertMessage(`Failed to start recording: ${err}`);
+    }
+  };
+
+  const handlePauseToggle = async () => {
+    if (!isRecording || isFinalizing) return;
+    const nextPaused = !isPaused;
+    try {
+      const { recordingService } = await import('@/services/recording.service');
+      await recordingService.setPaused(nextPaused);
+      setIsPaused(nextPaused);
+    } catch (err) {
+      console.error('Failed to change pause state:', err);
+      setAlertMessage(`Failed to ${nextPaused ? 'pause' : 'resume'} recording: ${err}`);
     }
   };
 
@@ -237,6 +265,7 @@ const RecordingPopupApp: React.FC = () => {
 
     if (isRecording) {
       setIsRecording(false);
+      setIsPaused(false);
       setIsFinalizing(true);
       try {
         const { recordingService } = await import('@/services/recording.service');
@@ -303,6 +332,27 @@ const RecordingPopupApp: React.FC = () => {
 
   const selectedMicDevice = micDevices.find((d) => d.raw_name === selectedMic);
   const selectedMicDisplay = selectedMicDevice?.display_name ?? 'Microphone';
+  const palette = isDarkMode
+    ? {
+        surface: 'rgba(20, 20, 22, 0.96)',
+        raised: 'rgba(255, 255, 255, 0.07)',
+        border: 'rgba(255, 255, 255, 0.12)',
+        text: '#f5f5f7',
+        muted: '#a1a1aa',
+        subtle: '#71717a',
+        accent: '#f5f5f7',
+        shadow: '0 12px 32px rgba(0, 0, 0, 0.32)',
+      }
+    : {
+        surface: 'rgba(250, 250, 250, 0.97)',
+        raised: 'rgba(0, 0, 0, 0.055)',
+        border: 'rgba(0, 0, 0, 0.13)',
+        text: '#18181b',
+        muted: '#52525b',
+        subtle: '#8e8e93',
+        accent: '#09090b',
+        shadow: '0 12px 32px rgba(0, 0, 0, 0.16)',
+      };
 
   const MicIcon = () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -355,13 +405,13 @@ const RecordingPopupApp: React.FC = () => {
             width: '100%',
             height: '72px',
             borderRadius: '9999px',
-            backgroundColor: '#111111',
-            border: '1px solid rgba(255,255,255,0.06)',
+            backgroundColor: palette.surface,
+            border: `1px solid ${palette.border}`,
             padding: '0 28px',
             gap: '20px',
             cursor: 'move',
             WebkitAppRegion: 'drag',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+            boxShadow: palette.shadow,
           } as React.CSSProperties}
         >
           {/* === LEFT SECTION: Device badges === */}
@@ -374,30 +424,48 @@ const RecordingPopupApp: React.FC = () => {
               WebkitAppRegion: 'no-drag',
             } as React.CSSProperties}
           >
-            {/* Mic badge — icon only, click opens device picker */}
+            {/* Selected mic stays visible so virtual devices cannot be missed. */}
             <div style={{ position: 'relative' }}>
               <div
                 style={{
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  width: '42px',
+                  minWidth: '42px',
+                  maxWidth: '148px',
                   height: '42px',
+                  padding: '0 11px',
+                  gap: '7px',
                   borderRadius: '10px',
-                  border: micAvailable ? '1px solid rgba(16,185,129,0.25)' : '1px solid rgba(239,68,68,0.25)',
-                  backgroundColor: micAvailable ? 'rgba(16,185,129,0.06)' : 'rgba(239,68,68,0.06)',
-                  color: micAvailable ? '#34d399' : '#f87171',
+                  border: `1px solid ${palette.border}`,
+                  backgroundColor: palette.raised,
+                  color: micAvailable ? palette.text : palette.subtle,
                   cursor: 'pointer',
                   transition: 'background-color 0.15s',
                 }}
                 title={micAvailable ? `🎙️ ${selectedMicDisplay}` : '❌ No Microphone'}
               >
                 <MicIcon />
+                <span
+                  style={{
+                    maxWidth: '96px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                  }}
+                >
+                  {selectedMicDisplay}
+                </span>
               </div>
               {devicesLoaded && micDevices.length >= 1 && (
                 <select
                   value={selectedMic}
-                  onChange={(e) => setSelectedMic(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedMic(e.target.value);
+                    localStorage.setItem(MIC_STORAGE_KEY, e.target.value);
+                  }}
                   disabled={isRecording || isFinalizing}
                   style={{
                     position: 'absolute',
@@ -428,9 +496,9 @@ const RecordingPopupApp: React.FC = () => {
                   width: '42px',
                   height: '42px',
                   borderRadius: '10px',
-                  border: sysAudioAvailable ? '1px solid rgba(16,185,129,0.25)' : '1px solid rgba(239,68,68,0.25)',
-                  backgroundColor: sysAudioAvailable ? 'rgba(16,185,129,0.06)' : 'rgba(239,68,68,0.06)',
-                  color: sysAudioAvailable ? '#34d399' : '#f87171',
+                  border: `1px solid ${palette.border}`,
+                  backgroundColor: palette.raised,
+                  color: sysAudioAvailable ? palette.text : palette.subtle,
                   cursor: 'pointer',
                   transition: 'background-color 0.15s',
                 }}
@@ -468,9 +536,9 @@ const RecordingPopupApp: React.FC = () => {
                   height: '42px',
                   padding: '0 8px',
                   borderRadius: '10px',
-                  border: '1px solid rgba(255,255,255,0.12)',
-                  backgroundColor: 'rgba(255,255,255,0.04)',
-                  color: '#d1d5db',
+                  border: `1px solid ${palette.border}`,
+                  backgroundColor: palette.raised,
+                  color: palette.text,
                   cursor: 'pointer',
                   fontSize: '13px',
                   fontWeight: 700,
@@ -517,20 +585,20 @@ const RecordingPopupApp: React.FC = () => {
                 width: '10px',
                 height: '10px',
                 borderRadius: '50%',
-                backgroundColor: isRecording ? '#ef4444' : isFinalizing ? '#f59e0b' : '#6b7280',
-                boxShadow: isRecording ? '0 0 10px rgba(239,68,68,0.8)' : 'none',
-                animation: isRecording ? 'pulse 1.5s ease-in-out infinite' : 'none',
+                backgroundColor: isRecording && !isPaused ? '#ef4444' : palette.subtle,
+                boxShadow: isRecording && !isPaused ? '0 0 8px rgba(239,68,68,0.45)' : 'none',
+                animation: isRecording && !isPaused ? 'pulse 1.5s ease-in-out infinite' : 'none',
               }}
             />
             <span
               style={{
-                color: '#ffffff',
+                color: palette.text,
                 fontSize: '14px',
                 fontWeight: 700,
                 letterSpacing: '0.18em',
               }}
             >
-              {isRecording ? 'LIVE' : isFinalizing ? 'SAVING' : 'READY'}
+              {isRecording ? (isPaused ? 'PAUSED' : 'LIVE') : isFinalizing ? 'SAVING' : 'READY'}
             </span>
           </div>
 
@@ -546,7 +614,8 @@ const RecordingPopupApp: React.FC = () => {
           >
             <div
               style={{
-                backgroundColor: '#1a1a1a',
+                backgroundColor: palette.raised,
+                border: `1px solid ${palette.border}`,
                 borderRadius: '9999px',
                 padding: '10px 32px',
                 minWidth: '200px',
@@ -561,7 +630,7 @@ const RecordingPopupApp: React.FC = () => {
                   fontSize: '17px',
                   fontWeight: 700,
                   letterSpacing: '0.12em',
-                  color: isRecording ? '#34d399' : '#6b7280',
+                  color: isRecording && !isPaused ? palette.text : palette.subtle,
                 }}
               >
                 {isFinalizing ? 'SAVING...' : formatTime(time)}
@@ -580,8 +649,22 @@ const RecordingPopupApp: React.FC = () => {
             } as React.CSSProperties}
           >
             {isRecording ? (
-              /* While recording: SNAP (screenshot) + FINISH */
+              /* While recording: pause/resume + screenshot + finish */
               <>
+              <button
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handlePauseToggle(); }}
+                onMouseDown={(e) => e.stopPropagation()}
+                title={isPaused ? 'Resume recording' : 'Pause recording'}
+                style={{
+                  fontSize: '13px',
+                  fontWeight: 650,
+                  letterSpacing: '0.08em',
+                  color: palette.text,
+                  cursor: 'pointer',
+                }}
+              >
+                {isPaused ? 'RESUME' : 'PAUSE'}
+              </button>
               <button
                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleScreenshot(); }}
                 onMouseDown={(e) => e.stopPropagation()}
@@ -594,7 +677,7 @@ const RecordingPopupApp: React.FC = () => {
                   fontSize: '14px',
                   fontWeight: 700,
                   letterSpacing: '0.12em',
-                  color: shotFlash ? '#34d399' : isCapturing ? '#6b7280' : '#d1d5db',
+                  color: shotFlash ? palette.text : isCapturing ? palette.subtle : palette.muted,
                   cursor: isCapturing ? 'wait' : 'pointer',
                   transition: 'color 0.15s, opacity 0.15s',
                 }}
@@ -614,7 +697,7 @@ const RecordingPopupApp: React.FC = () => {
                   fontSize: '14px',
                   fontWeight: 700,
                   letterSpacing: '0.12em',
-                  color: '#ffffff',
+                  color: palette.text,
                   cursor: 'pointer',
                   transition: 'opacity 0.15s',
                 }}
@@ -673,7 +756,7 @@ const RecordingPopupApp: React.FC = () => {
                     fontSize: '14px',
                     fontWeight: 700,
                     letterSpacing: '0.12em',
-                    color: '#34d399',
+                    color: palette.accent,
                     cursor: 'pointer',
                     transition: 'opacity 0.15s',
                   }}

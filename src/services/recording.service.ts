@@ -107,6 +107,10 @@ export class RecordingService {
     return this.currentRecordingPath;
   }
 
+  static async setPaused(paused: boolean): Promise<void> {
+    await invoke('set_desktop_recording_paused', { paused });
+  }
+
   /**
    * Stop the current recording
    */

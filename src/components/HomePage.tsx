@@ -6,6 +6,7 @@ import { FileText, Loader2, Search, Star, X } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { installAsyncListener } from "@/services/recording-processing-guard";
 import { shouldRecoverProcessingJob } from "@/services/processing-review-policy";
+import { recordingProcessingErrorMessage } from "@/services/recording-error-message";
 
 interface HomePageProps {
   onNoteClick?: (noteId: number) => void;
@@ -17,6 +18,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   const [error, setError] = useState("");
   const [processingNotes, setProcessingNotes] = useState<Set<string>>(new Set());
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [recordingNotice, setRecordingNotice] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [pendingFavorites, setPendingFavorites] = useState<Set<number>>(new Set());
@@ -184,6 +186,12 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       if (!result.success) {
         throw new Error(result.error || 'Processing failed');
       }
+      if (result.outcome === "no_speech") {
+        setRecordingNotice(
+          result.message ??
+            "The recording was saved, but no speech was detected. Check the selected microphone and try again.",
+        );
+      }
 
       setProcessingNotes(prev => {
         const next = new Set(prev);
@@ -194,7 +202,8 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
       await loadNotes();
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.error("Recording processing failed:", err);
+      const errorMessage = recordingProcessingErrorMessage(err);
       setAlertMessage(`Recording processing failed:\n${errorMessage}`);
 
       setProcessingNotes(prev => {
@@ -256,6 +265,17 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         confirmText="OK"
         mode="alert"
         variant="destructive"
+      />
+      <ConfirmDialog
+        open={recordingNotice !== null}
+        onOpenChange={(open) => {
+          if (!open) setRecordingNotice(null);
+        }}
+        title="No speech detected"
+        description={recordingNotice ?? ""}
+        confirmText="OK"
+        mode="alert"
+        variant="default"
       />
       <div className="flex h-screen flex-1 flex-col overflow-hidden bg-background">
         <div className="flex-1 overflow-y-auto px-10 pb-16 pt-9">

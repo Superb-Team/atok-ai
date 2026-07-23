@@ -193,27 +193,28 @@ export default function AIChatInterface() {
         <Conversation className="h-full">
           <ConversationContent className="h-full flex flex-col">
             {messages.length === 0 ? (
-              /* Empty State - Centered Search */
-              <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 pb-24">
-                <div className="text-center mb-10">
-                  <img src="/logo-atok.png" alt="Atok.ai" className="mx-auto h-14 w-14 rounded-xl" />
-                  <h1 className="mt-6 font-display text-3xl font-semibold tracking-tight text-foreground">
-                    Ask your workspace
-                  </h1>
-                  <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted-foreground">
-                    The agent reads your notes and tasks, so ask about anything you have captured.
-                  </p>
-                </div>
+              <div className="flex-1 overflow-y-auto px-8 pb-16 pt-10 sm:px-12">
+                <div className="mx-auto w-full max-w-5xl">
+                  <div className="mb-14 flex items-start justify-between gap-8 border-b border-border pb-8">
+                    <div>
+                      <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted-foreground">
+                        Atok intelligence
+                      </p>
+                      <h1 className="mt-3 max-w-xl font-display text-[2.6rem] font-semibold leading-[1.05] tracking-[-.045em] text-foreground">
+                        Find the signal in everything you captured.
+                      </h1>
+                    </div>
+                    <img src="/logo-atok.png" alt="Atok.ai" className="mt-1 h-10 w-10 rounded-lg opacity-60" />
+                  </div>
 
-                {/* Centered Search Input */}
-                <div className="w-full max-w-3xl">
-                  <PromptInput onSubmit={handleSubmit} className="max-w-none shadow-lg">
+                  <div className="grid gap-8 lg:grid-cols-[1fr_250px]">
+                    <PromptInput onSubmit={handleSubmit} className="max-w-none self-start shadow-sm">
                     <PromptInputTextarea
                       value={input}
                       onChange={(e) => setInput(e.currentTarget.value)}
-                      placeholder="Ask about your notes or tasks"
-                      minHeight={56}
-                      maxHeight={200}
+                      placeholder="Ask across notes, meetings, and tasks…"
+                      minHeight={132}
+                      maxHeight={260}
                       className="resize-none text-base"
                     />
 
@@ -223,19 +224,27 @@ export default function AIChatInterface() {
                         status={status}
                       />
                     </PromptInputToolbar>
-                  </PromptInput>
+                    </PromptInput>
 
-                  <div className="mt-4 flex flex-wrap justify-center gap-2">
-                    {SUGGESTIONS.map((suggestion) => (
-                      <button
-                        key={suggestion}
-                        type="button"
-                        onClick={() => setInput(suggestion)}
-                        className="rounded-full border border-border bg-card px-3.5 py-1.5 text-[13px] text-muted-foreground transition-colors hover:border-ring/40 hover:text-foreground active:scale-[0.98]"
-                      >
-                        {suggestion}
-                      </button>
-                    ))}
+                    <div className="border-l border-border pl-6">
+                      <p className="mb-3 text-xs font-semibold text-foreground">Start with a question</p>
+                      <div className="divide-y divide-border border-y border-border">
+                        {SUGGESTIONS.map((suggestion, index) => (
+                          <button
+                            key={suggestion}
+                            type="button"
+                            onClick={() => setInput(suggestion)}
+                            className="group flex w-full items-start gap-3 py-3 text-left text-[13px] leading-5 text-muted-foreground transition-colors hover:text-foreground"
+                          >
+                            <span className="font-mono text-[10px] text-muted-foreground/50">0{index + 1}</span>
+                            <span>{suggestion}</span>
+                          </button>
+                        ))}
+                      </div>
+                      <p className="mt-4 text-xs leading-5 text-muted-foreground">
+                        Answers are grounded in your private workspace.
+                      </p>
+                    </div>
                   </div>
                 </div>
               </div>

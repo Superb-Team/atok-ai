@@ -2,6 +2,7 @@ use std::path::Path;
 
 swift_rs::swift!(fn sc_start_system_audio(path: *const u8, path_len: u32) -> bool);
 swift_rs::swift!(fn sc_stop_system_audio() -> bool);
+swift_rs::swift!(fn sc_set_system_audio_paused(paused: bool) -> bool);
 
 pub struct MacSystemCapture {
     active: bool,
@@ -28,6 +29,14 @@ impl MacSystemCapture {
 
     pub fn finish(mut self) -> Result<(), String> {
         self.stop_checked()
+    }
+
+    pub fn set_paused(paused: bool) -> Result<(), String> {
+        if unsafe { sc_set_system_audio_paused(paused) } {
+            Ok(())
+        } else {
+            Err("No active ScreenCaptureKit session".to_string())
+        }
     }
 
     fn stop_checked(&mut self) -> Result<(), String> {

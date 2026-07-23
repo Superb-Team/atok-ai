@@ -12,8 +12,8 @@ const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
 ];
 
 /* Fixed swatches for the theme previews; they must not follow the app theme. */
-const PAPER = { bg: 'oklch(0.9745 0.0048 80)', line: 'oklch(0.88 0.008 72)', accent: 'oklch(0.56 0.125 45)' };
-const INK = { bg: 'oklch(0.2110 0.0095 55)', line: 'oklch(0.32 0.0105 55)', accent: 'oklch(0.705 0.128 48)' };
+const PAPER = { bg: 'oklch(0.985 0 0)', line: 'oklch(0.84 0 0)', accent: 'oklch(0.16 0 0)' };
+const INK = { bg: 'oklch(0.115 0 0)', line: 'oklch(0.30 0 0)', accent: 'oklch(0.92 0 0)' };
 
 function ThemeMiniPreview({ variant }: { variant: ThemePreference }) {
   const half = variant === 'system';
@@ -161,7 +161,7 @@ const SettingsPage: React.FC = () => {
           description="The account this workspace belongs to."
         >
           <div className="overflow-hidden rounded-xl border border-border bg-card">
-            <div className="flex items-center gap-4 border-b border-border bg-gradient-to-r from-primary/8 to-transparent px-5 py-4">
+            <div className="flex items-center gap-4 border-b border-border bg-muted/40 px-5 py-4">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/12 font-display text-lg font-semibold text-primary">
                 {(userInfo.full_name || userInfo.username).charAt(0).toUpperCase()}
               </div>

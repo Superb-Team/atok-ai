@@ -708,7 +708,10 @@ fn read_transcript_sidecar(audio_path: &str) -> Result<Option<String>, String> {
     }
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("Read transcript sidecar: {}", error))?;
-    Ok((!text.trim().is_empty()).then_some(text))
+    // The existence of an empty sidecar is meaningful: Whisper successfully
+    // processed the take but found no speech. Return it so the canonical pass
+    // does not upload the same silent take a second time.
+    Ok(Some(text))
 }
 
 fn persist_transcript_sidecar(audio_path: &str, transcript: &str) -> Result<(), String> {
@@ -1243,9 +1246,6 @@ pub async fn transcribe_chunks_live(
     // is lost at the hard cut; stitch_overlapping removes the resulting duplicate).
     let cleaned: Vec<String> = transcripts.iter().map(|t| clean_transcript(t)).collect();
     let combined = stitch_overlapping(&cleaned);
-    if combined.is_empty() {
-        return;
-    }
 
     match persist_transcript_file(&transcript_path, &combined) {
         Ok(()) => eprintln!(
@@ -1362,16 +1362,13 @@ async fn transcribe_chunk_with_client(
         .await
         .map_err(|e| format!("Failed to parse transcription response: {}", e))?;
 
-    let transcript = data["text"].as_str().unwrap_or("");
-
-    if transcript.is_empty() {
-        return Err(format!(
-            "Transcription returned empty. Response: {:?}",
-            data
-        ));
-    }
-
-    Ok(transcript.to_string())
+    // An empty transcript is a valid provider result for silence, music, or
+    // background noise. The caller decides how to present that outcome; only
+    // malformed responses are technical failures.
+    data["text"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Transcription response did not contain a text field".to_string())
 }
 
 #[tauri::command]
@@ -1774,6 +1771,17 @@ mod tests {
             Some("transkrip penting")
         );
         assert!(transcript_sidecar_path(&audio_path).is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_transcript_sidecar_is_a_cached_no_speech_result() {
+        let dir = std::env::temp_dir().join(format!("atok-silence-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio_path = dir.join("silent.mp3").to_string_lossy().to_string();
+
+        persist_transcript_sidecar(&audio_path, "").unwrap();
+        assert_eq!(read_transcript_sidecar(&audio_path).unwrap(), Some(String::new()));
         let _ = std::fs::remove_dir_all(dir);
     }
 

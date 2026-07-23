@@ -34,6 +34,7 @@ const PUMP_SLEEP_MS: u64 = 5;
 
 pub struct DesktopAudioRecorder {
     is_recording: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>,
     recording_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     completion: Arc<Mutex<Option<CompletionReceiver>>>,
 }
@@ -42,6 +43,7 @@ impl DesktopAudioRecorder {
     pub fn new() -> Self {
         Self {
             is_recording: Arc::new(AtomicBool::new(false)),
+            is_paused: Arc::new(AtomicBool::new(false)),
             recording_thread: Arc::new(Mutex::new(None)),
             completion: Arc::new(Mutex::new(None)),
         }
@@ -57,8 +59,10 @@ impl DesktopAudioRecorder {
         if self.is_recording.swap(true, Ordering::SeqCst) {
             return Err("Already recording".to_string());
         }
+        self.is_paused.store(false, Ordering::SeqCst);
 
         let is_recording = Arc::clone(&self.is_recording);
+        let is_paused = Arc::clone(&self.is_paused);
         let (tx, rx) = oneshot::channel();
         *self
             .completion
@@ -66,7 +70,14 @@ impl DesktopAudioRecorder {
             .map_err(|e| format!("Lock poisoned: {}", e))? = Some(rx);
 
         let thread_handle = std::thread::spawn(move || {
-            let result = Self::record(output_path, is_recording, aec_enabled, mic_device, chunk_tx);
+            let result = Self::record(
+                output_path,
+                is_recording,
+                is_paused,
+                aec_enabled,
+                mic_device,
+                chunk_tx,
+            );
             if let Err(ref e) = result {
                 eprintln!("Recording error: {}", e);
             }
@@ -113,9 +124,20 @@ impl DesktopAudioRecorder {
         }
     }
 
+    pub fn set_paused(&self, paused: bool) -> Result<(), String> {
+        if !self.is_recording.load(Ordering::SeqCst) {
+            return Err("No active recording".to_string());
+        }
+        #[cfg(target_os = "macos")]
+        crate::audio::macos_bridge::MacSystemCapture::set_paused(paused)?;
+        self.is_paused.store(paused, Ordering::SeqCst);
+        Ok(())
+    }
+
     fn record(
         output_path: PathBuf,
         is_recording: Arc<AtomicBool>,
+        is_paused: Arc<AtomicBool>,
         aec_enabled: bool,
         mic_device: Option<String>,
         chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
@@ -136,7 +158,14 @@ impl DesktopAudioRecorder {
 
         #[cfg(target_os = "linux")]
         {
-            match Self::record_linux(&mp3_path, &is_recording, aec_enabled, mic_name, chunk_tx) {
+            match Self::record_linux(
+                &mp3_path,
+                &is_recording,
+                &is_paused,
+                aec_enabled,
+                mic_name,
+                chunk_tx,
+            ) {
                 Ok(()) => return Ok(mp3_path),
                 Err(e) => eprintln!("Linux recording failed: {}, falling back", e),
             }
@@ -147,6 +176,7 @@ impl DesktopAudioRecorder {
             crate::audio::platform::macos::record(
                 &mp3_path,
                 &is_recording,
+                &is_paused,
                 aec_enabled,
                 mic_name,
                 chunk_tx,
@@ -170,6 +200,7 @@ impl DesktopAudioRecorder {
     fn record_linux(
         mp3_path: &Path,
         is_recording: &Arc<AtomicBool>,
+        is_paused: &Arc<AtomicBool>,
         aec_enabled: bool,
         mic_name: Option<&str>,
         chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
@@ -232,6 +263,7 @@ impl DesktopAudioRecorder {
         Self::record_linux_chunked(
             mp3_path,
             is_recording,
+            is_paused,
             &mic_device,
             &mic_cfg,
             sample_rate,
@@ -255,6 +287,7 @@ impl DesktopAudioRecorder {
         channels: u32,
         device: Option<String>,
         is_recording: &Arc<AtomicBool>,
+        is_paused: &Arc<AtomicBool>,
     ) -> Result<(), String> {
         use std::io::Write;
 
@@ -288,6 +321,9 @@ impl DesktopAudioRecorder {
                 eprintln!("[recorder] pulse read error: {}", e);
                 break;
             }
+            if is_paused.load(Ordering::SeqCst) {
+                continue;
+            }
             file.write_all(&buf)
                 .map_err(|e| format!("Write sys: {}", e))?;
             bytes_written += buf.len() as u64;
@@ -317,6 +353,7 @@ impl DesktopAudioRecorder {
         mic_device: cpal::Device,
         mic_cfg: cpal::SupportedStreamConfig,
         is_recording: Arc<AtomicBool>,
+        is_paused: Arc<AtomicBool>,
     ) -> Result<(), String> {
         use cpal::traits::{DeviceTrait, StreamTrait};
 
@@ -333,12 +370,16 @@ impl DesktopAudioRecorder {
         let overruns = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         let cb_overruns = overruns.clone();
+        let cb_paused = is_paused.clone();
         let mic_stream = {
             let mut scratch: Vec<u8> = Vec::with_capacity(PUMP_CHUNK_BYTES * 4);
             mic_device
                 .build_input_stream(
                     &mic_cfg.config(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        if cb_paused.load(Ordering::Relaxed) {
+                            return;
+                        }
                         scratch.clear();
                         for &s in data {
                             let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
@@ -900,6 +941,7 @@ impl DesktopAudioRecorder {
     fn record_linux_chunked(
         mp3_path: &Path,
         is_recording: &Arc<AtomicBool>,
+        is_paused: &Arc<AtomicBool>,
         mic_device: &cpal::Device,
         mic_cfg: &cpal::SupportedStreamConfig,
         sample_rate: u32,
@@ -928,21 +970,38 @@ impl DesktopAudioRecorder {
         let producer_done = Arc::new(AtomicBool::new(false));
 
         let sys_is_rec = is_recording.clone();
+        let sys_is_paused = is_paused.clone();
         let sys_dir = session_dir.clone();
         let sys_thread = std::thread::Builder::new()
             .name("pulse-sys".into())
             .spawn(move || {
-                Self::pulse_record_chunked(&sys_dir, sample_rate, channels, sys_device, &sys_is_rec)
+                Self::pulse_record_chunked(
+                    &sys_dir,
+                    sample_rate,
+                    channels,
+                    sys_device,
+                    &sys_is_rec,
+                    &sys_is_paused,
+                )
             })
             .map_err(|e| format!("Failed to spawn pulse capture: {}", e))?;
 
         let mic_is_rec = is_recording.clone();
+        let mic_is_paused = is_paused.clone();
         let mic_dir = session_dir.clone();
         let mic_device_c = mic_device.clone();
         let mic_cfg_c = mic_cfg.clone();
         let mic_thread = std::thread::Builder::new()
             .name("mic-file".into())
-            .spawn(move || Self::cpal_record_chunked(mic_dir, mic_device_c, mic_cfg_c, mic_is_rec))
+            .spawn(move || {
+                Self::cpal_record_chunked(
+                    mic_dir,
+                    mic_device_c,
+                    mic_cfg_c,
+                    mic_is_rec,
+                    mic_is_paused,
+                )
+            })
             .map_err(|e| format!("Failed to spawn mic: {}", e))?;
 
         let worker_done = producer_done.clone();

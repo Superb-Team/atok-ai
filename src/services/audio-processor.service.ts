@@ -393,6 +393,8 @@ export interface AudioProcessingResult {
   noteTitle: string;
   enhancedText: string;
   success: boolean;
+  outcome?: "note_created" | "no_speech" | "already_processing";
+  message?: string;
   error?: string;
 }
 
@@ -406,7 +408,7 @@ export function processAudioRecording(
     const runId = globalThis.crypto.randomUUID();
     const claimed = await invoke<boolean>("claim_processing_job", { audioPath, runId });
     if (!claimed) {
-      return { noteTitle, enhancedText: "", success: true };
+      return { noteTitle, enhancedText: "", success: true, outcome: "already_processing" };
     }
     try {
       return await processAudioRecordingOnce(audioPath, noteTitle, language, context);
@@ -520,7 +522,28 @@ async function processAudioRecordingOnce(
         ? manifest.transcript
         : await invoke<string>("transcribe_audio", { audioPath, language: lang });
       if (!transcript.trim()) {
-        throw new Error("Transcription returned no usable text");
+        // Silence/background noise is a successful transcription outcome, not
+        // an infrastructure failure. Keep the recording, finish the manifest,
+        // and skip note generation so no empty or scary "failure note" appears.
+        await assetsPromise;
+        manifest.transcript = "";
+        manifest.status = "complete";
+        manifest.error = undefined;
+        manifest.timingsMs = {
+          ...timings,
+          transcribe: Math.round(performance.now() - tTranscribe),
+          total: Math.round(performance.now() - t0),
+        };
+        await saveProcessingManifest(manifest);
+        return {
+          noteTitle,
+          enhancedText: "",
+          success: true,
+          outcome: "no_speech",
+          message: lang === "id"
+            ? "Rekaman tersimpan, tetapi tidak ada percakapan yang terdeteksi. Periksa microphone yang dipilih lalu coba lagi."
+            : "The recording was saved, but no speech was detected. Check the selected microphone and try again.",
+        };
       }
       manifest.transcript = transcript;
       manifest.status = repairWithStructuredFallback ? "partial" : "extracting";
@@ -899,7 +922,7 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
       timingsMs: timings,
     }));
 
-    return { noteTitle: finalTitle, enhancedText, success: true };
+    return { noteTitle: finalTitle, enhancedText, success: true, outcome: "note_created" };
   } catch (error) {
     if (manifest) {
       manifest.status = "failed";

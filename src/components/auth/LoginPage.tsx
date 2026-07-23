@@ -36,49 +36,50 @@ export default function LoginPage({ onLoginSuccess, onSwitchToSignup }: LoginPag
 
   return (
     <div className="flex min-h-screen bg-background">
-      {/* Brand panel: always ink-dark, independent of the app theme. */}
-      <div className="relative hidden flex-col justify-between overflow-hidden bg-[oklch(0.19_0.0095_55)] p-12 lg:flex lg:w-[44%]">
+      <div className="relative hidden flex-col justify-between overflow-hidden border-r border-white/10 bg-black p-14 lg:flex lg:w-[46%]">
         <div
           aria-hidden
           className="pointer-events-none absolute inset-0 opacity-[0.05]"
           style={{
-            backgroundImage: `radial-gradient(circle at 1px 1px, white 1px, transparent 0)`,
-            backgroundSize: "28px 28px",
+            backgroundImage: `linear-gradient(rgba(255,255,255,.55) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.55) 1px, transparent 1px)`,
+            backgroundSize: "64px 64px",
           }}
         />
 
         <div className="relative flex items-center gap-3">
-          <img src="/logo-atok.png" alt="Atok.ai" className="h-9 w-9 rounded-lg" />
+          <img src="/logo-atok.png" alt="Atok.ai" className="h-8 w-8 rounded-md invert" />
           <span className="font-display text-lg font-semibold text-[oklch(0.93_0.0075_78)]">
             Atok.ai
           </span>
         </div>
 
         <div className="relative">
-          <h2 className="font-display text-[2.6rem] font-semibold leading-[1.12] tracking-tight text-[oklch(0.93_0.0075_78)]">
-            Speak it once.
+          <p className="mb-5 font-mono text-[10px] uppercase tracking-[.24em] text-white/40">Voice intelligence, organized</p>
+          <h2 className="font-display text-[3.15rem] font-medium leading-[1.02] tracking-[-.055em] text-white">
+            Capture the thought.
             <br />
-            Keep it <span className="text-[oklch(0.7050_0.1280_48)]">forever.</span>
+            Keep the context.
           </h2>
-          <p className="mt-5 max-w-sm text-[15px] leading-7 text-[oklch(0.72_0.009_65)]">
-            Atok records, transcribes, and turns your voice into notes you can search, tag, and ask questions about.
+          <p className="mt-7 max-w-sm text-[15px] leading-7 text-white/50">
+            Record conversations, shape them into precise notes, and find every decision when it matters.
           </p>
         </div>
 
         <p className="relative font-mono text-xs text-[oklch(0.55_0.009_60)]">
-          © 2025 Atok.ai
+          ATOK / 2026
         </p>
       </div>
 
       {/* Form */}
       <div className="flex flex-1 items-center justify-center p-8">
-        <div className="w-full max-w-sm">
+        <div className="w-full max-w-[380px]">
           <div className="mb-10 flex items-center gap-3 lg:hidden">
             <img src="/logo-atok.png" alt="Atok.ai" className="h-9 w-9 rounded-lg" />
             <span className="font-display text-lg font-semibold text-foreground">Atok.ai</span>
           </div>
 
-          <h1 className="font-display text-[1.7rem] font-semibold tracking-tight text-foreground">
+          <p className="mb-4 font-mono text-[10px] uppercase tracking-[.2em] text-muted-foreground">Secure workspace</p>
+          <h1 className="font-display text-[2rem] font-semibold tracking-[-.04em] text-foreground">
             Welcome back
           </h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
