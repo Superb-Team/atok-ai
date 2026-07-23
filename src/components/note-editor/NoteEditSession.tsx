@@ -2,8 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { noteAssetService } from "@/services/note-asset.service";
 import {
   applyMarkdownAction,
+  insertMarkdownBlock,
   insertMarkdownAtSelection,
   type MarkdownAction,
+  type MarkdownBlockCommand,
+  type SlashCommandContext,
 } from "@/lib/markdown-editing";
 import type { Note } from "@/types/note.types";
 import { NoteEditor } from "./NoteEditor";
@@ -59,6 +62,22 @@ export function NoteEditSession({
     restoreSelection(edit.selectionStart, edit.selectionEnd);
   };
 
+  const handleInsertBlock = (
+    command: MarkdownBlockCommand,
+    slashContext?: SlashCommandContext | null,
+  ) => {
+    const textarea = textareaRef.current;
+    const edit = insertMarkdownBlock(
+      editor.draft.content,
+      textarea?.selectionStart ?? editor.draft.content.length,
+      textarea?.selectionEnd ?? editor.draft.content.length,
+      command,
+      slashContext,
+    );
+    editor.setContent(edit.value);
+    restoreSelection(edit.selectionStart, edit.selectionEnd);
+  };
+
   const handleAttach = async () => {
     if (attaching) return;
     try {
@@ -99,6 +118,7 @@ export function NoteEditSession({
       onContentChange={editor.setContent}
       onTagsChange={editor.setTags}
       onFormat={handleFormat}
+      onInsertBlock={handleInsertBlock}
       onAttach={() => void handleAttach()}
       onSave={() => void editor.saveNow()}
       onDone={() => void finish()}

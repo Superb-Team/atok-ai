@@ -1,6 +1,8 @@
 export type MarkdownAction =
   | "bold"
   | "italic"
+  | "strikethrough"
+  | "inlineCode"
   | "heading2"
   | "heading3"
   | "bullet"
@@ -18,6 +20,8 @@ export interface MarkdownEdit {
 const INLINE_WRAPPERS: Partial<Record<MarkdownAction, [string, string, string]>> = {
   bold: ["**", "**", "bold text"],
   italic: ["*", "*", "italic text"],
+  strikethrough: ["~~", "~~", "strikethrough"],
+  inlineCode: ["`", "`", "code"],
   link: ["[", "](https://)", "link text"],
 };
 
@@ -88,6 +92,96 @@ export function insertMarkdownAtSelection(
 
   return {
     value: `${before}${inserted}${after}`,
+    selectionStart: cursor,
+    selectionEnd: cursor,
+  };
+}
+
+export type MarkdownBlockCommand =
+  | "heading2"
+  | "heading3"
+  | "bullet"
+  | "ordered"
+  | "checklist"
+  | "quote"
+  | "codeBlock"
+  | "table"
+  | "divider"
+  | "callout";
+
+export interface SlashCommandContext {
+  start: number;
+  end: number;
+  query: string;
+}
+
+const BLOCK_TEMPLATES: Record<MarkdownBlockCommand, { text: string; select?: string }> = {
+  heading2: { text: "## Section heading", select: "Section heading" },
+  heading3: { text: "### Subheading", select: "Subheading" },
+  bullet: { text: "- List item", select: "List item" },
+  ordered: { text: "1. List item", select: "List item" },
+  checklist: { text: "- [ ] Task", select: "Task" },
+  quote: { text: "> Quote", select: "Quote" },
+  codeBlock: { text: "```\ncode\n```", select: "code" },
+  table: {
+    text: "| Column 1 | Column 2 |\n| --- | --- |\n| Value 1 | Value 2 |",
+    select: "Column 1",
+  },
+  divider: { text: "---" },
+  callout: { text: "> **Note**\n> Add important context here.", select: "Add important context here." },
+};
+
+export function getSlashCommandContext(
+  value: string,
+  cursor: number,
+): SlashCommandContext | null {
+  const safeCursor = Math.max(0, Math.min(cursor, value.length));
+  const lineStart = value.lastIndexOf("\n", Math.max(0, safeCursor - 1)) + 1;
+  const beforeCursor = value.slice(lineStart, safeCursor);
+  const match = beforeCursor.match(/^\s*\/([a-z0-9-]*)$/i);
+  if (!match) return null;
+  return {
+    start: lineStart,
+    end: safeCursor,
+    query: match[1].toLowerCase(),
+  };
+}
+
+export function insertMarkdownBlock(
+  value: string,
+  selectionStart: number,
+  selectionEnd: number,
+  command: MarkdownBlockCommand,
+  slashContext?: SlashCommandContext | null,
+): MarkdownEdit {
+  const template = BLOCK_TEMPLATES[command];
+  const edit = slashContext
+    ? replaceRange(value, slashContext.start, slashContext.end, template.text)
+    : insertMarkdownAtSelection(value, selectionStart, selectionEnd, template.text);
+  if (!template.select) return edit;
+
+  const insertedStart = edit.value.lastIndexOf(
+    template.text,
+    Math.max(0, edit.selectionStart),
+  );
+  const selectionOffset = template.text.indexOf(template.select);
+  if (insertedStart < 0 || selectionOffset < 0) return edit;
+  return {
+    ...edit,
+    selectionStart: insertedStart + selectionOffset,
+    selectionEnd: insertedStart + selectionOffset + template.select.length,
+  };
+}
+
+function replaceRange(
+  value: string,
+  start: number,
+  end: number,
+  replacement: string,
+): MarkdownEdit {
+  const cursor = start + replacement.length;
+  return {
+    value: `${value.slice(0, start)}${replacement}${value.slice(end)}`,
     selectionStart: cursor,
     selectionEnd: cursor,
   };
