@@ -23,7 +23,9 @@ export function shouldRecoverProcessingJob(
   aiPipelineVersion?: number,
   upgradingAi = false,
 ): boolean {
-  if (status === "complete") return false;
+  // Both outcomes are terminal. A failed job needs an explicit user retry;
+  // reopening the app must never replay it and show the same error forever.
+  if (status === "complete" || status === "failed") return false;
   if (repairingFallback || upgradingAi) return true;
   if (
     status === "partial" &&
@@ -31,7 +33,7 @@ export function shouldRecoverProcessingJob(
     (aiPipelineVersion ?? 0) < CURRENT_AI_PIPELINE_VERSION
   ) return true;
   if (status === "partial") return (fallbackVersion ?? 0) < 1;
-  return true;
+  return ["transcribing", "extracting", "synthesizing", "saving"].includes(status);
 }
 
 export function shouldUpgradeExtractiveFallback(

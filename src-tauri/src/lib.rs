@@ -114,6 +114,12 @@ async fn stop_desktop_recording() -> Result<String, String> {
     }
 }
 
+#[tauri::command]
+async fn set_desktop_recording_paused(paused: bool) -> Result<(), String> {
+    let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
+    recorder.set_paused(paused)
+}
+
 // ==================== Cross-window settings (in-memory) ====================
 
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -256,6 +262,7 @@ pub fn run() {
             processing_jobs::release_processing_job,
             start_desktop_recording,
             stop_desktop_recording,
+            set_desktop_recording_paused,
             get_aec_enabled,
             set_aec_enabled,
             notify_recording_started,

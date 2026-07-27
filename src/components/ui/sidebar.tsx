@@ -37,22 +37,22 @@ function SidebarButton({
         "outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
         "active:scale-[0.985]",
         active
-          ? "bg-gradient-to-r from-primary/14 to-primary/5 font-semibold text-foreground"
-          : "font-medium text-sidebar-foreground/70 hover:bg-sidebar-accent/70 hover:text-sidebar-accent-foreground"
+          ? "bg-sidebar-foreground font-semibold text-sidebar"
+          : "font-medium text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
       )}
     >
       <span
         aria-hidden
         className={cn(
-          "absolute left-0 top-1/2 h-[18px] w-[3px] -translate-y-1/2 rounded-full bg-primary transition-all duration-200",
-          active ? "opacity-100" : "opacity-0 scale-y-50"
+          "absolute left-0 top-1/2 h-[14px] w-px -translate-y-1/2 bg-sidebar transition-all duration-200",
+          active ? "opacity-40" : "opacity-0 scale-y-50"
         )}
       />
       <Icon
         className={cn(
           "h-[17px] w-[17px] shrink-0 transition-colors duration-150",
           active
-            ? "text-primary"
+            ? "text-sidebar"
             : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground/80"
         )}
         strokeWidth={active ? 2 : 1.75}
@@ -66,21 +66,19 @@ export function AppSidebar({ items, bottomItems, activeKey, footer }: AppSidebar
   return (
     <nav
       aria-label="Main"
-      className="flex h-full w-[224px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar"
+      className="flex h-full w-[232px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar"
     >
       <div className="flex items-center gap-2.5 px-4 pb-5 pt-5">
         <img
           src="/logo-atok.png"
           alt=""
-          className="h-8 w-8 shrink-0 rounded-lg object-contain"
+          className="h-7 w-7 shrink-0 rounded-md object-contain"
         />
         <div className="min-w-0 leading-none">
           <p className="font-display text-[15px] font-semibold tracking-tight text-sidebar-foreground">
             Atok.ai
           </p>
-          <p className="mt-1 font-mono text-[10px] tracking-wide text-sidebar-foreground/45">
-            workspace
-          </p>
+          <p className="mt-1 text-[10px] tracking-wide text-sidebar-foreground/40">Personal workspace</p>
         </div>
       </div>
 

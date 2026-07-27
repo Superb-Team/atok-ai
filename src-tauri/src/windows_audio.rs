@@ -9,6 +9,7 @@ use windows::{core::*, Win32::Media::Audio::*, Win32::System::Com::*};
 
 pub struct DesktopAudioRecorder {
     is_recording: Arc<Mutex<bool>>,
+    is_paused: Arc<Mutex<bool>>,
     recording_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
@@ -16,6 +17,7 @@ impl DesktopAudioRecorder {
     pub fn new() -> Self {
         Self {
             is_recording: Arc::new(Mutex::new(false)),
+            is_paused: Arc::new(Mutex::new(false)),
             recording_thread: Arc::new(Mutex::new(None)),
         }
     }
@@ -36,11 +38,15 @@ impl DesktopAudioRecorder {
         }
         *recording = true;
         drop(recording);
+        *self.is_paused.lock().map_err(|e| e.to_string())? = false;
 
         let is_recording = Arc::clone(&self.is_recording);
+        let is_paused = Arc::clone(&self.is_paused);
         let thread_handle = std::thread::spawn(move || {
             let flag = Arc::clone(&is_recording);
-            if let Err(e) = Self::recording_thread_fn(output_path, is_recording, aec_enabled) {
+            if let Err(e) =
+                Self::recording_thread_fn(output_path, is_recording, is_paused, aec_enabled)
+            {
                 eprintln!("Recording error: {}", e);
             }
             // Windows still writes one progressive MP3. Closing the sender is
@@ -62,6 +68,7 @@ impl DesktopAudioRecorder {
     fn recording_thread_fn(
         output_path: PathBuf,
         is_recording: Arc<Mutex<bool>>,
+        is_paused: Arc<Mutex<bool>>,
         aec_enabled: bool,
     ) -> Result<()> {
         use mp3lame_encoder::{Builder, FlushNoGap, InterleavedPcm, MonoPcm};
@@ -241,6 +248,7 @@ impl DesktopAudioRecorder {
                 }
 
                 std::thread::sleep(std::time::Duration::from_millis(5));
+                let paused = *is_paused.lock().unwrap();
 
                 let desktop_packet = desktop_capture.GetNextPacketSize()?;
                 if desktop_packet > 0 {
@@ -255,7 +263,7 @@ impl DesktopAudioRecorder {
                         let bytes_len = (frames as usize) * (desktop_align as usize);
                         let audio_data = std::slice::from_raw_parts(data, bytes_len);
 
-                        if !is_silent {
+                        if !paused && !is_silent {
                             let decoded = Self::decode_wasapi_packet(audio_data, desktop_bits);
                             Self::append_normalized_channels(
                                 &mut desktop_buffer,
@@ -264,12 +272,14 @@ impl DesktopAudioRecorder {
                                 output_channels,
                                 1.0,
                             );
-                        } else {
+                        } else if !paused {
                             let sample_count = (frames as usize) * output_channels;
                             desktop_buffer.extend(std::iter::repeat(0i16).take(sample_count));
                         }
 
-                        desktop_sample_count += frames as u64;
+                        if !paused {
+                            desktop_sample_count += frames as u64;
+                        }
                     }
 
                     desktop_capture.ReleaseBuffer(frames)?;
@@ -288,7 +298,7 @@ impl DesktopAudioRecorder {
                         let bytes_len = (frames as usize) * (mic_align as usize);
                         let audio_data = std::slice::from_raw_parts(data, bytes_len);
 
-                        if !is_silent {
+                        if !paused && !is_silent {
                             let decoded = Self::decode_wasapi_packet(audio_data, mic_bits);
                             Self::append_normalized_channels(
                                 &mut mic_buffer,
@@ -297,30 +307,34 @@ impl DesktopAudioRecorder {
                                 capture_channels,
                                 1.0,
                             );
-                        } else {
+                        } else if !paused {
                             let sample_count = (frames as usize) * capture_channels;
                             mic_buffer.extend(std::iter::repeat(0i16).take(sample_count));
                         }
 
-                        mic_sample_count += frames as u64;
+                        if !paused {
+                            mic_sample_count += frames as u64;
+                        }
                     }
 
                     mic_capture.ReleaseBuffer(frames)?;
                 }
 
-                Self::process_windows_buffers(
-                    &mut desktop_buffer,
-                    &mut mic_buffer,
-                    &mut sample_buffer,
-                    output_channels,
-                    capture_channels,
-                    processing_sample_rate,
-                    sample_rate,
-                    mic_sample_rate,
-                    &mut aec,
-                    true,
-                    &mut dsp,
-                );
+                if !paused {
+                    Self::process_windows_buffers(
+                        &mut desktop_buffer,
+                        &mut mic_buffer,
+                        &mut sample_buffer,
+                        output_channels,
+                        capture_channels,
+                        processing_sample_rate,
+                        sample_rate,
+                        mic_sample_rate,
+                        &mut aec,
+                        true,
+                        &mut dsp,
+                    );
+                }
 
                 while sample_buffer.len() >= chunk_size {
                     let chunk: Vec<i16> = sample_buffer.drain(..chunk_size).collect();
@@ -716,6 +730,14 @@ impl DesktopAudioRecorder {
         }
 
         println!("Recording stopped");
+        Ok(())
+    }
+
+    pub fn set_paused(&self, paused: bool) -> Result<(), String> {
+        if !*self.is_recording.lock().map_err(|e| e.to_string())? {
+            return Err("No active recording".to_string());
+        }
+        *self.is_paused.lock().map_err(|e| e.to_string())? = paused;
         Ok(())
     }
 

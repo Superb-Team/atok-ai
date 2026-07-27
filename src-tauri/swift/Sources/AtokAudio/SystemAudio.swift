@@ -21,6 +21,7 @@ private final class SystemAudioCaptureSession: NSObject, SCStreamOutput, SCStrea
     private var chunkIndex = 0
     private var bytesInChunk = 0
     private var acceptingAudio = false
+    private var paused = false
     private var runtimeError: String?
 
     init(outputDirectory: URL) {
@@ -139,13 +140,19 @@ private final class SystemAudioCaptureSession: NSObject, SCStreamOutput, SCStrea
         return true
     }
 
+    func setPaused(_ value: Bool) {
+        stateLock.withLock {
+            paused = value
+        }
+    }
+
     func stream(
         _ stream: SCStream,
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
         guard type == .audio, sampleBuffer.isValid else { return }
-        guard stateLock.withLock({ acceptingAudio }) else { return }
+        guard stateLock.withLock({ acceptingAudio && !paused }) else { return }
         guard let blockBuffer = sampleBuffer.dataBuffer else { return }
 
         var lengthAtOffset = 0
@@ -319,6 +326,16 @@ func scStopSystemAudio() -> Bool {
         return current
     }
     return session?.stop() ?? true
+}
+
+@_cdecl("sc_set_system_audio_paused")
+func scSetSystemAudioPaused(_ paused: Bool) -> Bool {
+    guard #available(macOS 13.0, *) else { return false }
+    return globalLock.withLock {
+        guard let session = activeSession else { return false }
+        session.setPaused(paused)
+        return true
+    }
 }
 
 private extension NSLock {

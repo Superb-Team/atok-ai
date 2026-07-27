@@ -2,18 +2,13 @@
 @import "tw-animate-css";
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
-@import "@fontsource-variable/bricolage-grotesque";
 @plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
 
-/*
- * Atok.ai design language: "ink & paper".
- * Warm stone neutrals, a single ember (copper) accent, editorial display type.
- * One radius scale: cards 18px (xl), panels 14px (lg), controls 12px (md).
- */
+/* Atok.ai design language: precision monochrome. */
 :root {
-  font-family: "Geist Variable", "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+  font-family: "SF Pro Text", "SF Pro Display", "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 15px;
   line-height: 1.55;
   font-weight: 400;
@@ -24,52 +19,52 @@
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
 
-  --radius: 0.875rem;
+  --radius: 0.625rem;
 
-  --background: oklch(0.9745 0.0048 80);
-  --foreground: oklch(0.2450 0.0120 50);
-  --card: oklch(0.9945 0.0025 85);
-  --card-foreground: oklch(0.2450 0.0120 50);
-  --popover: oklch(0.9945 0.0025 85);
-  --popover-foreground: oklch(0.2450 0.0120 50);
-  --primary: oklch(0.5600 0.1250 45);
-  --primary-foreground: oklch(0.9850 0.0040 80);
-  --secondary: oklch(0.9430 0.0065 76);
-  --secondary-foreground: oklch(0.2900 0.0120 50);
-  --muted: oklch(0.9430 0.0065 76);
-  --muted-foreground: oklch(0.5050 0.0125 55);
-  --accent: oklch(0.9290 0.0090 72);
-  --accent-foreground: oklch(0.2450 0.0120 50);
+  --background: oklch(0.985 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.145 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.955 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.955 0 0);
+  --muted-foreground: oklch(0.48 0 0);
+  --accent: oklch(0.935 0 0);
+  --accent-foreground: oklch(0.145 0 0);
   --destructive: oklch(0.5770 0.2000 27);
   --destructive-foreground: oklch(0.9850 0.0040 80);
-  --border: oklch(0.9030 0.0085 72);
-  --input: oklch(0.9100 0.0085 72);
-  --ring: oklch(0.5600 0.1250 45);
-  --chart-1: oklch(0.5600 0.1250 45);
+  --border: oklch(0.895 0 0);
+  --input: oklch(0.87 0 0);
+  --ring: oklch(0.3 0 0);
+  --chart-1: oklch(0.2 0 0);
   --chart-2: oklch(0.5800 0.0900 150);
   --chart-3: oklch(0.5500 0.0950 250);
   --chart-4: oklch(0.6600 0.1300 85);
   --chart-5: oklch(0.5050 0.0125 55);
-  --sidebar: oklch(0.9560 0.0065 78);
-  --sidebar-foreground: oklch(0.2900 0.0120 50);
-  --sidebar-primary: oklch(0.5600 0.1250 45);
-  --sidebar-primary-foreground: oklch(0.9850 0.0040 80);
-  --sidebar-accent: oklch(0.9130 0.0095 72);
-  --sidebar-accent-foreground: oklch(0.2450 0.0120 50);
-  --sidebar-border: oklch(0.8950 0.0090 72);
-  --sidebar-ring: oklch(0.5600 0.1250 45);
+  --sidebar: oklch(0.965 0 0);
+  --sidebar-foreground: oklch(0.2 0 0);
+  --sidebar-primary: oklch(0.145 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.92 0 0);
+  --sidebar-accent-foreground: oklch(0.145 0 0);
+  --sidebar-border: oklch(0.875 0 0);
+  --sidebar-ring: oklch(0.3 0 0);
 
-  --font-sans: "Geist Variable", "SF Pro Text", "Segoe UI", sans-serif;
-  --font-display: "Bricolage Grotesque Variable", "Geist Variable", sans-serif;
+  --font-sans: "SF Pro Text", "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "SF Pro Display", "Geist Variable", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: "Geist Mono Variable", "SF Mono", monospace;
 
   --shadow-2xs: 0px 1px 2px 0px oklch(0.28 0.02 50 / 0.05);
   --shadow-xs: 0px 1px 2px 0px oklch(0.28 0.02 50 / 0.06);
-  --shadow-sm: 0px 1px 2px 0px oklch(0.28 0.02 50 / 0.07), 0px 2px 6px -2px oklch(0.28 0.02 50 / 0.06);
-  --shadow: 0px 1px 2px 0px oklch(0.28 0.02 50 / 0.07), 0px 2px 6px -2px oklch(0.28 0.02 50 / 0.06);
-  --shadow-md: 0px 2px 4px -1px oklch(0.28 0.02 50 / 0.07), 0px 5px 14px -4px oklch(0.28 0.02 50 / 0.08);
-  --shadow-lg: 0px 3px 6px -2px oklch(0.28 0.02 50 / 0.08), 0px 10px 24px -6px oklch(0.28 0.02 50 / 0.10);
-  --shadow-xl: 0px 4px 8px -2px oklch(0.28 0.02 50 / 0.08), 0px 18px 40px -8px oklch(0.28 0.02 50 / 0.14);
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.04);
+  --shadow: 0 1px 3px oklch(0 0 0 / 0.05);
+  --shadow-md: 0 6px 20px -12px oklch(0 0 0 / 0.18);
+  --shadow-lg: 0 12px 32px -18px oklch(0 0 0 / 0.24);
+  --shadow-xl: 0 18px 50px -24px oklch(0 0 0 / 0.3);
   --shadow-2xl: 0px 24px 60px -12px oklch(0.28 0.02 50 / 0.22);
 
   --tracking-normal: -0.011em;
@@ -79,38 +74,38 @@
 }
 
 .dark {
-  --background: oklch(0.2110 0.0095 55);
-  --foreground: oklch(0.9280 0.0075 78);
-  --card: oklch(0.2520 0.0105 55);
-  --card-foreground: oklch(0.9280 0.0075 78);
-  --popover: oklch(0.2520 0.0105 55);
-  --popover-foreground: oklch(0.9280 0.0075 78);
-  --primary: oklch(0.7050 0.1280 48);
-  --primary-foreground: oklch(0.1850 0.0110 52);
-  --secondary: oklch(0.2960 0.0105 55);
-  --secondary-foreground: oklch(0.9280 0.0075 78);
-  --muted: oklch(0.2960 0.0105 55);
-  --muted-foreground: oklch(0.6850 0.0100 65);
-  --accent: oklch(0.3170 0.0115 55);
-  --accent-foreground: oklch(0.9280 0.0075 78);
+  --background: oklch(0.115 0 0);
+  --foreground: oklch(0.94 0 0);
+  --card: oklch(0.155 0 0);
+  --card-foreground: oklch(0.94 0 0);
+  --popover: oklch(0.17 0 0);
+  --popover-foreground: oklch(0.94 0 0);
+  --primary: oklch(0.94 0 0);
+  --primary-foreground: oklch(0.12 0 0);
+  --secondary: oklch(0.205 0 0);
+  --secondary-foreground: oklch(0.94 0 0);
+  --muted: oklch(0.205 0 0);
+  --muted-foreground: oklch(0.64 0 0);
+  --accent: oklch(0.235 0 0);
+  --accent-foreground: oklch(0.94 0 0);
   --destructive: oklch(0.6600 0.1750 25);
   --destructive-foreground: oklch(0.9750 0.0050 78);
-  --border: oklch(0.3220 0.0105 55);
-  --input: oklch(0.3220 0.0105 55);
-  --ring: oklch(0.7050 0.1280 48);
+  --border: oklch(0.27 0 0);
+  --input: oklch(0.3 0 0);
+  --ring: oklch(0.7 0 0);
   --chart-1: oklch(0.7050 0.1280 48);
   --chart-2: oklch(0.7000 0.0950 150);
   --chart-3: oklch(0.6800 0.0950 250);
   --chart-4: oklch(0.7500 0.1250 85);
   --chart-5: oklch(0.6850 0.0100 65);
-  --sidebar: oklch(0.1840 0.0090 55);
-  --sidebar-foreground: oklch(0.8700 0.0080 72);
-  --sidebar-primary: oklch(0.7050 0.1280 48);
-  --sidebar-primary-foreground: oklch(0.1850 0.0110 52);
-  --sidebar-accent: oklch(0.2620 0.0105 55);
-  --sidebar-accent-foreground: oklch(0.9280 0.0075 78);
-  --sidebar-border: oklch(0.2760 0.0100 55);
-  --sidebar-ring: oklch(0.7050 0.1280 48);
+  --sidebar: oklch(0.09 0 0);
+  --sidebar-foreground: oklch(0.88 0 0);
+  --sidebar-primary: oklch(0.94 0 0);
+  --sidebar-primary-foreground: oklch(0.12 0 0);
+  --sidebar-accent: oklch(0.19 0 0);
+  --sidebar-accent-foreground: oklch(0.94 0 0);
+  --sidebar-border: oklch(0.235 0 0);
+  --sidebar-ring: oklch(0.7 0 0);
 
   --shadow-2xs: 0px 1px 2px 0px oklch(0.10 0.008 55 / 0.30);
   --shadow-xs: 0px 1px 2px 0px oklch(0.10 0.008 55 / 0.34);
@@ -236,7 +231,7 @@
 }
 
 .recording-popup-ui button:focus-visible {
-  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.55), 0 0 0 5px rgba(16, 185, 129, 0.18);
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 55%, transparent);
 }
 
 .recording-popup-ui button:disabled {
@@ -279,8 +274,11 @@
     @apply bg-background text-foreground;
     letter-spacing: var(--tracking-normal);
   }
+  img[src="/logo-atok.png"] {
+    filter: grayscale(1) contrast(1.15);
+  }
   ::selection {
-    background: oklch(0.5600 0.1250 45 / 0.22);
+    background: oklch(0.2 0 0 / 0.16);
   }
   .dark ::selection {
     background: oklch(0.7050 0.1280 48 / 0.30);

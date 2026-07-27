@@ -19,6 +19,7 @@ use crate::audio_recorder::DesktopAudioRecorder;
 pub(crate) fn record(
     mp3_path: &Path,
     is_recording: &Arc<AtomicBool>,
+    is_paused: &Arc<AtomicBool>,
     aec_enabled: bool,
     mic_name: Option<&str>,
     chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
@@ -52,6 +53,7 @@ pub(crate) fn record(
     DesktopAudioRecorder::write_start_meta(&session_path, "sys_start.meta");
 
     let mic_is_recording = Arc::clone(is_recording);
+    let mic_is_paused = Arc::clone(is_paused);
     let mic_dir = session_path.clone();
     let mic_thread = match std::thread::Builder::new()
         .name("macos-mic-file".into())
@@ -61,6 +63,7 @@ pub(crate) fn record(
                 mic_device,
                 mic_cfg,
                 mic_is_recording,
+                mic_is_paused,
             )
         }) {
         Ok(thread) => thread,

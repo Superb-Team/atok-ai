@@ -50,10 +50,15 @@ describe("processing recovery policy", () => {
     assert.equal(shouldRepairWithStructuredFallback("saving", 128, undefined, true), true);
   });
 
-  it("continues recovering unfinished jobs but never reopens complete jobs", () => {
+  it("recovers interrupted jobs but never reopens terminal jobs", () => {
+    assert.equal(shouldRecoverProcessingJob("transcribing", undefined), true);
     assert.equal(shouldRecoverProcessingJob("extracting", undefined), true);
-    assert.equal(shouldRecoverProcessingJob("failed", undefined), true);
+    assert.equal(shouldRecoverProcessingJob("synthesizing", undefined), true);
+    assert.equal(shouldRecoverProcessingJob("saving", undefined), true);
+    assert.equal(shouldRecoverProcessingJob("failed", undefined), false);
+    assert.equal(shouldRecoverProcessingJob("failed", undefined, true), false);
     assert.equal(shouldRecoverProcessingJob("complete", undefined), false);
+    assert.equal(shouldRecoverProcessingJob("unknown-status", undefined), false);
   });
 
   it("upgrades a saved extractive fallback exactly once through the current AI pipeline", () => {

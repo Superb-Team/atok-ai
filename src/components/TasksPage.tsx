@@ -425,17 +425,17 @@ const TasksPage: React.FC = () => {
             </p>
           </header>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-5 lg:gap-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:gap-5 2xl:grid-cols-4">
             {loading ? (
               Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="h-[500px] animate-pulse rounded-xl border border-border bg-card md:h-[560px] lg:h-[620px]" />
+                <div key={i} className="h-[420px] animate-pulse rounded-xl border border-border bg-card md:h-[460px] 2xl:h-[620px]" />
               ))
             ) : (
               columns.map(column => (
                 <div
                   key={column.id}
                   id={column.id}
-                  className="bg-card rounded-xl p-4 border border-border flex flex-col h-[500px] md:h-[560px] lg:h-[620px]"
+                  className="flex h-[420px] flex-col rounded-xl border border-border bg-card p-4 md:h-[460px] 2xl:h-[620px]"
                 >
                 {/* Column Header */}
                 <div className="mb-3">
