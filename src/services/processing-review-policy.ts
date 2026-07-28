@@ -1,6 +1,6 @@
 // Roughly ten minutes of speech. Short clean drafts skip a second LLM round-trip.
 const REVIEW_TRANSCRIPT_THRESHOLD = 6_000;
-export const CURRENT_AI_PIPELINE_VERSION = 8;
+export const CURRENT_AI_PIPELINE_VERSION = 9;
 
 interface ReviewDecisionInput {
   processingDegraded: boolean;

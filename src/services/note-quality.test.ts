@@ -69,3 +69,63 @@ test("rejects invented, missing, or renumbered screenshot markers", () => {
   assert.ok(invented.some((issue) => issue.code === "marker_mismatch"));
   assert.ok(missing.some((issue) => issue.code === "marker_mismatch"));
 });
+
+test("accepts a bounded three-column action-item table", () => {
+  const note = `# Pembagian Tim
+
+## Tindak Lanjut
+
+| Tindakan | Pemilik | Tenggat Waktu |
+| --- | --- | --- |
+| Perbaiki integrasi dashboard | Dendy | Dua hari |
+| Dokumentasikan hasil pengujian | Belum ditugaskan | Tidak ditentukan |`;
+
+  assert.deepEqual(assessGeneratedNote(source, note, { isTruncated: false }), []);
+});
+
+test("rejects the observed runaway action-item table row", () => {
+  const cascade = Array.from(
+    { length: 90 },
+    () => "lanjutkan implementasi integrasi kalender dan evaluasi risiko teknis",
+  ).join(" ");
+  const note = `# Pengembangan Engine
+
+## Tindak Lanjut
+
+| Tindakan | Pemilik | Tenggat Waktu |
+| --- | --- | --- |
+| ${cascade} | Belum ditugaskan | Tidak ditentukan |`;
+
+  const issues = assessGeneratedNote(source, note, { isTruncated: false });
+
+  assert.ok(issues.some((issue) => issue.code === "oversized_action_item"));
+});
+
+test("rejects action-item tables with missing owner or deadline cells", () => {
+  const note = `# Pengembangan Engine
+
+## Tindak Lanjut
+
+| Tindakan | Pemilik | Tenggat Waktu |
+| --- | --- | --- |
+| Investigasi Review Q | | |`;
+
+  const issues = assessGeneratedNote(source, note, { isTruncated: false });
+
+  assert.ok(issues.some((issue) => issue.code === "malformed_action_items"));
+});
+
+test("rejects an incomplete or weak final title", () => {
+  const titleSource = "Format data segmen kabel menggunakan GeoJSON standar dengan koordinat A-B.";
+  const note = `# Format Data Segmen Kabel: GeoJSON standar dengan koordinat A-B mencakup
+
+## Ringkasan
+Format data menggunakan GeoJSON.`;
+
+  const issues = assessGeneratedNote(titleSource, note, {
+    isTruncated: false,
+    requireUsefulTitle: true,
+  });
+
+  assert.ok(issues.some((issue) => issue.code === "weak_title"));
+});

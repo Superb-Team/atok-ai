@@ -7,6 +7,8 @@ const GENERIC_TITLE_PATTERN =
   /^(?:recording|voice recording|meeting|meeting notes?|progress meeting|catatan|catatan rapat|rapat|rekaman)(?:\s*[-–—:]\s*.*)?$/iu;
 const PLACEHOLDER_PATTERN =
   /\[(?:tanggal|date|main topic|topic|judul|title)\]|\{(?:tanggal|date|main topic|topic|judul|title)\}|<(?:tanggal|date|main topic|topic|judul|title)>/iu;
+const INCOMPLETE_TITLE_END_PATTERN =
+  /\b(?:dan|atau|dengan|untuk|tentang|terkait|mengenai|mencakup|meliputi|berdasarkan|melalui|serta|and|or|with|for|about|including|based on|through)\s*$/iu;
 const TITLE_STOP_WORDS = new Set([
   "yang", "dan", "atau", "dari", "untuk", "pada", "dengan", "dalam", "ini", "itu",
   "the", "and", "for", "from", "with", "this", "that", "meeting", "rapat", "catatan",
@@ -58,14 +60,18 @@ export function formatRecordedDate(
 
 export function isUsefulGroundedTitle(value: string, transcript: string): boolean {
   const title = cleanTitleCandidate(value);
-  if (title.length < 6 || title.length > 120) return false;
+  if (title.length < 6 || title.length > 90) return false;
   if (PLACEHOLDER_PATTERN.test(title) || GENERIC_TITLE_PATTERN.test(title)) return false;
+  if (INCOMPLETE_TITLE_END_PATTERN.test(title)) return false;
 
   const transcriptWords = new Set(wordsIn(transcript));
   const distinctiveTitleWords = wordsIn(title).filter(
     (word) => word.length >= 4 && !TITLE_STOP_WORDS.has(word),
   );
-  return distinctiveTitleWords.some((word) => transcriptWords.has(word));
+  if (distinctiveTitleWords.length < 2) return false;
+  const groundedWords = distinctiveTitleWords.filter((word) => transcriptWords.has(word));
+  return groundedWords.length >= 2 &&
+    groundedWords.length * 2 >= distinctiveTitleWords.length;
 }
 
 export function deriveRecordingNoteTitle(
@@ -76,12 +82,11 @@ export function deriveRecordingNoteTitle(
   language: string,
 ): string {
   const heading = enhancedText.match(/^#\s+(.+)$/m)?.[1] ?? "";
-  const firstContentLine = enhancedText
-    .split("\n")
-    .map(cleanTitleCandidate)
-    .find((line) => isUsefulGroundedTitle(line, transcript)) ?? "";
   const fallback = cleanTitleCandidate(fallbackTitle);
-  const rawTopic = [heading, firstContentLine, fallback]
+  // Never promote an arbitrary summary sentence or action row into the title.
+  // The generated H1 owns the topic; fallback titles are accepted only when
+  // they independently pass the same grounding checks.
+  const rawTopic = [heading, fallback]
     .map(cleanTitleCandidate)
     .find((candidate) => isUsefulGroundedTitle(candidate, transcript))
     ?? (language === "id" ? "Catatan Rekaman" : "Recording Notes");

@@ -330,7 +330,7 @@ pub async fn ai_chat(
     temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<String, String> {
-    Ok(ai_chat_detailed(messages, temperature, max_tokens)
+    Ok(ai_chat_detailed(messages, temperature, max_tokens, None)
         .await?
         .content)
 }
@@ -340,6 +340,7 @@ pub async fn ai_chat_detailed(
     messages: Vec<ChatMessage>,
     temperature: Option<f64>,
     max_tokens: Option<u32>,
+    response_format: Option<serde_json::Value>,
 ) -> Result<ChatCompletionResult, String> {
     let (base_url, api_key, primary_model) = get_deepinfra_config()?;
     let deadline = chat_request_deadline();
@@ -356,6 +357,7 @@ pub async fn ai_chat_detailed(
             &messages,
             temperature,
             max_tokens,
+            response_format.as_ref(),
             deadline,
         )
         .await
@@ -398,6 +400,7 @@ async fn ai_chat_detailed_for_model(
     messages: &[ChatMessage],
     temperature: Option<f64>,
     max_tokens: Option<u32>,
+    response_format: Option<&serde_json::Value>,
     deadline: Duration,
 ) -> Result<ChatCompletionResult, String> {
     let mut messages_json: Vec<serde_json::Value> = messages
@@ -418,7 +421,15 @@ async fn ai_chat_detailed_for_model(
     let mut response_model = model.to_string();
     let mut request_ids = Vec::new();
     let mut continuation_count = 0u32;
-    for round in 0..=CHAT_MAX_CONTINUATIONS {
+    // A structured JSON response must be one complete document. Appending a
+    // natural-language continuation to truncated JSON cannot preserve schema
+    // validity, so structured calls fail closed instead of continuing.
+    let max_continuations = if response_format.is_some() {
+        0
+    } else {
+        CHAT_MAX_CONTINUATIONS
+    };
+    for round in 0..=max_continuations {
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages_json,
@@ -432,12 +443,12 @@ async fn ai_chat_detailed_for_model(
             "stream": false,
         });
         apply_model_chat_settings(&mut body, model);
+        if let Some(format) = response_format {
+            body["response_format"] = format.clone();
+        }
 
-        let response = with_chat_deadline(
-            post_chat_with_retry(client, url, api_key, &body),
-            deadline,
-        )
-        .await?;
+        let response =
+            with_chat_deadline(post_chat_with_retry(client, url, api_key, &body), deadline).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -463,11 +474,11 @@ async fn ai_chat_detailed_for_model(
         final_finish_reason = parsed.finish_reason.clone();
         response_model = parsed.model.clone();
 
-        if !parsed.is_truncated() || round == CHAT_MAX_CONTINUATIONS {
+        if !parsed.is_truncated() || round == max_continuations {
             if parsed.is_truncated() {
                 eprintln!(
                     "[ai_chat] Output still truncated after {} continuations",
-                    CHAT_MAX_CONTINUATIONS
+                    max_continuations
                 );
             }
             break;

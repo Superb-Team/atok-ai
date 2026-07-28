@@ -1,3 +1,5 @@
+import { isUsefulGroundedTitle } from "./recording-note-metadata.ts";
+
 export type NoteQualityIssueCode =
   | "empty"
   | "truncated"
@@ -5,7 +7,11 @@ export type NoteQualityIssueCode =
   | "excessive_expansion"
   | "generation_artifact"
   | "repetition_loop"
-  | "marker_mismatch";
+  | "marker_mismatch"
+  | "weak_title"
+  | "malformed_action_items"
+  | "oversized_action_item"
+  | "too_many_action_items";
 
 export interface NoteQualityIssue {
   code: NoteQualityIssueCode;
@@ -13,6 +19,7 @@ export interface NoteQualityIssue {
 }
 interface CompletionState {
   isTruncated: boolean;
+  requireUsefulTitle?: boolean;
 }
 
 function wordsIn(value: string): string[] {
@@ -21,6 +28,91 @@ function wordsIn(value: string): string[] {
 
 function assetMarkersIn(value: string): string[] {
   return (value.match(/\[\[ATOK_ASSET_\d+\]\]/g) ?? []).sort();
+}
+
+function actionSectionLines(markdown: string): string[] | null {
+  const lines = markdown.split("\n");
+  const start = lines.findIndex((line) =>
+    /^##\s+(?:Action Items|Tindak Lanjut)\s*$/iu.test(line.trim()));
+  if (start < 0) return null;
+  let end = start + 1;
+  while (end < lines.length && !/^##\s+/u.test(lines[end].trim())) end += 1;
+  return lines.slice(start + 1, end).map((line) => line.trim()).filter(Boolean);
+}
+
+function tableCells(line: string): string[] {
+  const withoutEdges = line.replace(/^\s*\|/u, "").replace(/\|\s*$/u, "");
+  return withoutEdges
+    .split(/(?<!\\)\|/u)
+    .map((cell) => cell.replace(/\\\|/gu, "|").trim());
+}
+
+function assessActionItems(markdown: string): NoteQualityIssue[] {
+  const lines = actionSectionLines(markdown);
+  if (lines === null || lines.length === 0) return [];
+  const tableMode = lines.some((line) => line.includes("|"));
+
+  if (tableMode) {
+    if (lines.length < 3 || lines.some((line) => !line.includes("|"))) {
+      return [{
+        code: "malformed_action_items",
+        detail: "Action-item table contains prose outside its rows or is missing its header",
+      }];
+    }
+    const rows = lines.map(tableCells);
+    if (
+      rows.some((cells) => cells.length !== 3) ||
+      !rows[1].every((cell) => /^:?-{3,}:?$/u.test(cell))
+    ) {
+      return [{
+        code: "malformed_action_items",
+        detail: "Action-item table must contain exactly three columns",
+      }];
+    }
+    const items = rows.slice(2);
+    if (items.length > 15) {
+      return [{
+        code: "too_many_action_items",
+        detail: `Action-item table contains ${items.length} rows; maximum is 15`,
+      }];
+    }
+    for (const [index, cells] of items.entries()) {
+      const [action, owner, deadline] = cells;
+      if (!action || !owner || !deadline) {
+        return [{
+          code: "malformed_action_items",
+          detail: `Action-item row ${index + 1} contains an empty cell`,
+        }];
+      }
+      if (action.length > 240 || owner.length > 80 || deadline.length > 80) {
+        return [{
+          code: "oversized_action_item",
+          detail: `Action-item row ${index + 1} exceeds its deterministic cell limit`,
+        }];
+      }
+    }
+    return [];
+  }
+
+  if (lines.some((line) => !/^(?:[-*+]|\d+[.)])\s+\S/u.test(line))) {
+    return [{
+      code: "malformed_action_items",
+      detail: "Action items must be a Markdown table or one atomic bullet per line",
+    }];
+  }
+  if (lines.length > 15) {
+    return [{
+      code: "too_many_action_items",
+      detail: `Action-item list contains ${lines.length} items; maximum is 15`,
+    }];
+  }
+  const oversizedIndex = lines.findIndex((line) => line.length > 320);
+  return oversizedIndex >= 0
+    ? [{
+        code: "oversized_action_item",
+        detail: `Action-item bullet ${oversizedIndex + 1} exceeds 320 characters`,
+      }]
+    : [];
 }
 
 export function assessGeneratedNote(
@@ -36,6 +128,15 @@ export function assessGeneratedNote(
   }
   if (completion.isTruncated) {
     issues.push({ code: "truncated", detail: "Provider ended the response at its token limit" });
+  }
+  if (completion.requireUsefulTitle) {
+    const title = trimmed.match(/^#\s+(.+)$/m)?.[1] ?? "";
+    if (!isUsefulGroundedTitle(title, source)) {
+      issues.push({
+        code: "weak_title",
+        detail: "Generated note title is generic, incomplete, or insufficiently grounded",
+      });
+    }
   }
 
   if (/\b(?:stop|continue) generating\b|\bas an ai\b|\*\(stop generating filler\)\*|\s->\s/iu.test(trimmed)) {
@@ -61,6 +162,7 @@ export function assessGeneratedNote(
       detail: "Generated note added, removed, duplicated, or renumbered a screenshot marker",
     });
   }
+  issues.push(...assessActionItems(trimmed));
 
   const paragraphs = trimmed.split(/\n\s*\n/);
   for (const paragraph of paragraphs) {
