@@ -1,6 +1,7 @@
 // AI Backend — all API calls go through here (keys never exposed to frontend). Providers: DeepInfra (OpenAI-compatible chat/streaming/Whisper) and Agent API (custom transcription, RAG).
 
 use reqwest::Client;
+use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::io::Write;
 use std::path::Path;
@@ -38,6 +39,14 @@ fn configured_chat_models(primary: &str) -> Vec<String> {
     let fallbacks = std::env::var("DEEPINFRA_FALLBACK_MODELS")
         .unwrap_or_else(|_| "XiaomiMiMo/MiMo-V2.5".to_string());
     parse_model_chain(primary, Some(&fallbacks))
+}
+
+fn chat_models_for_policy(primary: &str, allow_model_fallback: bool) -> Vec<String> {
+    if allow_model_fallback {
+        configured_chat_models(primary)
+    } else {
+        vec![primary.to_string()]
+    }
 }
 
 fn apply_model_chat_settings(body: &mut serde_json::Value, model: &str) {
@@ -300,11 +309,10 @@ async fn post_chat_with_retry(
     Err(format!("Chat request failed after retries: {}", last_error))
 }
 
-// A long note can hit max_tokens mid-sentence and would previously be saved
-// truncated with no detection. When finish_reason == "length", feed the partial
-// back as an assistant turn and ask the model to continue, up to this many times.
+// Continue length-truncated chat responses at most twice.
 const CHAT_MAX_CONTINUATIONS: u32 = 2;
 const DEFAULT_CHAT_DEADLINE_SECS: u64 = 120;
+const AI_CHAT_MAX_CONCURRENT: usize = 3;
 
 fn chat_request_deadline() -> Duration {
     let seconds = std::env::var("DEEPINFRA_CHAT_TIMEOUT_SECS")
@@ -341,13 +349,39 @@ pub async fn ai_chat_detailed(
     temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<ChatCompletionResult, String> {
+    ai_chat_detailed_with_policy(messages, temperature, max_tokens, true).await
+}
+
+/// Strict formatter entry point: one configured model, bounded continuation,
+/// and no silent model substitution. Content validation belongs to the caller.
+#[tauri::command]
+pub async fn ai_chat_detailed_strict(
+    messages: Vec<ChatMessage>,
+    temperature: Option<f64>,
+    max_tokens: Option<u32>,
+) -> Result<ChatCompletionResult, String> {
+    ai_chat_detailed_with_policy(messages, temperature, max_tokens, false).await
+}
+
+async fn ai_chat_detailed_with_policy(
+    messages: Vec<ChatMessage>,
+    temperature: Option<f64>,
+    max_tokens: Option<u32>,
+    allow_model_fallback: bool,
+) -> Result<ChatCompletionResult, String> {
+    let queue_started = std::time::Instant::now();
+    let _permit = AI_CHAT_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|error| format!("AI request queue unavailable: {error}"))?;
+    let queue_wait_ms = queue_started.elapsed().as_millis();
     let (base_url, api_key, primary_model) = get_deepinfra_config()?;
     let deadline = chat_request_deadline();
     let client = build_provider_client(deadline)?;
     let url = format!("{}/chat/completions", base_url);
 
     let mut failures = Vec::new();
-    for model in configured_chat_models(&primary_model) {
+    for model in chat_models_for_policy(&primary_model, allow_model_fallback) {
         match ai_chat_detailed_for_model(
             &client,
             &url,
@@ -370,6 +404,9 @@ pub async fn ai_chat_detailed(
                         "completionTokens": result.completion_tokens,
                         "estimatedCostUsd": result.estimated_cost,
                         "continuations": result.continuation_count,
+                        "queueWaitMs": queue_wait_ms,
+                        "requestId": result.request_id,
+                        "modelFallbackAllowed": allow_model_fallback,
                     })
                 );
                 return Ok(result);
@@ -433,11 +470,8 @@ async fn ai_chat_detailed_for_model(
         });
         apply_model_chat_settings(&mut body, model);
 
-        let response = with_chat_deadline(
-            post_chat_with_retry(client, url, api_key, &body),
-            deadline,
-        )
-        .await?;
+        let response =
+            with_chat_deadline(post_chat_with_retry(client, url, api_key, &body), deadline).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -510,6 +544,11 @@ async fn ai_chat_detailed_for_model(
 pub async fn describe_image(image_path: String, language: String) -> Result<String, String> {
     use base64::Engine;
 
+    let _permit = AI_CHAT_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|error| format!("AI request queue unavailable: {error}"))?;
+
     let (base_url, api_key, _) = get_deepinfra_config()?;
     let model =
         std::env::var("VISION_MODEL").unwrap_or_else(|_| "google/gemma-4-26B-A4B-it".to_string());
@@ -549,7 +588,8 @@ pub async fn describe_image(image_path: String, language: String) -> Result<Stri
         "stream": false,
     });
 
-    let response = Client::new()
+    let client = build_provider_client(chat_request_deadline())?;
+    let response = client
         .post(format!("{}/chat/completions", base_url))
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -582,8 +622,12 @@ pub async fn ai_chat_stream(
     temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<String, String> {
+    let _permit = AI_CHAT_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|error| format!("AI request queue unavailable: {error}"))?;
     let (base_url, api_key, model) = get_deepinfra_config()?;
-    let client = Client::new();
+    let client = build_provider_client(chat_request_deadline())?;
     let url = format!("{}/chat/completions", base_url);
 
     let messages_json: Vec<serde_json::Value> = messages
@@ -652,6 +696,140 @@ pub async fn ai_chat_stream(
 
 // ==================== Transcription (DeepInfra Whisper) ====================
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct AsrTimestampedText {
+    #[serde(default)]
+    id: Option<u64>,
+    start: f64,
+    end: f64,
+    text: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct AsrProviderResponse {
+    text: String,
+    language: Option<String>,
+    duration: Option<f64>,
+    request_id: Option<String>,
+    segments: Vec<AsrTimestampedText>,
+    words: Vec<AsrTimestampedText>,
+    audio_sha256: Option<String>,
+    audio_bytes: Option<usize>,
+    audio_file_name: Option<String>,
+    glossary_terms: Vec<String>,
+    raw_response: serde_json::Value,
+}
+
+fn parse_asr_provider_response(
+    raw_response: serde_json::Value,
+) -> Result<AsrProviderResponse, String> {
+    let text = raw_response["text"]
+        .as_str()
+        .ok_or_else(|| "Transcription response did not contain a text field".to_string())?
+        .to_string();
+    let parse_ranges = |field: &str| -> Result<Vec<AsrTimestampedText>, String> {
+        match raw_response.get(field) {
+            None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|error| format!("Invalid transcription {field}: {error}")),
+        }
+    };
+    Ok(AsrProviderResponse {
+        text,
+        language: raw_response["language"].as_str().map(str::to_owned),
+        duration: raw_response["duration"].as_f64(),
+        request_id: raw_response["request_id"].as_str().map(str::to_owned),
+        segments: parse_ranges("segments")?,
+        words: parse_ranges("words")?,
+        audio_sha256: None,
+        audio_bytes: None,
+        audio_file_name: None,
+        glossary_terms: Vec::new(),
+        raw_response,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AsrAttemptArtifact<'a> {
+    schema_version: u32,
+    run_id: &'a str,
+    chunk_index: usize,
+    model_requested: &'a str,
+    language_requested: &'a str,
+    created_at: String,
+    response: &'a AsrProviderResponse,
+}
+
+fn asr_artifact_directory(transcript_path: &Path) -> std::path::PathBuf {
+    let stem = transcript_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("recording")
+        .trim_end_matches(".transcript");
+    transcript_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.asr"))
+}
+
+fn persist_asr_attempts(
+    transcript_path: &Path,
+    responses: &[AsrProviderResponse],
+    language: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    for (chunk_index, response) in responses.iter().enumerate() {
+        persist_asr_attempt(transcript_path, chunk_index, response, language, run_id)?;
+    }
+    Ok(())
+}
+
+fn persist_asr_attempt(
+    transcript_path: &Path,
+    chunk_index: usize,
+    response: &AsrProviderResponse,
+    language: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    let directory = asr_artifact_directory(transcript_path);
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Create ASR artifact directory: {error}"))?;
+    let model = whisper_model_name();
+    let artifact = AsrAttemptArtifact {
+        schema_version: 2,
+        run_id,
+        chunk_index,
+        model_requested: &model,
+        language_requested: language,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        response,
+    };
+    let attempt_id = uuid::Uuid::new_v4();
+    let path = directory.join(format!("chunk-{chunk_index:04}-attempt-{attempt_id}.json"));
+    let temporary = directory.join(format!(
+        ".chunk-{chunk_index:04}-{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(&artifact)
+            .map_err(|error| format!("Serialize ASR attempt: {error}"))?;
+        let mut file = std::fs::File::create(&temporary)
+            .map_err(|error| format!("Create ASR attempt: {error}"))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("Write ASR attempt: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("Sync ASR attempt: {error}"))?;
+        std::fs::rename(&temporary, &path)
+            .map_err(|error| format!("Commit ASR attempt: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 // DeepInfra Whisper accepts ~25MB per file. Stay well under that and split only
 // at real MP3 frame boundaries so every uploaded part is a valid, decodable MP3.
 const WHISPER_MAX_BYTES: usize = 20 * 1024 * 1024;
@@ -660,10 +838,18 @@ const WHISPER_MAX_BYTES: usize = 20 * 1024 * 1024;
 const WHISPER_MAX_CONCURRENT: usize = 2;
 // Retry up to this many times on 429 / "Model busy" with exponential backoff.
 const WHISPER_MAX_RETRIES: u32 = 5;
+// A provider request must never hold a live transcription job forever. Three
+// minutes is longer than the normal processing time for one 180-second chunk,
+// while still allowing the retry loop to recover from a stalled request.
+const WHISPER_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 // Language pinned when the caller doesn't pass one. Without a language the API
 // auto-detects per request, and since we upload many chunks separately, quiet
 // chunks get misdetected (en/es/fi) → polyglot garbage. A fixed language stops that.
 const WHISPER_DEFAULT_LANGUAGE: &str = "id";
+
+fn build_whisper_client() -> Result<Client, String> {
+    build_provider_client(WHISPER_REQUEST_TIMEOUT)
+}
 
 // In-flight live-transcription jobs keyed by the final MP3 path. The chunked
 // recorder registers its background task here so `transcribe_audio` can AWAIT the
@@ -671,6 +857,10 @@ const WHISPER_DEFAULT_LANGUAGE: &str = "id";
 // the sidecar is written, falls through, and redundantly re-splits the whole MP3
 // — doubling Whisper calls (and 429 risk), which defeats the live pipeline.
 lazy_static::lazy_static! {
+    static ref AI_CHAT_SEMAPHORE: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::new(AI_CHAT_MAX_CONCURRENT);
+    static ref WHISPER_SEMAPHORE: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::new(WHISPER_MAX_CONCURRENT);
     static ref LIVE_TRANSCRIBE_JOBS: std::sync::Mutex<
         std::collections::HashMap<String, tokio::task::JoinHandle<()>>,
     > = std::sync::Mutex::new(std::collections::HashMap::new());
@@ -703,6 +893,8 @@ fn transcript_sidecar_path(audio_path: &str) -> std::path::PathBuf {
 
 fn read_transcript_sidecar(audio_path: &str) -> Result<Option<String>, String> {
     let path = transcript_sidecar_path(audio_path);
+    crate::durable_io::recover_backup(&path)
+        .map_err(|error| format!("Recover transcript sidecar backup: {error}"))?;
     if !path.is_file() {
         return Ok(None);
     }
@@ -710,66 +902,101 @@ fn read_transcript_sidecar(audio_path: &str) -> Result<Option<String>, String> {
         .map_err(|error| format!("Read transcript sidecar: {}", error))?;
     // The existence of an empty sidecar is meaningful: Whisper successfully
     // processed the take but found no speech. Return it so the canonical pass
-    // does not upload the same silent take a second time.
+    // does not upload the same silent take a second time. A committed sidecar
+    // is an accepted transcript revision; reading it must never rewrite it.
     Ok(Some(text))
 }
 
 fn persist_transcript_sidecar(audio_path: &str, transcript: &str) -> Result<(), String> {
     let path = transcript_sidecar_path(audio_path);
-    persist_transcript_file(&path, transcript)
+    persist_transcript_file(&path, transcript)?;
+    let _ = std::fs::remove_dir_all(live_transcript_parts_directory(&path));
+    Ok(())
 }
 
 fn persist_transcript_file(path: &std::path::Path, transcript: &str) -> Result<(), String> {
-    let temp = path.with_extension(format!("txt.tmp-{}", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = std::fs::File::create(&temp)
-            .map_err(|error| format!("Create transcript sidecar temp file: {}", error))?;
-        file.write_all(transcript.as_bytes())
-            .map_err(|error| format!("Write transcript sidecar temp file: {}", error))?;
-        file.sync_all()
-            .map_err(|error| format!("Sync transcript sidecar temp file: {}", error))?;
-        drop(file);
-        #[cfg(windows)]
-        {
-            let backup = path.with_extension("txt.backup");
-            if backup.exists() {
-                std::fs::remove_file(&backup)
-                    .map_err(|error| format!("Remove stale transcript backup: {}", error))?;
-            }
-            let had_previous = path.exists();
-            if had_previous {
-                std::fs::rename(path, &backup)
-                    .map_err(|error| format!("Back up transcript sidecar: {}", error))?;
-            }
-            if let Err(error) = std::fs::rename(&temp, path) {
-                if had_previous {
-                    let _ = std::fs::rename(&backup, path);
-                }
-                return Err(format!("Commit transcript sidecar: {}", error));
-            }
-            if had_previous {
-                let _ = std::fs::remove_file(&backup);
-            }
-            Ok(())
-        }
-        #[cfg(not(windows))]
-        {
-            std::fs::rename(&temp, path)
-                .map_err(|error| format!("Commit transcript sidecar: {}", error))
-        }
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+    crate::durable_io::atomic_replace(path, transcript.as_bytes())
+        .map_err(|error| format!("Commit transcript sidecar: {error}"))
+}
+
+fn live_transcript_parts_directory(transcript_path: &Path) -> std::path::PathBuf {
+    let stem = transcript_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("recording")
+        .trim_end_matches(".transcript");
+    transcript_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.transcript-parts"))
+}
+
+fn persist_live_transcript_part(
+    transcript_path: &Path,
+    chunk_index: usize,
+    transcript: &str,
+) -> Result<(), String> {
+    let directory = live_transcript_parts_directory(transcript_path);
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Create live transcript parts directory: {error}"))?;
+    let path = directory.join(format!("chunk-{chunk_index:04}.txt"));
+    crate::durable_io::atomic_replace(&path, transcript.as_bytes())
+        .map_err(|error| format!("Commit live transcript part {chunk_index}: {error}"))
+}
+
+fn read_live_transcript_parts(transcript_path: &Path) -> Result<Vec<String>, String> {
+    let directory = live_transcript_parts_directory(transcript_path);
+    if !directory.is_dir() {
+        return Ok(Vec::new());
     }
-    result
+    let mut paths = std::fs::read_dir(&directory)
+        .map_err(|error| format!("Read live transcript parts directory: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter_map(|path| {
+            let index = path
+                .file_name()
+                .and_then(|value| value.to_str())?
+                .strip_prefix("chunk-")?
+                .strip_suffix(".txt")?
+                .parse::<usize>()
+                .ok()?;
+            Some((index, path))
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|(index, _)| *index);
+    paths
+        .into_iter()
+        .map(|(_, path)| {
+            std::fs::read_to_string(&path)
+                .map_err(|error| format!("Read live transcript part '{}': {error}", path.display()))
+        })
+        .collect()
 }
 
 /// Register a live-transcription task for `mp3_path`. Called by the recorder
 /// pipeline right after it spawns `transcribe_chunks_live`.
 pub fn register_live_job(mp3_path: &std::path::Path, handle: tokio::task::JoinHandle<()>) {
     if let Ok(mut map) = LIVE_TRANSCRIBE_JOBS.lock() {
-        map.insert(mp3_key(&mp3_path.to_string_lossy()), handle);
+        if let Some(previous) = map.insert(mp3_key(&mp3_path.to_string_lossy()), handle) {
+            previous.abort();
+        }
     }
+}
+
+/// Cancel and remove a live job when capture never started or must be aborted.
+/// Dropping the registry entry alone would leave the task alive and holding the
+/// receiver, so cancellation is explicit.
+pub fn cancel_live_job(mp3_path: &std::path::Path) -> bool {
+    let Some(handle) = LIVE_TRANSCRIBE_JOBS
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&mp3_key(&mp3_path.to_string_lossy())))
+    else {
+        return false;
+    };
+    handle.abort();
+    true
 }
 
 fn take_live_job(audio_path: &str) -> Option<tokio::task::JoinHandle<()>> {
@@ -782,22 +1009,154 @@ fn take_live_job(audio_path: &str) -> Option<tokio::task::JoinHandle<()>> {
 /// A short, language-appropriate prompt that anchors Whisper to real speech and
 /// suppresses the subtitle/outro boilerplate it hallucinates on silence. Empty
 /// for languages we have no seed for (we still rely on the pinned `language`).
-fn whisper_initial_prompt(language: &str) -> &'static str {
+fn whisper_initial_prompt(language: &str, prompt_terms: &[String]) -> String {
+    let glossary = prompt_terms.join(", ");
     match language {
-        "id" => "Rekaman rapat dalam Bahasa Indonesia.",
-        "en" => "A meeting recording.",
-        _ => "",
+        "id" if !glossary.is_empty() => format!(
+            "Rekaman rapat dalam Bahasa Indonesia. Istilah dan nama yang mungkin disebutkan: {glossary}. Tulis nama tersebut persis ketika terdengar."
+        ),
+        "id" => "Rekaman rapat dalam Bahasa Indonesia.".to_string(),
+        "en" if !glossary.is_empty() => {
+            format!("A meeting recording. Possible names and terms: {glossary}.")
+        }
+        "en" => "A meeting recording.".to_string(),
+        _ => String::new(),
     }
 }
 
-/// Strip Whisper's non-speech hallucinations. On silence/low-energy audio Whisper
-/// invents subtitle/outro boilerplate from its training data — "Terima kasih",
-/// "Thank you", "like and subscribe", foreign thank-yous ("Kiitos", "Gracias") —
-/// none of which is in the audio. We split into segments (Whisper joins them with
-/// two spaces; newlines are treated as boundaries too), drop segments that are
-/// exactly a known short phrase or start with a known outro, and collapse runs of
-/// an identical repeated segment. Real speech embeds the short phrases inside a
-/// larger sentence, so this two-tier match keeps false positives negligible.
+fn normalized_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn text_edit_distance(left: &str, right: &str) -> usize {
+    let right_chars: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right_chars.len()).collect();
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut current = vec![left_index + 1];
+        for (right_index, right_char) in right_chars.iter().enumerate() {
+            current.push(
+                (previous[right_index + 1] + 1)
+                    .min(current[right_index] + 1)
+                    .min(previous[right_index] + usize::from(left_char != *right_char)),
+            );
+        }
+        previous = current;
+    }
+    previous[right_chars.len()]
+}
+
+fn arbitrate_cross_track_text(
+    mixed: &AsrProviderResponse,
+    microphone: Option<&AsrProviderResponse>,
+    glossary_terms: &[String],
+) -> String {
+    let Some(microphone) = microphone else {
+        return clean_transcript(&mixed.text);
+    };
+    let mixed_text = clean_transcript(&mixed.text);
+    let microphone_text = clean_transcript(&microphone.text);
+    if mixed_text.is_empty() {
+        return microphone_text;
+    }
+    if microphone_text.is_empty() {
+        return mixed_text;
+    }
+
+    // A mixed track can contain low-level browser/video audio that is absent from
+    // the microphone. Whisper frequently turns that signal into subtitle outros
+    // ("terima kasih telah menonton", etc.). Prefer the coherent mic result when
+    // the mixed result carries materially more of that signature noise, while
+    // keeping mixed as the default so remote speakers remain available.
+    let mixed_hallucinations = hallucination_penalty(&mixed.text);
+    let microphone_hallucinations = hallucination_penalty(&microphone.text);
+    if mixed_hallucinations > microphone_hallucinations
+        && meaningful_word_count(&mixed_text) < 4
+        && meaningful_word_count(&microphone_text) >= 4
+    {
+        return microphone_text;
+    }
+
+    let microphone_normalized = microphone_text
+        .split_whitespace()
+        .map(normalized_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut mixed_tokens: Vec<String> = mixed_text.split_whitespace().map(str::to_string).collect();
+    let mut terms: Vec<String> = glossary_terms
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|term| term.split_whitespace().count() >= 2)
+        .map(str::to_string)
+        .collect();
+    terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
+
+    for term in terms {
+        let term_tokens: Vec<String> = term.split_whitespace().map(normalized_token).collect();
+        let normalized_term = term_tokens.join(" ");
+        if !microphone_normalized.contains(&normalized_term) {
+            continue;
+        }
+        let normalized_mixed = mixed_tokens
+            .iter()
+            .map(|token| normalized_token(token))
+            .collect::<Vec<_>>();
+        if normalized_mixed.join(" ").contains(&normalized_term) {
+            continue;
+        }
+        let threshold = (normalized_term.chars().count() / 10).clamp(1, 3);
+        if let Some(start) = normalized_mixed
+            .windows(term_tokens.len())
+            .position(|window| text_edit_distance(&window.join(" "), &normalized_term) <= threshold)
+        {
+            let end = start + term_tokens.len();
+            let trailing = mixed_tokens[end - 1]
+                .chars()
+                .rev()
+                .take_while(|character| !character.is_alphanumeric())
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            mixed_tokens.splice(start..end, [format!("{term}{trailing}")]);
+        }
+    }
+    mixed_tokens.join(" ")
+}
+
+fn meaningful_word_count(text: &str) -> usize {
+    text.split_whitespace()
+        .map(normalized_token)
+        .filter(|token| token.chars().count() >= 2)
+        .count()
+}
+
+fn count_phrase_occurrences(text: &str, phrase: &str) -> usize {
+    text.to_lowercase().match_indices(phrase).count()
+}
+
+fn hallucination_penalty(text: &str) -> usize {
+    [
+        "terima kasih telah menonton",
+        "terima kasih sudah menonton",
+        "sampai jumpa di video",
+        "jangan lupa subscribe",
+        "like dan subscribe",
+        "thank you for watching",
+        "thanks for watching",
+        "selamat beristirahat dan selamat bekerja",
+    ]
+    .into_iter()
+    .map(|phrase| count_phrase_occurrences(text, phrase))
+    .sum()
+}
+
+/// Remove common Whisper subtitle/outro hallucinations without deleting them
+/// when they are part of a real sentence.
 fn clean_transcript(raw: &str) -> String {
     // Short phrases people genuinely say in meetings — dropped only when a
     // segment is EXACTLY this phrase (embedded uses stay).
@@ -838,16 +1197,54 @@ fn clean_transcript(raw: &str) -> String {
 
     let mut kept: Vec<&str> = Vec::new();
     let mut prev_norm = String::new();
-    for seg in raw.split("  ").flat_map(|s| s.split('\n')) {
+    // Split punctuation only at whitespace/end so decimals and versions survive.
+    let mut sentences = Vec::new();
+    let mut sentence_start = 0usize;
+    for (index, character) in raw.char_indices() {
+        let is_boundary = if character == '\n' {
+            true
+        } else if matches!(character, '.' | '!' | '?') {
+            raw[index + character.len_utf8()..]
+                .chars()
+                .next()
+                .map(|next| next.is_whitespace())
+                .unwrap_or(true)
+        } else {
+            false
+        };
+        if is_boundary {
+            let end = index + character.len_utf8();
+            sentences.push(&raw[sentence_start..end]);
+            sentence_start = end;
+        }
+    }
+    if sentence_start < raw.len() {
+        sentences.push(&raw[sentence_start..]);
+    }
+
+    let standalone_thanks_count = sentences
+        .iter()
+        .flat_map(|sentence| sentence.split("  "))
+        .map(norm)
+        .filter(|segment| matches!(segment.as_str(), "terima kasih" | "terima kasih banyak"))
+        .count();
+    let has_outro_signature = OUTRO_PREFIXES
+        .iter()
+        .any(|prefix| raw.to_lowercase().contains(prefix));
+
+    for seg in sentences
+        .into_iter()
+        .flat_map(|sentence| sentence.split("  "))
+    {
         let seg = seg.trim();
         if seg.is_empty() {
             continue;
         }
         let n = norm(seg);
-        if n.is_empty()
-            || EXACT.contains(&n.as_str())
-            || OUTRO_PREFIXES.iter().any(|p| n.starts_with(p))
-        {
+        let is_standalone_thanks = matches!(n.as_str(), "terima kasih" | "terima kasih banyak");
+        let is_known_noise = EXACT.contains(&n.as_str())
+            && (!is_standalone_thanks || has_outro_signature || standalone_thanks_count > 1);
+        if n.is_empty() || is_known_noise || OUTRO_PREFIXES.iter().any(|p| n.starts_with(p)) {
             continue;
         }
         if n == prev_norm {
@@ -1050,10 +1447,12 @@ pub async fn ensure_recordings_dir(path: String) -> Result<(), String> {
 pub async fn transcribe_audio(
     audio_path: String,
     language: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<String, String> {
-    let api_key = std::env::var("DEEPINFRA_API_KEY")
-        .map_err(|_| "DEEPINFRA_API_KEY not configured in .env".to_string())?;
     let lang = language.unwrap_or_else(|| WHISPER_DEFAULT_LANGUAGE.to_string());
+    let force_refresh = force_refresh.unwrap_or(false);
+    let recording_glossary =
+        crate::transcription_glossary::load(std::path::Path::new(&audio_path))?;
     let audio_key = mp3_key(&audio_path);
     let transcribe_lock = {
         let mut locks = TRANSCRIBE_LOCKS
@@ -1066,21 +1465,24 @@ pub async fn transcribe_audio(
     };
     let _transcribe_guard = transcribe_lock.lock().await;
 
-    // If the chunked recorder is still transcribing this take live, await it so we
-    // return its result instead of racing it into a redundant second full re-split.
+    // Wait for the live job before reading or rebuilding its sidecar.
     if let Some(job) = take_live_job(&audio_path) {
         let _ = job.await;
     }
 
-    // Fast path: the chunked Linux pipeline pre-transcribes during recording and
-    // writes a sidecar file. Return it instantly without re-reading the MP3.
-    if let Some(text) = read_transcript_sidecar(&audio_path)? {
-        eprintln!(
-            "[transcribe] Returning persisted transcript ({} chars)",
-            text.len()
-        );
-        return Ok(text);
+    // Pipeline upgrades must not return a stale sidecar.
+    if !force_refresh {
+        if let Some(text) = read_transcript_sidecar(&audio_path)? {
+            eprintln!(
+                "[transcribe] Returning persisted transcript ({} chars)",
+                text.len()
+            );
+            return Ok(text);
+        }
     }
+
+    let api_key = std::env::var("DEEPINFRA_API_KEY")
+        .map_err(|_| "DEEPINFRA_API_KEY not configured in .env".to_string())?;
 
     let audio_bytes = std::fs::read(&audio_path)
         .map_err(|e| format!("Failed to read audio file '{}': {}", audio_path, e))?;
@@ -1092,9 +1494,25 @@ pub async fn transcribe_audio(
     // Split at MP3 frame boundaries so each part is a valid, decodable MP3 under
     // the API's per-file limit. A file that already fits is sent as one request.
     let ranges = split_mp3_frames(&audio_bytes, WHISPER_MAX_BYTES);
+    let transcription_run_id = uuid::Uuid::new_v4().to_string();
     if ranges.len() == 1 {
-        let text = transcribe_chunk(&api_key, &audio_bytes, "recording.mp3", &lang).await?;
-        let result = clean_transcript(&text);
+        let client = build_whisper_client()?;
+        let response = transcribe_with_retry(
+            &client,
+            &api_key,
+            &audio_bytes,
+            "recording.mp3",
+            &lang,
+            &recording_glossary.prompt_terms,
+        )
+        .await?;
+        persist_asr_attempts(
+            &transcript_sidecar_path(&audio_path),
+            std::slice::from_ref(&response),
+            &lang,
+            &transcription_run_id,
+        )?;
+        let result = clean_transcript(&response.text);
         persist_transcript_sidecar(&audio_path, &result)?;
         return Ok(result);
     }
@@ -1109,7 +1527,7 @@ pub async fn transcribe_audio(
     // Rate-limited parallel upload: semaphore caps concurrent Whisper requests so
     // we don't flood DeepInfra and trigger 429 when splitting large files.
     // Each task also retries on 429 / "Model busy" with exponential backoff.
-    let client = std::sync::Arc::new(Client::new());
+    let client = std::sync::Arc::new(build_whisper_client()?);
     let shared = std::sync::Arc::new(audio_bytes);
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(WHISPER_MAX_CONCURRENT));
     let mut handles = Vec::with_capacity(num_chunks);
@@ -1121,18 +1539,36 @@ pub async fn transcribe_audio(
         let buf = shared.clone();
         let sem = sem.clone();
         let lang = lang.clone();
+        let prompt_terms = recording_glossary.prompt_terms.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            transcribe_with_retry(&c, &key, &buf[start..end], &name, &lang).await
+            transcribe_with_retry(&c, &key, &buf[start..end], &name, &lang, &prompt_terms).await
         }));
     }
 
     // Collect results in order
-    let mut all_transcripts: Vec<String> = Vec::with_capacity(num_chunks);
+    let mut all_transcripts: Vec<AsrProviderResponse> = Vec::with_capacity(num_chunks);
     let mut failures = Vec::new();
+    let transcript_path = transcript_sidecar_path(&audio_path);
     for (i, handle) in handles.into_iter().enumerate() {
         match handle.await {
-            Ok(Ok(text)) => all_transcripts.push(text),
+            Ok(Ok(response)) => {
+                if let Err(error) = persist_asr_attempt(
+                    &transcript_path,
+                    i,
+                    &response,
+                    &lang,
+                    &transcription_run_id,
+                ) {
+                    failures.push(format!(
+                        "part {}: could not persist ASR provenance: {}",
+                        i + 1,
+                        error
+                    ));
+                    continue;
+                }
+                all_transcripts.push(response);
+            }
             Ok(Err(e)) => {
                 eprintln!("[transcribe] Chunk {} failed: {}", i, e);
                 failures.push(format!("part {}: {}", i + 1, e));
@@ -1155,7 +1591,7 @@ pub async fn transcribe_audio(
 
     let result = all_transcripts
         .iter()
-        .map(|t| clean_transcript(t))
+        .map(|response| clean_transcript(&response.text))
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -1175,85 +1611,179 @@ pub async fn transcribe_audio(
 /// If `api_key` is empty, drains and discards the channel so the sender side
 /// can close cleanly (no blocking).
 pub async fn transcribe_chunks_live(
-    mut receiver: tokio::sync::mpsc::UnboundedReceiver<std::path::PathBuf>,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::audio::types::LiveAudioChunk>,
     api_key: String,
     transcript_path: std::path::PathBuf,
     language: String,
+    recording_glossary: crate::transcription_glossary::RecordingGlossary,
+    run_id: String,
 ) {
     if api_key.is_empty() {
-        while let Some(path) = receiver.recv().await {
-            let _ = tokio::fs::remove_file(&path).await;
+        while let Some(chunk) = receiver.recv().await {
+            if let Some(path) = chunk.mixed_path {
+                let _ = tokio::fs::remove_file(path).await;
+            }
         }
         return;
     }
 
-    let client = std::sync::Arc::new(Client::new());
+    let client = match build_whisper_client() {
+        Ok(client) => std::sync::Arc::new(client),
+        Err(error) => {
+            eprintln!("[transcribe-live] {}", error);
+            while let Some(chunk) = receiver.recv().await {
+                if let Some(path) = chunk.mixed_path {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
+            }
+            return;
+        }
+    };
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(WHISPER_MAX_CONCURRENT));
-    let mut handles: Vec<tokio::task::JoinHandle<Result<String, String>>> = Vec::new();
-    let mut chunk_count = 0usize;
+    let mut tasks = tokio::task::JoinSet::<Result<usize, String>>::new();
+    let mut capture_failures = Vec::new();
 
-    while let Some(path) = receiver.recv().await {
+    while let Some(chunk) = receiver.recv().await {
+        if let Some(error) = chunk.error {
+            eprintln!(
+                "[transcribe-live] Capture failed for chunk {:04}: {}",
+                chunk.index, error
+            );
+            capture_failures.push(format!("chunk {:04}: {}", chunk.index, error));
+            continue;
+        }
+        let Some(mixed_path) = chunk.mixed_path else {
+            capture_failures.push(format!("chunk {:04}: mixed path missing", chunk.index));
+            continue;
+        };
         let key = api_key.clone();
         let c = client.clone();
         let s = sem.clone();
         let lang = language.clone();
-        let idx = chunk_count;
+        let prompt_terms = recording_glossary.prompt_terms.clone();
+        let glossary_terms = recording_glossary.terms.clone();
+        let part_transcript_path = transcript_path.clone();
+        let part_run_id = run_id.clone();
+        let idx = chunk.index as usize;
         let name = format!("chunk_{:04}.mp3", idx);
-        handles.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             let _permit = s.acquire().await.unwrap();
             eprintln!("[transcribe-live] Chunk {:04} uploading...", idx);
-            let bytes = tokio::fs::read(&path)
+            let bytes = tokio::fs::read(&mixed_path)
                 .await
                 .map_err(|e| format!("Read chunk {}: {}", idx, e))?;
-            let result = transcribe_with_retry(&c, &key, &bytes, &name, &lang).await;
-            let _ = tokio::fs::remove_file(&path).await;
-            result
-        }));
-        chunk_count += 1;
+            let primary =
+                transcribe_with_retry(&c, &key, &bytes, &name, &lang, &prompt_terms).await;
+            let _ = tokio::fs::remove_file(&mixed_path).await;
+            let primary = primary?;
+            persist_asr_attempt(&part_transcript_path, idx, &primary, &lang, &part_run_id)?;
+            let microphone =
+                if !whisper_dual_track_enabled(std::env::var("WHISPER_DUAL_TRACK").ok().as_deref())
+                {
+                    None
+                } else if let Some(path) = chunk.microphone_path {
+                    let mic_bytes = tokio::fs::read(&path)
+                        .await
+                        .map_err(|e| format!("Read mic chunk {}: {}", idx, e))?;
+                    let mic_name = format!("microphone_chunk_{:04}.mp3", idx);
+                    match transcribe_with_retry(
+                        &c,
+                        &key,
+                        &mic_bytes,
+                        &mic_name,
+                        &lang,
+                        &prompt_terms,
+                    )
+                    .await
+                    {
+                        Ok(response) => Some(response),
+                        Err(error) => {
+                            eprintln!("[transcribe-live] Mic-only chunk {} failed: {}", idx, error);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+            if let Some(response) = microphone.as_ref() {
+                persist_asr_attempt(&part_transcript_path, idx, response, &lang, &part_run_id)?;
+            }
+            let canonical =
+                arbitrate_cross_track_text(&primary, microphone.as_ref(), &glossary_terms);
+            persist_live_transcript_part(&part_transcript_path, idx, &canonical)?;
+            eprintln!(
+                "[transcribe-live] Chunk {:04} checkpointed ({} chars)",
+                idx,
+                canonical.len()
+            );
+            Ok(idx)
+        });
     }
 
-    if handles.is_empty() {
+    if tasks.is_empty() {
         return;
     }
 
-    eprintln!(
-        "[transcribe-live] Collecting {} chunk results",
-        handles.len()
-    );
-    let mut transcripts: Vec<String> = Vec::with_capacity(handles.len());
+    let task_count = tasks.len();
+    eprintln!("[transcribe-live] Collecting {} chunk results", task_count);
+    let mut completed_tasks = 0usize;
     let mut had_failure = false;
-    for (i, handle) in handles.into_iter().enumerate() {
-        match handle.await {
-            Ok(Ok(text)) => transcripts.push(text),
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(_)) => completed_tasks += 1,
             Ok(Err(e)) => {
-                eprintln!("[transcribe-live] Chunk {} failed: {}", i, e);
+                eprintln!("[transcribe-live] Chunk task failed: {}", e);
                 had_failure = true;
             }
             Err(e) => {
-                eprintln!("[transcribe-live] Chunk {} panicked: {}", i, e);
+                eprintln!("[transcribe-live] Chunk task panicked: {}", e);
                 had_failure = true;
             }
         }
     }
 
-    if had_failure {
-        eprintln!("[transcribe-live] Incomplete result; canonical transcript was not committed");
+    if had_failure || !capture_failures.is_empty() {
+        eprintln!(
+            "[transcribe-live] Incomplete result; canonical transcript was not committed (capture failures: {})",
+            capture_failures.len()
+        );
         return;
     }
 
     // Clean each chunk, then stitch consecutive chunks at their overlapping seam
     // (the recorder prepends a few seconds of the previous chunk's audio so no word
     // is lost at the hard cut; stitch_overlapping removes the resulting duplicate).
-    let cleaned: Vec<String> = transcripts.iter().map(|t| clean_transcript(t)).collect();
+    let persisted_parts = match read_live_transcript_parts(&transcript_path) {
+        Ok(parts) if parts.len() == completed_tasks && completed_tasks == task_count => parts,
+        Ok(parts) => {
+            eprintln!(
+                "[transcribe-live] Checkpoint count mismatch: expected {}, found {}",
+                task_count,
+                parts.len()
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!("[transcribe-live] Read checkpoints failed: {error}");
+            return;
+        }
+    };
+    let cleaned: Vec<String> = persisted_parts
+        .iter()
+        .map(|text| clean_transcript(text))
+        .collect();
     let combined = stitch_overlapping(&cleaned);
 
     match persist_transcript_file(&transcript_path, &combined) {
-        Ok(()) => eprintln!(
-            "[transcribe-live] Saved transcript: {} chars, {} parts → {}",
-            combined.len(),
-            transcripts.len(),
-            transcript_path.display()
-        ),
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(live_transcript_parts_directory(&transcript_path));
+            eprintln!(
+                "[transcribe-live] Saved transcript: {} chars, {} parts → {}",
+                combined.len(),
+                completed_tasks,
+                transcript_path.display()
+            );
+        }
         Err(e) => eprintln!("[transcribe-live] Failed to save transcript: {}", e),
     }
 }
@@ -1266,21 +1796,40 @@ async fn transcribe_with_retry(
     audio_bytes: &[u8],
     file_name: &str,
     language: &str,
-) -> Result<String, String> {
+    prompt_terms: &[String],
+) -> Result<AsrProviderResponse, String> {
+    let queue_started = std::time::Instant::now();
+    let _permit = WHISPER_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|error| format!("Whisper request queue unavailable: {error}"))?;
+    let queue_wait_ms = queue_started.elapsed().as_millis();
+    if queue_wait_ms > 0 {
+        eprintln!(
+            "[transcribe] queued Whisper request {}ms for {}",
+            queue_wait_ms, file_name
+        );
+    }
     let mut delay_secs = 2u64;
     for attempt in 0..=WHISPER_MAX_RETRIES {
-        match transcribe_chunk_with_client(client, api_key, audio_bytes, file_name, language).await
+        match transcribe_chunk_with_client(
+            client,
+            api_key,
+            audio_bytes,
+            file_name,
+            language,
+            prompt_terms,
+        )
+        .await
         {
             Ok(text) => return Ok(text),
-            Err(e)
-                if attempt < WHISPER_MAX_RETRIES
-                    && (e.contains("429") || e.contains("Model busy")) =>
-            {
+            Err(e) if attempt < WHISPER_MAX_RETRIES && is_retryable_transcription_error(&e) => {
                 eprintln!(
-                    "[transcribe] {} rate-limited (attempt {}/{}), retrying in {}s",
+                    "[transcribe] {} transient failure (attempt {}/{}): {}; retrying in {}s",
                     file_name,
                     attempt + 1,
                     WHISPER_MAX_RETRIES,
+                    e,
                     delay_secs
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
@@ -1295,24 +1844,36 @@ async fn transcribe_with_retry(
     ))
 }
 
+fn is_retryable_transcription_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.starts_with("transcription request failed:")
+        || lower.contains("model busy")
+        || lower.contains("429")
+        || lower.contains("408 request timeout")
+        || lower.contains("500 internal server error")
+        || lower.contains("502 bad gateway")
+        || lower.contains("503 service unavailable")
+        || lower.contains("504 gateway timeout")
+}
+
 /// Whisper model endpoint. Default is the full (non-turbo) large-v3 for best
 /// accuracy: the live pipeline has minutes of slack between chunks, so the few
 /// extra seconds per chunk are invisible. Override with WHISPER_MODEL (e.g.
 /// "openai/whisper-large-v3-turbo") to trade accuracy for speed.
-fn whisper_model_url() -> String {
-    let model =
-        std::env::var("WHISPER_MODEL").unwrap_or_else(|_| "openai/whisper-large-v3".to_string());
-    format!("https://api.deepinfra.com/v1/inference/{}", model)
+fn whisper_model_name() -> String {
+    std::env::var("WHISPER_MODEL").unwrap_or_else(|_| "openai/whisper-large-v3".to_string())
 }
 
-async fn transcribe_chunk(
-    api_key: &str,
-    audio_bytes: &[u8],
-    file_name: &str,
-    language: &str,
-) -> Result<String, String> {
-    let client = Client::new();
-    transcribe_chunk_with_client(&client, api_key, audio_bytes, file_name, language).await
+/// Keep the microphone-only ASR pass opt-in; mixed audio is canonical.
+fn whisper_dual_track_enabled(setting: Option<&str>) -> bool {
+    matches!(setting.map(str::trim), Some("1" | "true" | "yes" | "on"))
+}
+
+fn whisper_model_url() -> String {
+    format!(
+        "https://api.deepinfra.com/v1/inference/{}",
+        whisper_model_name()
+    )
 }
 
 async fn transcribe_chunk_with_client(
@@ -1321,7 +1882,8 @@ async fn transcribe_chunk_with_client(
     audio_bytes: &[u8],
     file_name: &str,
     language: &str,
-) -> Result<String, String> {
+    prompt_terms: &[String],
+) -> Result<AsrProviderResponse, String> {
     let part = reqwest::multipart::Part::bytes(audio_bytes.to_vec())
         .file_name(file_name.to_string())
         .mime_str("audio/mpeg")
@@ -1336,7 +1898,7 @@ async fn transcribe_chunk_with_client(
     if !language.is_empty() {
         form = form.text("language", language.to_string());
     }
-    let prompt = whisper_initial_prompt(language);
+    let prompt = whisper_initial_prompt(language, prompt_terms);
     if !prompt.is_empty() {
         form = form.text("initial_prompt", prompt);
     }
@@ -1365,10 +1927,12 @@ async fn transcribe_chunk_with_client(
     // An empty transcript is a valid provider result for silence, music, or
     // background noise. The caller decides how to present that outcome; only
     // malformed responses are technical failures.
-    data["text"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "Transcription response did not contain a text field".to_string())
+    let mut parsed = parse_asr_provider_response(data)?;
+    parsed.audio_sha256 = Some(hex::encode(Sha256::digest(audio_bytes)));
+    parsed.audio_bytes = Some(audio_bytes.len());
+    parsed.audio_file_name = Some(file_name.to_string());
+    parsed.glossary_terms = prompt_terms.to_vec();
+    Ok(parsed)
 }
 
 #[tauri::command]
@@ -1561,6 +2125,22 @@ mod tests {
     }
 
     #[test]
+    fn classifies_whisper_transport_and_transient_http_failures_for_retry() {
+        assert!(is_retryable_transcription_error(
+            "Transcription request failed: error sending request for url"
+        ));
+        assert!(is_retryable_transcription_error(
+            "Transcription failed (503 Service Unavailable): busy"
+        ));
+        assert!(is_retryable_transcription_error(
+            "Transcription failed (429 Too Many Requests): slow down"
+        ));
+        assert!(!is_retryable_transcription_error(
+            "Transcription failed (401 Unauthorized): invalid token"
+        ));
+    }
+
+    #[test]
     fn model_chain_keeps_primary_first_and_deduplicates_fallbacks() {
         let models = parse_model_chain(
             "Qwen/Qwen3.6-35B-A3B",
@@ -1574,6 +2154,14 @@ mod tests {
                 "Qwen/Qwen3.5-397B-A17B",
                 "backup/model",
             ]
+        );
+    }
+
+    #[test]
+    fn strict_chat_policy_uses_only_the_primary_model() {
+        assert_eq!(
+            chat_models_for_policy("primary/model", false),
+            vec!["primary/model"]
         );
     }
 
@@ -1641,6 +2229,255 @@ mod tests {
     #[test]
     fn parses_mpeg1_l3_192k_48k_frame_len() {
         assert_eq!(mp3_frame_len(&mp3_frame()), Some(576));
+    }
+
+    #[test]
+    fn preserves_deepinfra_word_and_segment_provenance() {
+        let raw = serde_json::json!({
+            "text": "Acme Fiber",
+            "language": "id",
+            "duration": 1.25,
+            "request_id": "request-1",
+            "segments": [{ "id": 0, "start": 0.1, "end": 1.2, "text": "Acme Fiber" }],
+            "words": [
+                { "start": 0.1, "end": 0.55, "text": "Acme" },
+                { "start": 0.56, "end": 1.2, "text": "Fiber" }
+            ]
+        });
+
+        let parsed = parse_asr_provider_response(raw.clone()).unwrap();
+
+        assert_eq!(parsed.text, "Acme Fiber");
+        assert_eq!(parsed.language.as_deref(), Some("id"));
+        assert_eq!(parsed.segments.len(), 1);
+        assert_eq!(parsed.words.len(), 2);
+        assert_eq!(parsed.raw_response, raw);
+    }
+
+    #[test]
+    fn cross_track_arbitration_prefers_exact_glossary_evidence() {
+        let mixed = parse_asr_provider_response(serde_json::json!({
+            "text": "Logo Acme Fibar akan dipasang.",
+            "segments": [],
+            "words": []
+        }))
+        .unwrap();
+        let microphone = parse_asr_provider_response(serde_json::json!({
+            "text": "Logo Acme Fiber akan dipasang.",
+            "segments": [],
+            "words": []
+        }))
+        .unwrap();
+
+        let selected =
+            arbitrate_cross_track_text(&mixed, Some(&microphone), &["Acme Fiber".to_string()]);
+        assert_eq!(selected, "Logo Acme Fiber akan dipasang.");
+    }
+
+    #[test]
+    fn cross_track_arbitration_keeps_mixed_track_without_stronger_term_evidence() {
+        let mixed = parse_asr_provider_response(serde_json::json!({
+            "text": "Tim membahas proyek dan pembicara remote.",
+            "segments": [],
+            "words": []
+        }))
+        .unwrap();
+        let microphone = parse_asr_provider_response(serde_json::json!({
+            "text": "Tim membahas proyek.",
+            "segments": [],
+            "words": []
+        }))
+        .unwrap();
+
+        let selected =
+            arbitrate_cross_track_text(&mixed, Some(&microphone), &["Acme Fiber".to_string()]);
+        assert!(selected.contains("pembicara remote"));
+    }
+
+    #[test]
+    fn clean_transcript_removes_embedded_video_outro_boilerplate() {
+        let cleaned = clean_transcript(
+            "Kagak nyimpen cookies. Terima kasih telah menonton. Kalau kualitasnya bagus, lanjut.",
+        );
+
+        assert!(cleaned.contains("Kagak nyimpen cookies"));
+        assert!(cleaned.contains("Kalau kualitasnya bagus"));
+        assert!(!cleaned
+            .to_lowercase()
+            .contains("terima kasih telah menonton"));
+    }
+
+    #[test]
+    fn clean_transcript_drops_scattered_standalone_thanks_with_outro_signature() {
+        let cleaned = clean_transcript(
+            "Mulai dari sini. Terima kasih. Bahas login dulu. Terima kasih telah menonton. Lanjut ke kalender.",
+        );
+
+        assert!(cleaned.contains("Mulai dari sini."));
+        assert!(cleaned.contains("Bahas login dulu."));
+        assert!(cleaned.contains("Lanjut ke kalender."));
+        assert!(!cleaned.contains("Terima kasih."));
+    }
+
+    #[test]
+    fn clean_transcript_keeps_one_real_standalone_thanks() {
+        let cleaned = clean_transcript("Terima kasih. Kita lanjut ke agenda berikutnya.");
+
+        assert!(cleaned.contains("Terima kasih."));
+        assert!(cleaned.contains("agenda berikutnya"));
+    }
+
+    #[test]
+    fn clean_transcript_preserves_versions_and_decimal_values() {
+        let cleaned = clean_transcript("Gunakan versi 2.0. Nilainya 3.14. Lanjut.");
+
+        assert!(cleaned.contains("versi 2.0."));
+        assert!(cleaned.contains("3.14."));
+    }
+
+    #[test]
+    fn cross_track_arbitration_prefers_coherent_microphone_over_outro_hallucination() {
+        let mixed = parse_asr_provider_response(serde_json::json!({
+            "text": "Terima kasih telah menonton. Terima kasih telah menonton. Bisa ga ya nama ini dibesarkan?",
+            "segments": [],
+            "words": []
+        }))
+        .unwrap();
+        let microphone = parse_asr_provider_response(serde_json::json!({
+            "text": "Bisa ga ya nama ini dibesarkan?",
+            "segments": [],
+            "words": []
+        }))
+        .unwrap();
+
+        let selected = arbitrate_cross_track_text(&mixed, Some(&microphone), &[]);
+
+        assert_eq!(selected, "Bisa ga ya nama ini dibesarkan?");
+    }
+
+    #[test]
+    fn cross_track_arbitration_keeps_remote_speech_after_mixed_track_cleanup() {
+        let mixed = parse_asr_provider_response(serde_json::json!({
+            "text": "Terima kasih telah menonton. Pembicara remote membahas deployment platform.",
+            "segments": [],
+            "words": []
+        }))
+        .unwrap();
+        let microphone = parse_asr_provider_response(serde_json::json!({
+            "text": "Pembicara lokal membahas agenda.",
+            "segments": [],
+            "words": []
+        }))
+        .unwrap();
+
+        let selected = arbitrate_cross_track_text(&mixed, Some(&microphone), &[]);
+
+        assert!(selected.contains("Pembicara remote membahas deployment platform."));
+    }
+
+    #[test]
+    fn whisper_prompt_has_no_business_terms_without_recording_glossary() {
+        let prompt = whisper_initial_prompt("id", &[]);
+        assert_eq!(prompt, "Rekaman rapat dalam Bahasa Indonesia.");
+        assert!(!prompt.contains("Acme"));
+        assert!(!prompt.contains("Siti"));
+    }
+
+    #[test]
+    fn dual_track_transcription_is_opt_in() {
+        assert!(!whisper_dual_track_enabled(None));
+        assert!(!whisper_dual_track_enabled(Some("0")));
+        assert!(!whisper_dual_track_enabled(Some("false")));
+        assert!(whisper_dual_track_enabled(Some("1")));
+        assert!(whisper_dual_track_enabled(Some("true")));
+    }
+
+    #[test]
+    fn persists_asr_attempts_without_overwriting_previous_attempts() {
+        let root = std::env::temp_dir().join(format!("atok-asr-attempts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let transcript_path = root.join("meeting.transcript.txt");
+        let response = parse_asr_provider_response(serde_json::json!({
+            "text": "Acme Fiber",
+            "segments": [{ "id": 0, "start": 0.0, "end": 1.0, "text": "Acme Fiber" }],
+            "words": []
+        }))
+        .unwrap();
+
+        persist_asr_attempts(
+            &transcript_path,
+            std::slice::from_ref(&response),
+            "id",
+            "run-1",
+        )
+        .unwrap();
+        persist_asr_attempts(
+            &transcript_path,
+            std::slice::from_ref(&response),
+            "id",
+            "run-1",
+        )
+        .unwrap();
+
+        let artifact_dir = asr_artifact_directory(&transcript_path);
+        let artifacts: Vec<_> = std::fs::read_dir(artifact_dir).unwrap().flatten().collect();
+        assert_eq!(
+            artifacts.len(),
+            2,
+            "each provider attempt must remain immutable"
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(artifacts[0].path()).unwrap()).unwrap();
+        assert_eq!(stored["response"]["text"], "Acme Fiber");
+        assert_eq!(stored["response"]["segments"][0]["start"], 0.0);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_transcript_parts_are_durable_and_reassembled_in_chunk_order() {
+        let root = std::env::temp_dir().join(format!("atok-live-parts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let transcript_path = root.join("meeting.transcript.txt");
+
+        const FIRST_CHUNK: &str = "agenda awal membahas akses server wireguard";
+        const SECOND_CHUNK: &str = "membahas akses server wireguard lalu beralih ke deployment";
+        const EXPECTED_TRANSCRIPT: &str =
+            "agenda awal membahas akses server wireguard lalu beralih ke deployment";
+
+        persist_live_transcript_part(&transcript_path, 1, SECOND_CHUNK).unwrap();
+        persist_live_transcript_part(&transcript_path, 0, FIRST_CHUNK).unwrap();
+
+        assert_eq!(
+            read_live_transcript_parts(&transcript_path).unwrap(),
+            vec![FIRST_CHUNK.to_string(), SECOND_CHUNK.to_string()]
+        );
+        assert_eq!(
+            stitch_overlapping(&read_live_transcript_parts(&transcript_path).unwrap()),
+            EXPECTED_TRANSCRIPT
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_transcript_parts_sort_indices_numerically() {
+        let root = std::env::temp_dir().join(format!("atok-live-order-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let transcript_path = root.join("meeting.transcript.txt");
+
+        const BEFORE_BOUNDARY: &str = "bagian sebelum batas empat digit";
+        const AFTER_BOUNDARY: &str = "bagian setelah batas empat digit";
+
+        persist_live_transcript_part(&transcript_path, 10_000, AFTER_BOUNDARY).unwrap();
+        persist_live_transcript_part(&transcript_path, 9_999, BEFORE_BOUNDARY).unwrap();
+
+        assert_eq!(
+            read_live_transcript_parts(&transcript_path).unwrap(),
+            vec![BEFORE_BOUNDARY.to_string(), AFTER_BOUNDARY.to_string()]
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1742,16 +2579,18 @@ mod tests {
 
     #[test]
     fn stitch_overlapping_folds_all_parts() {
+        const FIRST_CHUNK: &str = "rapat dimulai dengan pembahasan akses server internal";
+        const SECOND_CHUNK: &str =
+            "pembahasan akses server internal kemudian tim meninjau jadwal produksi";
+        const THIRD_CHUNK: &str = "tim meninjau jadwal produksi sebelum menyepakati tindak lanjut";
+        const EXPECTED_TRANSCRIPT: &str = "rapat dimulai dengan pembahasan akses server internal kemudian tim meninjau jadwal produksi sebelum menyepakati tindak lanjut";
         let parts = vec![
-            "a b c satu dua tiga empat".to_string(),
-            "satu dua tiga empat lima enam tujuh".to_string(),
+            FIRST_CHUNK.to_string(),
+            SECOND_CHUNK.to_string(),
             String::new(),
-            "empat lima enam tujuh delapan sembilan".to_string(),
+            THIRD_CHUNK.to_string(),
         ];
-        assert_eq!(
-            stitch_overlapping(&parts),
-            "a b c satu dua tiga empat lima enam tujuh delapan sembilan"
-        );
+        assert_eq!(stitch_overlapping(&parts), EXPECTED_TRANSCRIPT);
     }
 
     #[test]
@@ -1775,13 +2614,55 @@ mod tests {
     }
 
     #[test]
+    fn reading_a_legacy_sidecar_does_not_rewrite_the_accepted_transcript() {
+        let dir = std::env::temp_dir().join(format!("atok-sidecar-clean-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio_path = dir.join("meeting.mp3").to_string_lossy().to_string();
+        let raw = "Bahas login dulu. Terima kasih telah menonton. Lanjut ke kalender.";
+        persist_transcript_sidecar(&audio_path, raw).unwrap();
+
+        assert_eq!(
+            read_transcript_sidecar(&audio_path).unwrap().as_deref(),
+            Some(raw)
+        );
+        assert_eq!(
+            std::fs::read_to_string(transcript_sidecar_path(&audio_path)).unwrap(),
+            raw
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn empty_transcript_sidecar_is_a_cached_no_speech_result() {
         let dir = std::env::temp_dir().join(format!("atok-silence-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let audio_path = dir.join("silent.mp3").to_string_lossy().to_string();
 
         persist_transcript_sidecar(&audio_path, "").unwrap();
-        assert_eq!(read_transcript_sidecar(&audio_path).unwrap(), Some(String::new()));
+        assert_eq!(
+            read_transcript_sidecar(&audio_path).unwrap(),
+            Some(String::new())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn transcript_sidecar_recovers_after_interrupted_replace() {
+        let dir =
+            std::env::temp_dir().join(format!("atok-sidecar-recover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio_path = dir.join("meeting.mp3").to_string_lossy().to_string();
+        persist_transcript_sidecar(&audio_path, "accepted transcript").unwrap();
+
+        let sidecar = transcript_sidecar_path(&audio_path);
+        let backup = crate::durable_io::backup_path(&sidecar);
+        std::fs::rename(&sidecar, &backup).unwrap();
+
+        assert_eq!(
+            read_transcript_sidecar(&audio_path).unwrap().as_deref(),
+            Some("accepted transcript")
+        );
+        assert!(sidecar.is_file());
         let _ = std::fs::remove_dir_all(dir);
     }
 

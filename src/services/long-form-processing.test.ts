@@ -7,6 +7,7 @@ import {
   fingerprintText,
   packByTokenBudget,
   operationalSourceTokenBudget,
+  isUsableSectionBackedDraft,
   sectionSourceFingerprint,
   splitTranscriptByTokenBudget,
   stripPlaceholderSections,
@@ -14,8 +15,31 @@ import {
 } from "./long-form-processing.ts";
 
 test("operational section budget stays bounded below a model context window", () => {
-  assert.equal(operationalSourceTokenBudget(240_000), 6_000);
+  assert.equal(operationalSourceTokenBudget(240_000), 18_000);
   assert.equal(operationalSourceTokenBudget(4_000), 4_000);
+});
+
+test("valid section notes remain publishable when only global synthesis fails", () => {
+  const sections: ProcessedSection[] = [
+    {
+      id: "section-0001",
+      index: 0,
+      markdown: "## Sales Engine\n\n- Progres dan risiko tercatat.",
+      markers: [],
+      isDegraded: false,
+    },
+    {
+      id: "section-0002",
+      index: 1,
+      markdown: "## Content Engine\n\n- Jadwal dan tindak lanjut tercatat.",
+      markers: [],
+      isDegraded: false,
+    },
+  ];
+
+  assert.equal(isUsableSectionBackedDraft(sections), true);
+  assert.equal(isUsableSectionBackedDraft([{ ...sections[0], isDegraded: true }]), false);
+  assert.equal(isUsableSectionBackedDraft([{ ...sections[0], markdown: "" }]), false);
 });
 
 test("token estimate is conservative for ASCII and multibyte text", () => {
@@ -54,6 +78,23 @@ test("splitter preserves all source text and keeps every marker atomic", () => {
     "[[ATOK_ASSET_2]]",
   ]);
   assert.ok(sections.every((section) => section.estimatedTokens <= 240));
+});
+
+test("splitter prefers complete sentence boundaries before the token limit", () => {
+  const source = Array.from(
+    { length: 18 },
+    (_, index) => `Topik ${index + 1} membahas progres, kendala, keputusan, dan tindak lanjut.`,
+  ).join(" ");
+
+  const sections = splitTranscriptByTokenBudget(source, 180);
+
+  assert.ok(sections.length > 2);
+  assert.equal(sections.map((section) => section.text).join(""), source);
+  assert.ok(sections.every((section) => section.estimatedTokens <= 180));
+  assert.ok(
+    sections.slice(0, -1).every((section) => /[.!?]\s*$/u.test(section.text)),
+    sections.map((section) => section.text).join("\n---\n"),
+  );
 });
 
 test("splitter bounds a one-million-character transcript without data loss", () => {
@@ -102,7 +143,7 @@ test("composer preserves every detail without exposing internal section numbers"
   assert.match(note, /^### Progres Sales Engine$/m);
   assert.match(note, /^### Strategi Konten$/m);
   assert.doesNotMatch(note, /(?:Section|Bagian)\s+\d+/i);
-  assert.match(note, /transkrip mentah dipertahankan/i);
+  assert.match(note, /membutuhkan pemeriksaan/i);
 });
 
 test("placeholder decision sections are omitted instead of published", () => {

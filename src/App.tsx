@@ -40,12 +40,14 @@ function App() {
     applyTheme();
     const unwatchTheme = watchSystemTheme();
     checkAuth();
-    // The backend AEC_ENABLED static defaults to ON every launch; push the user's
-    // persisted preference back into it so a disabled setting survives restarts.
-    const persistedAec = localStorage.getItem('aec_enabled');
-    if (persistedAec !== null) {
-      invoke('set_aec_enabled', { enabled: persistedAec === 'true' }).catch(() => {});
+    // Migrate the old default-on setting to the headset-safe default once.
+    const aecPreferenceVersion = localStorage.getItem('aec_preference_version');
+    if (aecPreferenceVersion !== '2') {
+      localStorage.setItem('aec_enabled', 'false');
+      localStorage.setItem('aec_preference_version', '2');
     }
+    const persistedAec = localStorage.getItem('aec_enabled') === 'true';
+    invoke('set_aec_enabled', { enabled: persistedAec }).catch(() => {});
     return unwatchTheme;
   }, []);
 

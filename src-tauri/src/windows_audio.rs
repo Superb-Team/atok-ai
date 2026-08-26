@@ -30,7 +30,7 @@ impl DesktopAudioRecorder {
         output_path: PathBuf,
         aec_enabled: bool,
         _mic_device: Option<String>,
-        chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
+        chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::audio::types::LiveAudioChunk>>,
     ) -> Result<(), String> {
         let mut recording = self.is_recording.lock().map_err(|e| e.to_string())?;
         if *recording {
@@ -230,7 +230,8 @@ impl DesktopAudioRecorder {
                 ..Default::default()
             });
 
-            let mut dsp = crate::audio_dsp::AudioDsp::new(0.0);
+            let mut dsp =
+                crate::audio_dsp::AudioDsp::new(crate::audio_dsp::AudioDsp::DEFAULT_SYSTEM_TRIM_DB);
 
             let mut mic_sample_count = 0u64;
             let mut desktop_sample_count = 0u64;
@@ -693,7 +694,7 @@ impl DesktopAudioRecorder {
         _output_path: PathBuf,
         _aec_enabled: bool,
         _mic_device: Option<String>,
-        _chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
+        _chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::audio::types::LiveAudioChunk>>,
     ) -> Result<(), String> {
         Err("Recording only supported on Windows".to_string())
     }

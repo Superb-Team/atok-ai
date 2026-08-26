@@ -7,6 +7,8 @@ const GENERIC_TITLE_PATTERN =
   /^(?:recording|voice recording|meeting|meeting notes?|progress meeting|catatan|catatan rapat|rapat|rekaman)(?:\s*[-–—:]\s*.*)?$/iu;
 const PLACEHOLDER_PATTERN =
   /\[(?:tanggal|date|main topic|topic|judul|title)\]|\{(?:tanggal|date|main topic|topic|judul|title)\}|<(?:tanggal|date|main topic|topic|judul|title)>/iu;
+const CONVERSATIONAL_TITLE_PATTERN =
+  /^(?:berapa|kenapa|mengapa|gimana|bagaimana|siapa|kapan|di mana|dimana|apakah|kok|nah|jadi|terus|lalu|tadi)\b/iu;
 const TITLE_STOP_WORDS = new Set([
   "yang", "dan", "atau", "dari", "untuk", "pada", "dengan", "dalam", "ini", "itu",
   "the", "and", "for", "from", "with", "this", "that", "meeting", "rapat", "catatan",
@@ -60,6 +62,7 @@ export function isUsefulGroundedTitle(value: string, transcript: string): boolea
   const title = cleanTitleCandidate(value);
   if (title.length < 6 || title.length > 120) return false;
   if (PLACEHOLDER_PATTERN.test(title) || GENERIC_TITLE_PATTERN.test(title)) return false;
+  if (CONVERSATIONAL_TITLE_PATTERN.test(title) || /[?!]\s*$/u.test(title)) return false;
 
   const transcriptWords = new Set(wordsIn(transcript));
   const distinctiveTitleWords = wordsIn(title).filter(

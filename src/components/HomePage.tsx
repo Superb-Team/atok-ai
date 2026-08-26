@@ -7,6 +7,28 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { installAsyncListener } from "@/services/recording-processing-guard";
 import { shouldRecoverProcessingJob } from "@/services/processing-review-policy";
 import { recordingProcessingErrorMessage } from "@/services/recording-error-message";
+import { blockingQualityWarnings, requiresCaptureReview } from "@/services/recording-quality-policy";
+
+function captureQualityGuidance(warnings: string[]): string {
+  const guidance = new Set<string>();
+  for (const warning of warnings) {
+    if (warning.startsWith("mic_clipping:")) {
+      guidance.add("Turunkan gain/input microphone dan pastikan level tidak menyentuh 0 dBFS.");
+    }
+    if (warning.startsWith("mic_missing:")) {
+      guidance.add("Periksa permission dan device microphone; sebagian chunk tidak menerima sample mic.");
+    }
+    if (warning.startsWith("mic_overrun:")) {
+      guidance.add("Sebagian sample mic jatuh karena buffer penuh; cek beban CPU, disk, dan proses berat saat merekam.");
+    }
+    if (warning.startsWith("mixed_clipping:")) {
+      guidance.add("Turunkan volume sumber atau gain system audio agar output mix tidak clipping.");
+    }
+  }
+  return guidance.size > 0
+    ? [...guidance].join("\n")
+    : "Periksa microphone dan jalur audio sebelum merekam ulang.";
+}
 
 interface HomePageProps {
   onNoteClick?: (noteId: number) => void;
@@ -19,6 +41,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   const [processingNotes, setProcessingNotes] = useState<Set<string>>(new Set());
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [recordingNotice, setRecordingNotice] = useState<string | null>(null);
+  const [recordingQualityNotice, setRecordingQualityNotice] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [pendingFavorites, setPendingFavorites] = useState<Set<number>>(new Set());
@@ -88,27 +111,51 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
     // Shared between the event fast path and the localStorage poll so the same
     // take is never processed twice (both carry the handoff timestamp).
-    const startProcessing = (
+    const startProcessing = async (
       audioPath: string,
       noteTitle: string,
       language: string | undefined,
       timestamp: number,
       recordedAt?: string,
       timezone?: string,
-    ) => {
+      qualityWarnings: string[] = [],
+      qualityRequiresReview = false,
+    ): Promise<void> => {
       const handoffId = `${audioPath}:${timestamp}`;
       if (seenRecordingHandoffs.current.has(handoffId)) return;
       seenRecordingHandoffs.current.add(handoffId);
       localStorage.removeItem('audio_to_process');
       if (activeAudioPaths.current.has(audioPath)) return;
       activeAudioPaths.current.add(audioPath);
+      const rawWarnings = Array.isArray(qualityWarnings)
+        ? qualityWarnings.filter((warning): warning is string => typeof warning === 'string')
+        : [];
+      const warnings = blockingQualityWarnings(rawWarnings);
+      if (requiresCaptureReview(qualityRequiresReview, rawWarnings)) {
+        const details = warnings.length > 0
+          ? warnings.join('\n')
+          : 'Capture diagnostics require review.';
+        setRecordingQualityNotice(
+          `Rekaman tersimpan, tetapi sebagian capture perlu diverifikasi.\n\n${details}\n\n${captureQualityGuidance(warnings)}`,
+        );
+      }
       setProcessingNotes(prev => new Set(prev).add(noteTitle));
-      processAudioRecording(
+      await processAudioRecording(
         audioPath,
         noteTitle,
         language,
         recordedAt && timezone ? { recordedAt, timezone } : undefined,
       );
+    };
+
+    // Recovery is serialized so a pipeline upgrade cannot replay every old
+    // recording at once and turn a provider hiccup into a request storm.
+    let recoveryQueue = Promise.resolve();
+    const enqueueRecovery = (job: () => Promise<void>) => {
+      recoveryQueue = recoveryQueue
+        .catch(() => {})
+        .then(job)
+        .catch(() => {});
     };
 
     // Fallback handoff: the poll covers ImportAudioDialog (which only writes
@@ -117,8 +164,26 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       const audioData = localStorage.getItem('audio_to_process');
       if (audioData) {
         try {
-          const { audioPath, noteTitle, language, timestamp, recordedAt, timezone } = JSON.parse(audioData);
-          startProcessing(audioPath, noteTitle, language, timestamp, recordedAt, timezone);
+          const {
+            audioPath,
+            noteTitle,
+            language,
+            timestamp,
+            recordedAt,
+            timezone,
+            qualityWarnings,
+            qualityRequiresReview,
+          } = JSON.parse(audioData);
+          startProcessing(
+            audioPath,
+            noteTitle,
+            language,
+            timestamp,
+            recordedAt,
+            timezone,
+            qualityWarnings,
+            qualityRequiresReview,
+          );
         } catch {
           localStorage.removeItem('audio_to_process');
         }
@@ -131,9 +196,27 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         return listen('recording-started', handler);
       },
       (event) => {
-        const { noteTitle, audioPath, language, timestamp, recordedAt, timezone } = event.payload ?? {};
+        const {
+          noteTitle,
+          audioPath,
+          language,
+          timestamp,
+          recordedAt,
+          timezone,
+          qualityWarnings,
+          qualityRequiresReview,
+        } = event.payload ?? {};
         if (noteTitle && audioPath && typeof timestamp === 'number') {
-          startProcessing(audioPath, noteTitle, language ?? undefined, timestamp, recordedAt, timezone);
+          startProcessing(
+            audioPath,
+            noteTitle,
+            language ?? undefined,
+            timestamp,
+            recordedAt,
+            timezone,
+            qualityWarnings,
+            qualityRequiresReview,
+          );
         } else if (noteTitle) {
           setProcessingNotes(prev => new Set(prev).add(noteTitle));
         }
@@ -152,17 +235,19 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
             job.enhancementMode,
             job.aiPipelineVersion,
             job.upgradingAi,
+            job.transcriptionPipelineVersion,
+            job.transcript !== undefined,
           ))
           .forEach((job) => {
             const timestamp = Date.parse(job.updatedAt) || Date.now();
-            startProcessing(
+            enqueueRecovery(() => startProcessing(
               job.audioPath,
               job.noteTitle,
               job.language,
               timestamp,
               job.recordedAt,
               job.timezone,
-            );
+            ));
           });
       }).catch(() => {}),
     );
@@ -273,6 +358,17 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
         }}
         title="No speech detected"
         description={recordingNotice ?? ""}
+        confirmText="OK"
+        mode="alert"
+        variant="default"
+      />
+      <ConfirmDialog
+        open={recordingQualityNotice !== null}
+        onOpenChange={(open) => {
+          if (!open) setRecordingQualityNotice(null);
+        }}
+        title="Audio quality needs review"
+        description={recordingQualityNotice ?? ""}
         confirmText="OK"
         mode="alert"
         variant="default"

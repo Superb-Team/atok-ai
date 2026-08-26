@@ -1,17 +1,28 @@
+use fs2::FileExt;
 use serde_json::Value;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 static MANIFEST_IO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 lazy_static::lazy_static! {
-    static ref ACTIVE_JOB_CLAIMS: std::sync::Mutex<std::collections::HashMap<PathBuf, String>> =
-        std::sync::Mutex::new(std::collections::HashMap::new());
+    static ref ACTIVE_JOB_CLAIMS: std::sync::Mutex<
+        std::collections::HashMap<PathBuf, ActiveJobClaim>,
+    > = std::sync::Mutex::new(std::collections::HashMap::new());
+}
+
+struct ActiveJobClaim {
+    run_id: String,
+    _lock_file: std::fs::File,
 }
 
 fn canonical_audio_key(audio_path: &Path) -> Result<PathBuf, String> {
-    std::fs::canonicalize(audio_path)
-        .map_err(|error| format!("Resolve recording path '{}': {}", audio_path.display(), error))
+    std::fs::canonicalize(audio_path).map_err(|error| {
+        format!(
+            "Resolve recording path '{}': {}",
+            audio_path.display(),
+            error
+        )
+    })
 }
 
 fn claim(audio_path: &Path, run_id: &str) -> Result<bool, String> {
@@ -25,7 +36,38 @@ fn claim(audio_path: &Path, run_id: &str) -> Result<bool, String> {
     if claims.contains_key(&key) {
         return Ok(false);
     }
-    claims.insert(key, run_id.to_string());
+    let lock_path = processing_lock_path(&key);
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            format!(
+                "Open processing ownership lock '{}': {}",
+                lock_path.display(),
+                error
+            )
+        })?;
+    match lock_file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "Acquire processing ownership lock '{}': {}",
+                lock_path.display(),
+                error
+            ));
+        }
+    }
+    claims.insert(
+        key,
+        ActiveJobClaim {
+            run_id: run_id.to_string(),
+            _lock_file: lock_file,
+        },
+    );
     Ok(true)
 }
 
@@ -34,11 +76,30 @@ fn release_claim(audio_path: &Path, run_id: &str) -> Result<bool, String> {
     let mut claims = ACTIVE_JOB_CLAIMS
         .lock()
         .map_err(|error| format!("Lock active processing jobs: {}", error))?;
-    if claims.get(&key).map(String::as_str) != Some(run_id) {
+    if claims.get(&key).map(|claim| claim.run_id.as_str()) != Some(run_id) {
         return Ok(false);
     }
     claims.remove(&key);
     Ok(true)
+}
+
+fn processing_lock_path(audio_path: &Path) -> PathBuf {
+    let file_name = audio_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("recording.mp3");
+    audio_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{file_name}.processing.lock"))
+}
+
+fn has_active_claim(audio_path: &Path) -> Result<bool, String> {
+    let key = canonical_audio_key(audio_path)?;
+    let claims = ACTIVE_JOB_CLAIMS
+        .lock()
+        .map_err(|error| format!("Lock active processing jobs: {}", error))?;
+    Ok(claims.contains_key(&key))
 }
 
 #[cfg(test)]
@@ -65,9 +126,26 @@ fn validate_manifest(manifest: &Value) -> Result<(), String> {
     if !manifest.is_object() {
         return Err("Processing manifest must be a JSON object".to_string());
     }
-    for field in ["schemaVersion", "jobId", "audioPath", "status"] {
-        if manifest.get(field).is_none() {
-            return Err(format!("Processing manifest is missing '{}'", field));
+    if manifest["schemaVersion"].as_u64() != Some(1) {
+        return Err("Unsupported processing manifest schemaVersion".to_string());
+    }
+    for field in ["jobId", "audioPath", "status"] {
+        if manifest
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!(
+                "Processing manifest requires non-empty '{}'",
+                field
+            ));
+        }
+    }
+    if let Some(generation) = manifest.get("generation") {
+        if !generation.is_u64() {
+            return Err(
+                "Processing manifest generation must be a non-negative integer".to_string(),
+            );
         }
     }
     Ok(())
@@ -75,53 +153,13 @@ fn validate_manifest(manifest: &Value) -> Result<(), String> {
 
 fn save_atomic(path: &Path, manifest: &Value) -> Result<(), String> {
     validate_manifest(manifest)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Create manifest directory: {}", error))?;
-    }
-    let temp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let bytes = serde_json::to_vec_pretty(manifest)
         .map_err(|error| format!("Serialize processing manifest: {}", error))?;
-    let mut file = std::fs::File::create(&temp)
-        .map_err(|error| format!("Create processing manifest temp file: {}", error))?;
-    let result = (|| {
-        file.write_all(&bytes)
-            .map_err(|error| format!("Write processing manifest temp file: {}", error))?;
-        file.sync_all()
-            .map_err(|error| format!("Sync processing manifest temp file: {}", error))?;
-        drop(file);
-
-        // Windows cannot rename over an existing file. All manifest I/O is
-        // serialized by MANIFEST_IO_LOCK, so the backup swap cannot race a
-        // second writer in this application process.
-        let backup = path.with_extension("json.backup");
-        if backup.exists() {
-            std::fs::remove_file(&backup)
-                .map_err(|error| format!("Remove stale processing manifest backup: {}", error))?;
-        }
-        let had_previous = path.exists();
-        if had_previous {
-            std::fs::rename(path, &backup)
-                .map_err(|error| format!("Back up processing manifest: {}", error))?;
-        }
-        if let Err(error) = std::fs::rename(&temp, path) {
-            if had_previous {
-                let _ = std::fs::rename(&backup, path);
-            }
-            return Err(format!("Commit processing manifest: {}", error));
-        }
-        if had_previous {
-            let _ = std::fs::remove_file(&backup);
-        }
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
+    crate::durable_io::atomic_replace(path, &bytes)
+        .map_err(|error| format!("Commit processing manifest: {}", error))
 }
 
+#[cfg(test)]
 fn save_serialized(path: &Path, manifest: &Value) -> Result<(), String> {
     let _guard = MANIFEST_IO_LOCK
         .lock()
@@ -129,21 +167,85 @@ fn save_serialized(path: &Path, manifest: &Value) -> Result<(), String> {
     save_atomic(path, manifest)
 }
 
+fn save_serialized_with_generation(path: &Path, manifest: &Value) -> Result<Value, String> {
+    let _guard = MANIFEST_IO_LOCK
+        .lock()
+        .map_err(|error| format!("Lock processing manifest: {}", error))?;
+    let expected = manifest
+        .get("generation")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let current = load(path)?;
+    let actual = current
+        .as_ref()
+        .and_then(|value| value.get("generation"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if current.is_some() && expected != actual {
+        return Err(format!(
+            "Processing manifest generation conflict: expected {}, actual {}",
+            expected, actual
+        ));
+    }
+    if current.is_none() && expected != 0 {
+        return Err(format!(
+            "Processing manifest generation conflict: expected initial generation 0, got {}",
+            expected
+        ));
+    }
+    let mut next = manifest.clone();
+    next["generation"] = serde_json::json!(actual.saturating_add(u64::from(current.is_some())));
+    save_atomic(path, &next)?;
+    Ok(next)
+}
+
 fn load(path: &Path) -> Result<Option<Value>, String> {
-    let backup = path.with_extension("json.backup");
-    if !path.is_file() && backup.is_file() {
-        std::fs::rename(&backup, path)
-            .map_err(|error| format!("Recover processing manifest backup: {}", error))?;
+    let backup = crate::durable_io::backup_path(path);
+    let legacy_backup = path.with_extension("json.backup");
+    if !path.is_file() {
+        if backup.is_file() {
+            crate::durable_io::recover_backup(path)
+                .map_err(|error| format!("Recover processing manifest backup: {}", error))?;
+        } else if legacy_backup.is_file() {
+            std::fs::rename(&legacy_backup, path)
+                .map_err(|error| format!("Recover legacy processing manifest backup: {}", error))?;
+        }
     }
     if !path.is_file() {
         return Ok(None);
     }
+    match read_validated(path) {
+        Ok(manifest) => Ok(Some(manifest)),
+        Err(primary_error) if backup.is_file() => {
+            let corrupt = path.with_extension(format!("corrupt-{}", uuid::Uuid::new_v4()));
+            std::fs::rename(path, &corrupt)
+                .map_err(|error| format!("Quarantine corrupt processing manifest: {}", error))?;
+            if let Err(error) = crate::durable_io::recover_backup(path) {
+                let _ = std::fs::rename(&corrupt, path);
+                return Err(format!(
+                    "Recover processing manifest backup after '{}': {}",
+                    primary_error, error
+                ));
+            }
+            match read_validated(path) {
+                Ok(manifest) => Ok(Some(manifest)),
+                Err(backup_error) => Err(format!(
+                    "Processing manifest invalid ('{}'); backup invalid ('{}')",
+                    primary_error, backup_error
+                )),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn read_validated(path: &Path) -> Result<Value, String> {
     let bytes =
         std::fs::read(path).map_err(|error| format!("Read processing manifest: {}", error))?;
     let manifest: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("Parse processing manifest: {}", error))?;
     validate_manifest(&manifest)?;
-    Ok(Some(manifest))
+    Ok(manifest)
 }
 
 fn load_serialized(path: &Path) -> Result<Option<Value>, String> {
@@ -154,12 +256,18 @@ fn load_serialized(path: &Path) -> Result<Option<Value>, String> {
 }
 
 #[tauri::command]
-pub async fn save_processing_manifest(audio_path: String, manifest: Value) -> Result<(), String> {
+pub async fn save_processing_manifest(
+    audio_path: String,
+    manifest: Value,
+) -> Result<Value, String> {
     if manifest.get("audioPath").and_then(Value::as_str) != Some(audio_path.as_str()) {
         return Err("Processing manifest audioPath does not match command audioPath".to_string());
     }
+    if !has_active_claim(Path::new(&audio_path))? {
+        return Err("Processing manifest write requires an active ownership claim".to_string());
+    }
     let path = manifest_path(Path::new(&audio_path));
-    tokio::task::spawn_blocking(move || save_serialized(&path, &manifest))
+    tokio::task::spawn_blocking(move || save_serialized_with_generation(&path, &manifest))
         .await
         .map_err(|error| format!("Manifest task failed: {}", error))?
 }
@@ -200,8 +308,14 @@ pub async fn list_processing_manifests(directory: String) -> Result<Vec<Value>, 
                 .map(|name| name.ends_with(".processing.json"))
                 .unwrap_or(false);
             if is_manifest {
-                if let Ok(Some(manifest)) = load_serialized(&path) {
-                    manifests.push(manifest);
+                match load_serialized(&path) {
+                    Ok(Some(manifest)) => manifests.push(manifest),
+                    Ok(None) => {}
+                    Err(error) => eprintln!(
+                        "[processing] Skipping invalid manifest '{}': {}",
+                        path.display(),
+                        error
+                    ),
                 }
             }
         }
@@ -280,6 +394,32 @@ mod tests {
     }
 
     #[test]
+    fn generation_cas_rejects_a_stale_manifest_writer() {
+        let dir = temp_dir("generation");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("take.mp3");
+        let path = manifest_path(&audio);
+        let initial = manifest(&audio, "extracting");
+        let saved = save_serialized_with_generation(&path, &initial).unwrap();
+        assert_eq!(saved["generation"], 0);
+
+        let mut next = initial.clone();
+        next["generation"] = serde_json::json!(0);
+        next["status"] = serde_json::json!("synthesizing");
+        let saved = save_serialized_with_generation(&path, &next).unwrap();
+        assert_eq!(saved["generation"], 1);
+
+        let mut stale = initial;
+        stale["generation"] = serde_json::json!(0);
+        stale["status"] = serde_json::json!("failed");
+        assert!(save_serialized_with_generation(&path, &stale)
+            .unwrap_err()
+            .contains("generation conflict"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn load_recovers_interrupted_backup_swap() {
         let dir = temp_dir("recover");
         std::fs::create_dir_all(&dir).unwrap();
@@ -291,6 +431,26 @@ mod tests {
 
         assert_eq!(load(&path).unwrap(), Some(expected));
         assert!(path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_quarantines_corrupt_manifest_when_backup_is_valid() {
+        let dir = temp_dir("corrupt-recover");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("take.mp3");
+        let path = manifest_path(&audio);
+        let expected = manifest(&audio, "extracting");
+        save_atomic(&path, &expected).unwrap();
+        std::fs::copy(&path, crate::durable_io::backup_path(&path)).unwrap();
+        std::fs::write(&path, b"{not-json").unwrap();
+
+        assert_eq!(load(&path).unwrap(), Some(expected));
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -377,6 +537,29 @@ mod tests {
         assert!(claim(&audio, "next").unwrap());
 
         clear_claim_for_test(&audio);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn processing_claim_holds_an_os_lock_until_release() {
+        let dir = temp_dir("os-lock");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("take.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        assert!(claim(&audio, "owner").unwrap());
+        let lock_path = processing_lock_path(&canonical_audio_key(&audio).unwrap());
+        let second_handle = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        assert!(second_handle.try_lock_exclusive().is_err());
+
+        assert!(release_claim(&audio, "owner").unwrap());
+        assert!(second_handle.try_lock_exclusive().is_ok());
+        second_handle.unlock().unwrap();
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }

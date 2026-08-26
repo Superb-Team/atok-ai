@@ -1,5 +1,9 @@
 export interface RecordingProcessingGuard {
-  run<T>(audioPath: string, task: () => Promise<T> | T): Promise<T>;
+  run<T>(
+    audioPath: string,
+    task: () => Promise<T> | T,
+    options?: { joinExisting?: boolean },
+  ): Promise<T>;
   isActive(audioPath: string): boolean;
 }
 
@@ -7,9 +11,18 @@ export function createRecordingProcessingGuard(): RecordingProcessingGuard {
   const active = new Map<string, Promise<unknown>>();
 
   return {
-    run<T>(audioPath: string, task: () => Promise<T> | T): Promise<T> {
+    run<T>(
+      audioPath: string,
+      task: () => Promise<T> | T,
+      options: { joinExisting?: boolean } = {},
+    ): Promise<T> {
       const existing = active.get(audioPath) as Promise<T> | undefined;
-      if (existing) return existing;
+      if (existing) {
+        if (options.joinExisting === false) {
+          return Promise.reject(new Error("A recording process is already active for this audio path."));
+        }
+        return existing;
+      }
 
       let started: Promise<T>;
       try {

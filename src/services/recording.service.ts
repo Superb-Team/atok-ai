@@ -4,6 +4,7 @@ import {
   createRecordingNoteContext,
   type RecordingNoteContext,
 } from '@/services/recording-note-metadata';
+import { requiresCaptureReview } from '@/services/recording-quality-policy';
 
 export interface DeviceStatus {
   mic_available: boolean;
@@ -19,6 +20,51 @@ export interface AudioDeviceInfo {
   display_name: string;
   device_type: 'mic' | 'system';
   is_default: boolean;
+}
+
+export interface AudioQualityReport {
+  schemaVersion: number;
+  createdAt: string;
+  sampleRate: number;
+  outputChannels: number;
+  micSampleRate: number;
+  micChannels: number;
+  windows: AudioQualityWindow[];
+  sourceArtifacts: AudioSourceArtifact[];
+  warnings: string[];
+  micDroppedBytes?: number;
+  requiresReview: boolean;
+}
+
+export { blockingQualityWarnings, requiresCaptureReview } from '@/services/recording-quality-policy';
+
+export function qualityReportRequiresReview(
+  report: Pick<AudioQualityReport, 'requiresReview' | 'warnings'> | null | undefined,
+): boolean {
+  return requiresCaptureReview(report?.requiresReview ?? false, report?.warnings ?? []);
+}
+
+export interface AudioQualityWindow {
+  chunkIndex: number;
+  startMs: number;
+  endMs: number;
+  micClippedRatio: number;
+  micRmsDbfs: number;
+  systemRmsDbfs: number;
+  mixedRmsDbfs: number;
+  mixedClippedRatio: number;
+  micBytes: number;
+  systemBytes: number;
+}
+
+export interface AudioSourceArtifact {
+  kind: string;
+  chunkIndex: number;
+  relativePath: string;
+  sha256: string;
+  bytes: number;
+  sampleRate: number;
+  channels: number;
 }
 
 export interface ProcessingJobSummary {
@@ -37,6 +83,8 @@ export interface ProcessingJobSummary {
   repairingFallback?: boolean;
   aiPipelineVersion?: number;
   upgradingAi?: boolean;
+  transcriptionPipelineVersion?: number;
+  transcript?: string;
 }
 
 export interface RecordingStartInfo extends RecordingNoteContext {
@@ -61,6 +109,10 @@ export class RecordingService {
     });
   }
 
+  static async saveGlossary(audioPath: string, glossary: string[]): Promise<void> {
+    await invoke('save_recording_glossary', { audioPath, terms: glossary });
+  }
+
   /**
    * List all available audio input devices.
    * Returns structured device info sorted with default first.
@@ -76,13 +128,21 @@ export class RecordingService {
     return await invoke<DeviceStatus>('get_audio_device_status');
   }
 
+  static async getQualityReport(audioPath: string): Promise<AudioQualityReport | null> {
+    return await invoke<AudioQualityReport | null>('get_recording_quality_report', { audioPath });
+  }
+
   /**
    * Start recording microphone audio
    * AEC is now read from the backend's in-memory AEC_ENABLED static.
    * `language` is an ISO-639-1 code (e.g. "id", "en") pinned for Whisper so quiet
    * chunks don't get misdetected into the wrong language during transcription.
    */
-  static async startRecording(micDevice?: string, language?: string): Promise<RecordingStartInfo> {
+  static async startRecording(
+    micDevice?: string,
+    language?: string,
+    glossary: string[] = [],
+  ): Promise<RecordingStartInfo> {
     const recordingsDir = await this.getRecordingsDir();
     await invoke('ensure_recordings_dir', { path: recordingsDir });
 
@@ -94,6 +154,7 @@ export class RecordingService {
       outputPath,
       micDevice: micDevice ?? null,
       language: language ?? 'id',
+      glossary,
     });
     this.currentRecordingPath = outputPath;
 

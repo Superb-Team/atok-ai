@@ -80,7 +80,7 @@ const SettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [aecEnabled, setAecEnabled] = useState(() => {
     const v = localStorage.getItem('aec_enabled');
-    return v === null ? true : v === 'true';
+    return localStorage.getItem('aec_preference_version') === '2' && v === 'true';
   });
   const [theme, setTheme] = useState<ThemePreference>(() => getThemePreference());
 
@@ -98,8 +98,9 @@ const SettingsPage: React.FC = () => {
   const toggleAec = async () => {
     const next = !aecEnabled;
     setAecEnabled(next);
-    // Persist so the preference survives restarts (the backend static resets to ON).
+    // Persist so the preference survives restarts.
     localStorage.setItem('aec_enabled', String(next));
+    localStorage.setItem('aec_preference_version', '2');
     try {
       await invoke('set_aec_enabled', { enabled: next });
     } catch (err) {

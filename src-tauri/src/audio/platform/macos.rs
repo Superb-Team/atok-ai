@@ -4,7 +4,7 @@
 //! Both sources write bounded, rotating PCM chunks into one unique session.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ pub(crate) fn record(
     is_paused: &Arc<AtomicBool>,
     aec_enabled: bool,
     mic_name: Option<&str>,
-    chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>>,
+    chunk_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::audio::types::LiveAudioChunk>>,
 ) -> Result<(), String> {
     let sample_rate = AEC_SAMPLE_RATE;
     let channels = 2u32;
@@ -51,10 +51,12 @@ pub(crate) fn record(
 
     let system_capture = MacSystemCapture::start(&session_path)?;
     DesktopAudioRecorder::write_start_meta(&session_path, "sys_start.meta");
+    let mic_overruns = Arc::new(AtomicU64::new(0));
 
     let mic_is_recording = Arc::clone(is_recording);
     let mic_is_paused = Arc::clone(is_paused);
     let mic_dir = session_path.clone();
+    let mic_overruns_capture = Arc::clone(&mic_overruns);
     let mic_thread = match std::thread::Builder::new()
         .name("macos-mic-file".into())
         .spawn(move || {
@@ -64,6 +66,7 @@ pub(crate) fn record(
                 mic_cfg,
                 mic_is_recording,
                 mic_is_paused,
+                mic_overruns_capture,
             )
         }) {
         Ok(thread) => thread,
@@ -78,6 +81,7 @@ pub(crate) fn record(
     let worker_done_signal = Arc::clone(&worker_done);
     let worker_dir = session_path.clone();
     let worker_mp3 = mp3_path.to_path_buf();
+    let worker_mic_overruns = Arc::clone(&mic_overruns);
     let worker_thread = match std::thread::Builder::new()
         .name("macos-chunk-worker".into())
         .spawn(move || {
@@ -90,6 +94,7 @@ pub(crate) fn record(
                 mic_ch,
                 worker_done_signal,
                 aec_enabled,
+                worker_mic_overruns,
                 chunk_tx,
             )
         }) {
@@ -120,7 +125,13 @@ pub(crate) fn record(
         Duration::from_secs(300),
     );
     match worker_result {
-        Some(Ok(())) => {}
+        Some(Ok(Ok(()))) => {}
+        Some(Ok(Err(error))) => {
+            return Err(format!(
+                "macOS chunk worker failed: {error}; session retained at {}",
+                session_path.display()
+            ));
+        }
         Some(Err(_)) => {
             return Err(format!(
                 "macOS chunk worker panicked; session retained at {}",

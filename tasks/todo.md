@@ -1,44 +1,38 @@
 # Lossless Recording Reliability Checklist
 
-## Phase A — Reproduce and stop duplicate jobs
+> **Execution order:** This checklist is the implementation ledger for the
+> authoritative roadmap in `tasks/plan.md`. Do not begin a later checkpoint
+> until the preceding checkpoint's acceptance criteria have been demonstrated on
+> real artifacts, not only unit tests.
 
-- [x] Task 1a: Add duplicate-start and runaway-output regression fixtures
-- [x] Task 2a: Make Tauri event listener setup cancellation-safe across Strict Mode/HMR
-- [x] Task 3a: Add same-process backend atomic job claim and owner-checked release
-- [x] Task 4a: Serialize same-process manifest writes and clean failed temp files
-- [ ] Task 3b: Add recording UUID, cross-process OS ownership lock, and fencing token
-- [ ] Task 4b: Add generation CAS and power-loss recovery across all durable artifacts
-- [ ] Checkpoint A: one recording produces exactly one active job under all start paths
+## Next production-release sequence
 
-## Phase B — Preserve source and transcript
+- [x] Inventory local corpus: 35 canonical recordings / 28.17 hours; preserve it as local-only baseline evidence
+- [ ] Add human reference ranges, consent/retention metadata, and critical-entity labels before using the corpus for accuracy claims
+- [ ] Define the canonical global state plus per-stage status model; remove divergent frontend/Rust/manifest state vocabularies
+- [ ] Define source/derivative codecs, owner-only permission policy, egress policy, disk reserve, queue capacity, retry budget, and circuit-breaker policy
+- [x] Resolve source deletion on ASR setup failure and MP3 file sync before rename
+- [ ] Separate raw, normalized, and accepted transcript revisions so heuristic cleaning never silently erases evidence
+- [ ] Split "Fix format" into deterministic formatting, evidence-backed regeneration, and explicit artifact review; remove draft-as-ground-truth validation
+- [ ] Phase 0: approve qualification corpus, scorecard, and initial audio-level policy
+- [ ] Phase 1: wire the V2 UUID coordinator and fencing into runtime
+- [ ] Checkpoint 1: prove one backend-owned recording identity across restart/remount
+- [ ] Phase 2: make source capture spool durable; add preflight calibration
+- [ ] Checkpoint 2: prove a 65-minute source capture survives restart intact
+- [ ] Phase 3: ship resumable per-chunk ASR and absolute timestamp mapping
+- [ ] Checkpoint 3: prove a 125-minute ASR run resumes without duplicate completed uploads
+- [ ] Phase 4: ship raw/candidate/accepted transcript revisions and claim evidence
+- [ ] Phase 5: ship explicit retry/review/regenerate/publication UX
+- [ ] Phase 6: qualify on real hardware, canary, rollback drill, then release
 
-- [ ] Task 5: Make finalized MP3 immutable, verified, and explicitly retained
-- [x] Task 6a: Implement same-process single-flight transcription and durable canonical sidecar
-- [ ] Task 6b: Persist independently retryable Whisper chunk artifacts with accepted/suspicious ranges
-- [ ] Task 7: Add transcript hallucination/integrity gates with typed suspicious ranges
-- [ ] Checkpoint B: forced restart of a two-hour job loses no completed work or source data
+## Existing safety slices — evidence only, not a production claim
 
-## Phase C — Block AI hallucination and runaway notes
-
-- [x] Task 8a: Reject truncated, runaway-paragraph, and extreme-expansion output
-- [ ] Task 8b: Calibrate multilingual quality corpus and versioned thresholds
-- [ ] Task 9: Ground section notes in source segment/evidence IDs
-- [ ] Task 10: Replace unsafe continuation and suspicious-draft fallback behavior
-- [ ] Checkpoint C: no truncated, looping, word-salad, or unsupported note publishes as clean
-
-## Phase D — Idempotent delivery and recovery
-
-- [x] Task 11a: Serialize recording-note creation in PostgreSQL and hide internal idempotency tags
-- [ ] Task 11b: Add schema-level user+recording UUID uniqueness and persisted publication status
-- [ ] Task 12: Add persistent recovery, partial-status, raw-audio, transcript, and retry UX
-- [ ] Task 13: Add privacy-safe diagnostics, storage warnings, and explicit retention controls
-
-## Phase E — Qualification
-
-- [ ] Task 14: Pass 10-minute, 1-hour, and 2-hour fault-injection qualification
-- [ ] `pnpm test` passes
-- [ ] `pnpm build` passes
-- [ ] Full Rust test suite passes
-- [ ] Tauri runtime smoke test passes under Strict Mode, HMR, restart, offline, and rate limiting
-- [ ] Artifact audit confirms MP3, transcript chunks, canonical transcript, manifest, and note identity
-- [ ] Human review approves quality thresholds and release rollout
+- [x] Add Rust-generated recording UUID and versioned V2 manifest contracts (contract/tests; not wired into runtime)
+- [ ] Add managed/legacy recording resolver without moving existing files
+- [x] Add semantic stage keys and dependency invalidation contracts
+- [x] Fix mic-only sample-rate normalization with regression coverage
+- [x] Persist provider segments, any provider-supplied word timestamps, and immutable ASR-attempt provenance; record when word timestamps are unavailable
+- [x] Preserve capture-quality windows instead of console-only clipping warnings
+- [x] Add cross-track arbitration before transcript merge
+- [x] Add accepted transcript revisions and stable evidence spans (backend contract/command)
+- [x] Gate final note and RAG publication on supported claims

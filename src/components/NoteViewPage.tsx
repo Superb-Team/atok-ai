@@ -2,11 +2,23 @@ import { useEffect, useMemo, useRef, useState, Component } from "react";
 import { noteService } from "@/services/note.service";
 import { authService } from "@/services/auth.service";
 import type { Note } from "@/types/note.types";
-import { ArrowLeft, Star, Trash2, Edit, Paperclip } from "lucide-react";
+import { ArrowLeft, Star, Trash2, Edit, Paperclip, Sparkles } from "lucide-react";
 import { noteAssetService } from "@/services/note-asset.service";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import { NoteEditSession } from "@/components/note-editor/NoteEditSession";
+import { formatNoteWithAi } from "@/services/note-format.service";
+import { resolveNoteImprovementRoute } from "@/services/recording-job-selection";
+import type { ProcessingJobSummary } from "@/services/recording.service";
 
 class ErrorBoundary extends Component<{ fallback: React.ReactNode; children: React.ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
@@ -50,6 +62,16 @@ interface NoteViewPageProps {
   onBack: () => void;
 }
 
+interface AiDraft {
+  audioPath: string;
+  title: string;
+  content: string;
+  expectedUpdatedAt: string;
+  canonicalTranscript: string;
+  transcriptRevisionId?: string;
+  warnings: string[];
+}
+
 const headerIconButton =
   "inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60";
 
@@ -60,6 +82,13 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [attaching, setAttaching] = useState(false);
+  const [formatting, setFormatting] = useState(false);
+  const [formatError, setFormatError] = useState<string | null>(null);
+  const [formatNotice, setFormatNotice] = useState<string | null>(null);
+  const [regeneratingAi, setRegeneratingAi] = useState(false);
+  const [savingAiDraft, setSavingAiDraft] = useState(false);
+  const [aiDraft, setAiDraft] = useState<AiDraft | null>(null);
+  const [aiDraftError, setAiDraftError] = useState<string | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const finishEditorRef = useRef<(() => Promise<boolean>) | null>(null);
@@ -128,6 +157,145 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
       setAttachError(err instanceof Error ? err.message : String(err));
     } finally {
       setAttaching(false);
+    }
+  };
+
+  const handleFormatWithAi = async () => {
+    if (!note || formatting || !note.content?.trim()) return;
+    const user = authService.getUser();
+    if (!user) return;
+
+    setFormatting(true);
+    setFormatError(null);
+    setFormatNotice(null);
+    try {
+      const content = await formatNoteWithAi({
+        title: note.title,
+        content: note.content,
+      });
+      if (content === note.content) {
+        setFormatNotice("Catatan sudah dalam format yang aman; tidak ada perubahan yang diperlukan.");
+        return;
+      }
+      const updated = await noteService.updateNote(note.id, user.id, {
+        content,
+        expected_updated_at: note.updated_at,
+      });
+      setNote(updated);
+      setFormatNotice("Format catatan berhasil diperbarui.");
+    } catch (err) {
+      setFormatNotice(null);
+      setFormatError(err instanceof Error ? err.message : "Failed to format note with AI");
+    } finally {
+      setFormatting(false);
+    }
+  };
+
+  const handleRegenerateWithAi = async (job: ProcessingJobSummary) => {
+    if (!note || regeneratingAi) return;
+
+    setRegeneratingAi(true);
+    setAiDraftError(null);
+    setFormatNotice(null);
+    try {
+      const { processAudioRecording } = await import("@/services/audio-processor.service");
+      const result = await processAudioRecording(
+        job.audioPath,
+        job.noteTitle || note.title,
+        job.language || undefined,
+        job.recordedAt && job.timezone
+          ? { recordedAt: job.recordedAt, timezone: job.timezone }
+          : undefined,
+        { forceAiUpgrade: true, previewOnly: true },
+      );
+      if (result.outcome === "already_processing") {
+        throw new Error("Rekaman masih sedang diproses. Tunggu sampai proses selesai lalu coba lagi.");
+      }
+      if (
+        !result.success
+        || result.outcome !== "draft_preview"
+        || !result.enhancedText.trim()
+        || !result.canonicalTranscript?.trim()
+      ) {
+        throw new Error(result.error ?? "AI belum menghasilkan draft yang lolos pemeriksaan.");
+      }
+
+      setAiDraft({
+        audioPath: job.audioPath,
+        title: result.noteTitle || note.title,
+        content: result.enhancedText,
+        expectedUpdatedAt: note.updated_at,
+        canonicalTranscript: result.canonicalTranscript,
+        transcriptRevisionId: result.transcriptRevisionId,
+        warnings: result.warnings ?? [],
+      });
+    } catch (err) {
+      setAiDraftError(err instanceof Error ? err.message : "AI draft tidak tersedia.");
+    } finally {
+      setRegeneratingAi(false);
+    }
+  };
+
+  const handleImproveNote = async () => {
+    if (!note) return;
+    try {
+      const { recordingService } = await import("@/services/recording.service");
+      const route = resolveNoteImprovementRoute(
+        await recordingService.listProcessingJobs(),
+        note.id,
+        Boolean(note.recorded_at),
+      );
+      if (route.kind === "recording") {
+        await handleRegenerateWithAi(route.job);
+        return;
+      }
+      if (route.kind === "missing_recording_source") {
+        setAiDraftError(
+          "Transcript canonical rekaman ini tidak ditemukan. Catatan asli tetap aman dan tidak diubah.",
+        );
+        return;
+      }
+    } catch (error) {
+      console.error("Recording source lookup failed", error);
+      if (note.recorded_at) {
+        setAiDraftError("Sumber rekaman gagal dimuat. Catatan asli tetap aman dan tidak diubah.");
+        return;
+      }
+    }
+    await handleFormatWithAi();
+  };
+
+  const handleSaveAiDraft = async () => {
+    if (!note || !aiDraft || savingAiDraft) return;
+
+    setSavingAiDraft(true);
+    setAiDraftError(null);
+    try {
+      const { commitAudioRecordingDraft } = await import("@/services/audio-processor.service");
+      const updated = await commitAudioRecordingDraft({
+        audioPath: aiDraft.audioPath,
+        noteId: note.id,
+        noteTitle: aiDraft.title,
+        content: aiDraft.content,
+        expectedUpdatedAt: aiDraft.expectedUpdatedAt,
+        canonicalTranscript: aiDraft.canonicalTranscript,
+        transcriptRevisionId: aiDraft.transcriptRevisionId,
+        tags: note.tags,
+      });
+      setNote(updated);
+      setAiDraft(null);
+      setFormatNotice("Draft AI berhasil disimpan. Transcript lengkap tetap dipertahankan sebagai sumber bukti.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Draft AI gagal disimpan.";
+      if (err instanceof Error && err.name === "NoteConflictError") {
+        setAiDraft(null);
+        await loadNote();
+        setAiDraftError("Catatan berubah sejak draft dibuat. Draft tidak diterapkan; catatan terbaru sudah dimuat ulang.");
+      } else {
+        setAiDraftError(message);
+      }
+    } finally {
+      setSavingAiDraft(false);
     }
   };
 
@@ -255,6 +423,88 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
         mode="alert"
         variant="destructive"
       />
+      <ConfirmDialog
+        open={formatError !== null}
+        onOpenChange={(open) => {
+          if (!open) setFormatError(null);
+        }}
+        title="Formatting failed"
+        description={formatError ?? ""}
+        confirmText="OK"
+        mode="alert"
+        variant="destructive"
+      />
+      <ConfirmDialog
+        open={aiDraftError !== null}
+        onOpenChange={(open) => {
+          if (!open) setAiDraftError(null);
+        }}
+        title="AI draft tidak tersedia"
+        description={aiDraftError ?? ""}
+        confirmText="OK"
+        mode="alert"
+        variant="destructive"
+      />
+      <Dialog
+        open={aiDraft !== null}
+        onOpenChange={(open) => {
+          if (!open && !savingAiDraft) setAiDraft(null);
+        }}
+      >
+        <DialogContent className="flex max-h-[88vh] max-w-4xl flex-col overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>Review draft AI</DialogTitle>
+            <DialogDescription>
+              Draft ini dibuat dari transcript canonical dan belum mengubah catatan. Periksa konteks,
+              keputusan, pertimbangan, serta tindak lanjut sebelum menyimpannya.
+            </DialogDescription>
+          </DialogHeader>
+          {aiDraft && (
+            <div className="min-h-0 flex-1 overflow-y-auto space-y-4">
+              {aiDraft.warnings.length > 0 && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+                  <p className="font-medium">Periksa bagian berikut sebelum menyimpan:</p>
+                  <ul className="mt-2 list-disc space-y-1 pl-5">
+                    {aiDraft.warnings.slice(0, 6).map((warning, index) => (
+                      <li key={`${index}-${warning}`}>{warning}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="rounded-lg border border-border bg-muted/20 px-5 py-4">
+                <h3 className="mb-5 font-display text-xl font-semibold tracking-tight text-foreground">
+                  {aiDraft.title}
+                </h3>
+                <ErrorBoundary
+                  key={`ai-draft-${aiDraft.expectedUpdatedAt}`}
+                  fallback={
+                    <pre className="whitespace-pre-wrap leading-relaxed text-foreground/90">
+                      {aiDraft.content}
+                    </pre>
+                  }
+                >
+                  <MarkdownRenderer
+                    content={stripLeadingDuplicateHeading(aiDraft.content, aiDraft.title)}
+                  />
+                </ErrorBoundary>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAiDraft(null)}
+              disabled={savingAiDraft}
+            >
+              Keep current note
+            </Button>
+            <Button type="button" onClick={() => void handleSaveAiDraft()} disabled={savingAiDraft}>
+              {savingAiDraft ? "Saving draft…" : "Save AI draft"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <div className="flex h-screen flex-1 flex-col overflow-hidden bg-background">
         {/* Header */}
         <div className="border-b border-border bg-background/90 backdrop-blur-sm">
@@ -306,6 +556,18 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
                       aria-label="Edit note"
                     >
                       <Edit className="h-4 w-4" strokeWidth={1.75} />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => void handleImproveNote()}
+                      disabled={formatting || regeneratingAi || !note.content?.trim()}
+                      className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label="Improve note with AI"
+                      title="Improve the note from its best available source"
+                    >
+                      <Sparkles className="h-4 w-4" strokeWidth={1.75} />
+                      {formatting || regeneratingAi ? "Improving…" : "Improve note"}
                     </button>
 
                     <button
@@ -379,6 +641,15 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
             )}
 
             <div className="mt-9 border-t border-border pt-9">
+              {formatNotice && (
+                <div
+                  className="mb-6 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {formatNotice}
+                </div>
+              )}
               {bodyContent ? (
                 // Keyed so the boundary resets when the note changes — a caught
                 // error (e.g. a transient one during dev HMR) otherwise pins the

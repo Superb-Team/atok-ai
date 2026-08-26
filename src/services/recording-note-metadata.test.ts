@@ -35,6 +35,15 @@ test("rejects generic and placeholder titles", () => {
   assert.equal(isUsefulGroundedTitle("Evaluasi Sales dan Content Engine", transcript), true);
 });
 
+test("rejects conversational questions and sentence fragments as note titles", () => {
+  const noisyTranscript = "Berapa sih dia mau atur untuk pakiran itu dari data yang masih sedikit. Lalu pembicaraan berlanjut.";
+
+  assert.equal(
+    isUsefulGroundedTitle("Berapa sih dia mau atur untuk pakiran itu dari data yang masih sedikit.", noisyTranscript),
+    false,
+  );
+});
+
 test("uses a grounded topic and appends the actual local recording date", () => {
   const title = deriveRecordingNoteTitle(
     "# Evaluasi Sales dan Content Engine\n\n## Ringkasan\nIsi.",
@@ -57,6 +66,18 @@ test("does not duplicate a date returned by the model", () => {
   );
 
   assert.equal(title, "Evaluasi Sales dan Content Engine — 20 Juli 2026");
+});
+
+test("uses a safe generic title when no AI title source is available", () => {
+  const title = deriveRecordingNoteTitle(
+    "",
+    "Oh, gue putus-putus, Kak. Tes, halo.",
+    "Recording - 22:04:00",
+    context,
+    "id",
+  );
+
+  assert.equal(title, "Catatan Rekaman — 20 Juli 2026");
 });
 
 test("replaces a model title so the stored title and document stay consistent", () => {

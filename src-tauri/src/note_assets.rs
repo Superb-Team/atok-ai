@@ -116,11 +116,9 @@ pub async fn capture_screenshot(assets_dir: String) -> Result<ImportedAsset, Str
         let dest_c = dest.clone();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             if let Some(parent) = dest_c.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Create assets dir: {}", e))?;
+                std::fs::create_dir_all(parent).map_err(|e| format!("Create assets dir: {}", e))?;
             }
-            std::fs::copy(&portal_file, &dest_c)
-                .map_err(|e| format!("Copy screenshot: {}", e))?;
+            std::fs::copy(&portal_file, &dest_c).map_err(|e| format!("Copy screenshot: {}", e))?;
             // The portal leaves its copy in the user's Pictures dir; remove it so
             // screenshots don't pile up outside the app's storage.
             let _ = std::fs::remove_file(&portal_file);
@@ -397,12 +395,20 @@ mod tests {
         std::fs::write(&shot_b, b"b").unwrap();
 
         let mp3_str = mp3.to_string_lossy().into_owned();
-        record_screenshot_asset(mp3_str.clone(), shot_b.to_string_lossy().into_owned(), 20_000)
-            .await
-            .unwrap();
-        record_screenshot_asset(mp3_str.clone(), shot_a.to_string_lossy().into_owned(), 5_000)
-            .await
-            .unwrap();
+        record_screenshot_asset(
+            mp3_str.clone(),
+            shot_b.to_string_lossy().into_owned(),
+            20_000,
+        )
+        .await
+        .unwrap();
+        record_screenshot_asset(
+            mp3_str.clone(),
+            shot_a.to_string_lossy().into_owned(),
+            5_000,
+        )
+        .await
+        .unwrap();
 
         let taken = take_recording_assets(mp3_str.clone()).await.unwrap();
         assert_eq!(taken.duration_ms, 30_000);

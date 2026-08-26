@@ -23,7 +23,13 @@ export interface ProcessedSection {
 // finish faster, checkpoint independently, and bound the amount retried after
 // a provider failure. The estimate used here is conservative UTF-8 bytes.
 export function operationalSourceTokenBudget(providerBudget: number): number {
-  return Math.min(6_000, providerBudget);
+  return Math.min(18_000, providerBudget);
+}
+
+export function isUsableSectionBackedDraft(sections: readonly ProcessedSection[]): boolean {
+  return sections.length > 0 && sections.every(
+    (section) => !section.isDegraded && section.markdown.trim().length > 0,
+  );
 }
 
 export function stripPlaceholderSections(markdown: string): string {
@@ -103,6 +109,17 @@ function splitOversizedUnit(unit: string, budget: number): string[] {
   return pieces;
 }
 
+function preferredSemanticBoundary(text: string): number {
+  const minimum = Math.floor(text.length * 0.5);
+  let best = 0;
+  const boundaryPattern = /(?:\r?\n){2,}|[.!?]["')\]]*(?:[ \t]+|\r?\n+)/gu;
+  for (const match of text.matchAll(boundaryPattern)) {
+    const end = (match.index ?? 0) + match[0].length;
+    if (end >= minimum) best = end;
+  }
+  return best;
+}
+
 export function splitTranscriptByTokenBudget(
   transcript: string,
   maxSourceTokens: number,
@@ -118,29 +135,32 @@ export function splitTranscriptByTokenBudget(
   let currentTokens = 0;
   let cursor = 0;
 
-  const flush = () => {
+  const flush = (end = current.length) => {
     if (!current) return;
+    const text = current.slice(0, end);
     const index = sections.length;
     const startChar = cursor;
-    cursor += current.length;
+    cursor += text.length;
     sections.push({
       id: `section-${String(index + 1).padStart(4, "0")}`,
       index,
-      text: current,
+      text,
       startChar,
       endChar: cursor,
-      estimatedTokens: estimateTokenUpperBound(current),
-      markers: markersIn(current),
+      estimatedTokens: estimateTokenUpperBound(text),
+      markers: markersIn(text),
     });
-    current = "";
-    currentTokens = 0;
+    current = current.slice(end);
+    currentTokens = estimateTokenUpperBound(current);
   };
 
   for (const rawUnit of units) {
     for (const unit of splitOversizedUnit(rawUnit, maxSourceTokens)) {
       const unitTokens = estimateTokenUpperBound(unit);
       if (current && currentTokens + unitTokens > maxSourceTokens) {
-        flush();
+        const semanticBoundary = preferredSemanticBoundary(current);
+        flush(semanticBoundary || current.length);
+        if (current && currentTokens + unitTokens > maxSourceTokens) flush();
       }
       current += unit;
       currentTokens += unitTokens;
@@ -195,8 +215,8 @@ export function composeLongFormNote(
   const details = ordered.map((section) => {
     const warning = section.isDegraded
       ? `\n\n> ${language === "id"
-        ? "Bagian ini tidak dapat disempurnakan sepenuhnya; transkrip mentah dipertahankan agar detail tidak hilang."
-        : "This part could not be fully enhanced; its raw transcript is preserved so no detail is lost."}`
+        ? "Bagian ini membutuhkan pemeriksaan; bandingkan dengan transcript lengkap sebelum menyimpan."
+        : "This section needs review; compare it with the complete transcript before saving."}`
       : "";
     return `${normalizeTopicHeadings(section.markdown)}${warning}`.trim();
   });

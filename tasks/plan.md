@@ -1,408 +1,570 @@
 # Implementation Plan: Lossless and Trustworthy Recording Pipeline
 
-## Objective
+> Recording V2 extends this reliability plan. Its current contract is defined in
+> `tasks/recording-v2-spec.md`. New work must preserve completed safety slices and
+> remain compatible with legacy flat MP3/sidecar recordings.
 
-Make a 1–2 hour recording durable, single-processing, resumable, and auditable. A UI remount, duplicate event, app crash, provider outage, malformed AI response, or retry must never delete the MP3, silently discard transcript sections, create duplicate notes, or publish hallucinated/runaway text as a successful note.
+## Authoritative production-readiness roadmap
 
-## Reliability Contract
+### Decision and scope
 
-1. The finalized MP3 is the source of truth and is immutable until the user explicitly deletes it.
-2. Exactly one active processing owner exists for each canonical audio path; duplicate starts return the existing job.
-3. Every completed transcription chunk and note section is persisted atomically and reused after restart.
-4. A failed or suspicious stage is marked `partial`/`needs_review`; it is never presented as clean success.
-5. Raw transcript and generated note are separate artifacts. AI enhancement cannot overwrite the transcript.
-6. A note is published only after deterministic quality gates pass.
-7. Automatic cleanup may remove disposable temp files, but never the MP3, canonical transcript, or committed chunk artifacts.
+Atok.ai recording is a deterministic, durable workflow—not an autonomous agent.
+The model may transcribe, extract, or format text, but it must never choose the
+recording state, silently replace source artifacts, or publish an uncertain note.
 
-## Verified Current Failures
+This roadmap applies to meetings of one to two hours and is intentionally
+additive:
 
-- `HomePage` registers `recording-started` asynchronously. Cleanup can run while `unlisten` is still unresolved, leaving a stale listener after Strict Mode/HMR/remount.
-- Deduplication lives in component-local refs, so stale component instances do not share the same active-job set.
-- Event, localStorage polling, and manifest recovery can all initiate the same job.
-- The manifest writer uses a shared `.backup` name and an `exists -> rename` sequence without a per-path lock or generation check.
-- Live transcription ownership is destructive (`take_live_job` removes the handle). Concurrent callers fall through to duplicate full-file uploads.
-- The live transcript sidecar is deleted on first read, preventing safe reuse by retries.
-- Failed Whisper chunks are inserted into transcript text as bracketed prose, allowing downstream AI to treat infrastructure errors as meeting content.
-- AI output validation checks truncation and exact repeated lines, but not a single long runaway paragraph with changing words. The supplied July 15 note is a regression example of this failure.
-- The review pass is best-effort and returns the original draft when review fails, even if that draft is precisely the suspicious artifact.
-- Existing manifest tests cover only a single writer; they cannot detect the observed race.
+- Existing flat MP3 recordings, sidecars, notes, and screenshots remain readable.
+- Existing recording files are neither moved nor deleted as part of this work.
+- DeepInfra Whisper remains the initial ASR provider behind an adapter; changing
+  provider is a separately measured decision, not a hidden fallback.
+- Linux/PipeWire is qualified first. macOS and Windows must not claim equivalent
+  reliability until they pass the same qualification suite.
+- Audio retention stays explicit: source audio remains until the user performs a
+  dedicated recording-data deletion flow.
+- “Production-ready” means the release gate below passes on target hardware. It
+  never means word-perfect ASR or zero model uncertainty.
 
-## Implemented Safety Slice (2026-07-19)
+### Non-negotiable invariants
 
-- Frontend async listener cleanup is cancellation-safe and covered by a delayed-registration test.
-- Frontend processing is single-flight per audio path, and Rust rejects concurrent claims from duplicate webview listeners.
-- Manifest access is serialized in-process; a 32-writer regression test covers the observed backup race.
-- Transcript requests are single-flight in-process, canonical transcript sidecars are durable/non-consuming, and failed chunks are no longer injected as meeting prose.
-- Screenshot manifests are non-consuming so restart/retry retains the same assets.
-- Runaway/truncated AI output is rejected before save; rejected notes fall back to the preserved transcript, receive `needs-review`, and are excluded from RAG indexing.
-- Recording note insertion is idempotent across processes through a PostgreSQL transaction advisory lock and persisted internal job marker.
+1. The backend assigns a UUID before capture. A frontend timestamp or file path
+   is presentation metadata, never the recording identity.
+2. Every source chunk is durably committed before it can be uploaded, mixed,
+   removed from a spool, or considered complete.
+3. A recording has at most one active owner. Every durable write carries the
+   owner's current generation/fencing token and stale writers fail.
+4. Raw provider output, normalized transcript, accepted transcript, generated
+   draft, and published note are distinct immutable revisions.
+5. A fallback preserves source and records a durable degradation condition. It
+   must not pretend to be a successful AI result.
+6. No claim becomes a clean note or RAG document without evidence pointing to an
+   accepted transcript revision and an absolute audio range.
+7. Audio, transcript, and note work must be recoverable after an app kill,
+   provider 500/429, network loss, full disk, device disappearance, or UI remount.
+8. New source artifacts use owner-only filesystem permissions where the platform
+   supports them. Existing legacy files are never chmodded, moved, or deleted
+   implicitly.
+9. Audio leaves the device only through an explicitly configured ASR provider
+   and only as an ASR derivative. Logs, traces, note drafts, and diagnostics do
+   not contain raw audio or transcript text.
 
-This slice closes the reported same-process incident. The remaining tasks below are still required for cross-process OS fencing, managed artifact storage, chunk-level resume, explicit deletion semantics, and full two-hour qualification.
-
-## Target Flow
+### Target runtime topology
 
 ```text
-Popup/import
-   -> finalize and fsync immutable MP3
-   -> enqueue_or_get_job(canonical audio identity)
-   -> durable job manifest
-   -> one leased processing owner
-   -> persisted Whisper chunk artifacts
-   -> canonical transcript (never consumed/deleted)
-   -> bounded section-note artifacts
-   -> deterministic quality gates
-   -> publish clean note OR publish review-required fallback
-   -> retain MP3 + transcript + audit metadata
+Rust recording UUID + ownership lock
+  -> managed bundle/<recordingId>/manifest.v2.json (CAS/fencing)
+  -> source/mic + source/system chunks (immutable, hashed, fsynced)
+  -> derivatives/playback-mix + derivatives/asr-input
+  -> ASR chunk attempts (durable status, retry schedule, provider provenance)
+  -> raw transcript -> normalized candidate -> accepted revision
+  -> evidence-backed note draft -> needs-review OR ready
+  -> transactional note/RAG publication outbox
 ```
 
-## Architecture Decisions
+The UI observes state from the backend. It may request start, stop, retry,
+format, regenerate, or accept a revision, but it never owns job identity or
+recovery.
 
-### One backend authority for job identity and ownership
+### Dependency order
 
-Assign a random recording UUID at capture/import; identical bytes imported twice remain distinct user recordings. Copy/finalize source media into a managed app-data artifact directory and use the UUID—not path or a short content hash—as identity. A Rust command acquires a cross-process OS file lock for that UUID and returns either `claimed`, `already_running`, or `resumable`. Every durable mutation also carries a monotonically increasing fencing token checked under the same lock. Automatic lease expiry alone must never create a second owner while an older process is alive or suspended.
+```text
+Recording UUID + V2 coordinator
+  -> durable capture spool + fencing
+    -> resumable ASR + absolute timeline
+      -> transcript revisions + evidence
+        -> note/RAG publication and review UX
+          -> long-duration fault qualification and staged release
+```
 
-### Layered idempotency
+No downstream phase may be marked complete while its upstream source of truth is
+still path-based or process-local.
 
-- UI layer: one lifecycle-safe listener and no polling/event double execution.
-- Coordinator layer: process-wide single-flight keyed by recording UUID.
-- Ownership layer: cross-process OS lock; process death releases ownership without wall-clock assumptions.
-- Persistence layer: generation/fencing token prevents stale writers from mutating chunks, synthesis, manifests, or notes.
-- Note layer: PostgreSQL serialization plus a user-scoped durable idempotency key prevents duplicate notes.
+### Canonical state and work model
 
-### Explicit state and publication model
+The single normative definition is
+[`Canonical State and Work Model`](recording-v2-spec.md#canonical-state-and-work-model)
+in `tasks/recording-v2-spec.md`. The plan intentionally does not restate state
+names: frontend labels, manifests, jobs, database publication, and tests must
+derive from that one contract.
 
-The job state machine has legal compare-and-swap transitions only: `capturing -> finalizing -> queued -> transcribing -> transcript_partial|transcript_ready -> enhancing -> needs_review|ready_to_publish -> complete`, plus `failed_recoverable`, `cancelled`, and `deleting`. Generated drafts, quality decisions, and final Markdown are separate immutable artifacts referenced by hash. A note persists `processingStatus`, `sourceJobId`, and provenance; search, RAG, export, and normal note views may treat only `complete` as clean.
+## Phase 0 — Freeze the baseline and define the scorecard
 
-### Deletion is a fenced state transition
+### Empirical baseline — local recordings corpus (2026-08-14)
 
-Deleting a note does not delete recording evidence. “Delete recording data” is a separate explicit operation: write a durable tombstone, fence/cancel the owner, prevent all later publication, remove derived artifacts, then remove source media last. Recovery resumes the deletion transaction rather than resuming processing.
+The following measurements were produced locally from recording metadata and
+sidecars only. No meeting audio or transcript was sent to an external service
+for this audit. They validate that this roadmap must qualify long meetings, but
+they do **not** establish word accuracy: that requires a human reference
+transcript for the sampled ranges.
 
-### Fail closed for generated prose, fail open for source preservation
+| Measurement | Observed baseline | Engineering consequence |
+| --- | ---: | --- |
+| Canonical recordings | 35 MP3s / 28.17 hours | The corpus is sufficient for duration, recovery, and audio-level qualification. |
+| Long recordings | 21 over 30 minutes; 10 over 60 minutes; longest 187.7 minutes | The release path must exercise 65-, 125-, and 180-minute runs. |
+| Artifact coverage | 12 transcripts and processing manifests; 4 quality and integrity reports; 4 recordings with the complete observed artifact set | Legacy artifacts are useful evidence, but cannot prove new V2 runtime behavior. |
+| Quality telemetry | 34 measured windows: 10 have mic/system delta over 12 dB; 11 have mic clipping at or above 0.5% | Add preflight calibration. Treat 6 dB as warning and 12 dB as review/recalibration candidate pending human-corpus calibration. |
+| ASR provenance | 100 stored successful responses; all have sentence segments, none have word timestamps; 87 lack a run ID | Do not claim word-level evidence. V2 needs fenced run IDs, absolute chunk timing, and capability-aware evidence. |
+| Durable-state residue | 3 partial processing manifests and 4 stale processing temp files (about 614 hours old) | Recovery must be manifest-owned and idempotent; cleanup must be an explicit, audited action—not a startup deletion. |
 
-If enhancement is suspicious, preserve and expose the canonical transcript, mark the note `needs_review`, and retain retry controls. Never discard source data; never label unvalidated prose as complete.
+The legacy quality reports use schema versions 1–2 while the current code
+declares version 4. Consequently the corpus is a baseline and regression input,
+not evidence that the current unqualified implementation has passed its tests.
 
-### Quality checks must be deterministic first
+### Blocking audit findings to resolve before qualification
 
-An LLM review can improve prose but cannot be the only validator. Local checks detect runaway length, abnormal lexical chains, excessive repetition, unsupported entity/number growth, malformed structure, missing source coverage, and suspicious completion metadata before saving.
+1. **Resolved — source deletion on ASR setup failure.** The live transcription
+   drain now removes only disposable mixed upload files; persisted microphone
+   source artifacts remain available for recovery and review.
+2. **Resolved — final audio durability.** MP3 finalization flushes the buffered
+   writer and calls `sync_all` before rename, then synchronizes the parent
+   directory after the atomic commit.
+3. **Critical — accepted transcript is destructively cleaned.**
+   `clean_transcript` removes heuristic "outro" and duplicate text directly
+   before committing the canonical sidecar. Raw provider responses survive in
+   attempt artifacts, but the accepted transcript is not a named revision with
+   an explicit review decision. Keep raw, normalized candidate, and accepted
+   revisions distinct; a heuristic can flag or propose a candidate, never erase
+   evidence silently.
+4. **Required — formatting treats generated draft text as ground truth.** The
+   current `Fix format` validator preserves every number/acronym in an existing
+   draft. If an upstream model emitted a prompt echo such as `Rp 500` or a
+   malformed `URL-`, removing it correctly fails as "removed factual anchor".
+   Split this UX and contract into: deterministic Markdown normalization,
+   evidence-backed draft regeneration, and an explicit reviewable artifact
+   cleanup. A formatting command must not silently become semantic repair.
+5. **Required — V2 contracts are not yet runtime authority.** V2 artifact types
+   are currently test-gated and the active flow still uses path identity,
+   temporary live chunks, an unbounded receiver, and per-process ownership.
+   Wire the coordinator before adding another fallback or model.
 
-## Implementation Tasks
+### Decision: workflows, not a recording "agent"
 
-### Task 1: Add regression fixtures and failure-injection harness
+Capture, mixing, ASR retry, validation, publication, and Markdown-only
+normalization have predictable inputs and explicit failure states. They remain
+deterministic workflow steps. The model is permitted only to produce an ASR
+candidate, an evidence-backed note draft, or a bounded review proposal. It may
+not decide whether to delete source data, replace a transcript, or report a
+  degraded condition as successful. This keeps model failures visible and makes a
+one-to-two-hour meeting resumable.
 
-**Description:** Preserve sanitized fixtures for the observed duplicate-start race and the July 15 runaway note. Add controllable delays/failures around listener setup, manifest commit, chunk upload, enhancement, and note save.
+**External design references (decision support, not runtime dependencies):**
 
-**Acceptance criteria:**
+- Anthropic distinguishes predictable, code-orchestrated workflows from
+  model-directed agents and recommends the simplest composable approach that
+  meets the task: https://www.anthropic.com/engineering/building-effective-agents
+- DeepInfra documents sentence timestamps for ordinary Whisper and word
+  timestamps only for the timestamped model variant:
+  https://docs.deepinfra.com/tutorials/whisper
+- Rust documents that close errors are ignored and `File::sync_all` is the API
+  for explicitly handling durable write errors:
+  https://doc.rust-lang.org/stable/std/fs/struct.File.html#method.sync_all
 
-- A test reproduces multiple starts for one `audioPath` without relying on real network calls.
-- A fixture shaped like the supplied long one-line word cascade is classified as suspicious.
-- Tests can simulate app restart after every durable stage.
+### Task 0.1: Build a sanitized qualification corpus
 
-**Verification:** `pnpm test` and targeted Rust tests fail before the fixes.
-
-**Dependencies:** None.
-
-**Likely files:** `src/services/*.test.ts`, `src-tauri/src/processing_jobs.rs`, new test fixtures under `src/test-fixtures/`.
-
-**Scope:** Medium.
-
-### Task 2: Make frontend handoff lifecycle-safe
-
-**Description:** Replace the fire-and-forget async listener setup with cancellation-aware registration. If cleanup occurs before `listen()` resolves, immediately invoke the returned unlisten function. Route event, import, and recovery through one application-level coordinator rather than component-local refs.
-
-**Acceptance criteria:**
-
-- Strict Mode setup/cleanup/setup leaves exactly one live listener.
-- Ten simulated HMR/remount cycles still produce one enqueue request.
-- Navigation and `key={refreshNotes}` remounts cannot start a second pipeline.
-
-**Verification:** frontend lifecycle test with delayed `listen()`; manual dev-mode HMR test.
-
-**Dependencies:** Task 1.
-
-**Likely files:** `src/components/HomePage.tsx`, new `src/services/recording-job-coordinator.ts`, coordinator tests.
-
-**Scope:** Medium.
-
-### Task 3: Add atomic backend job claim and lease
-
-**Description:** Introduce `enqueue_or_claim_processing_job` keyed by the persisted recording UUID. Hold a cross-process OS lock for the run lifetime and issue a monotonically increasing fencing token. Thread that token through every chunk, synthesis, manifest, RAG, and note mutation. Heartbeats are diagnostic; wall-clock lease expiry never overrides a live OS lock.
-
-**Acceptance criteria:**
-
-- 100 concurrent claim attempts yield one owner and one `jobId`.
-- Duplicate requests return existing status without retranscribing.
-- Restart recovery can claim after process death but cannot steal from a live or suspended process.
-- Two independent app processes cannot both perform provider calls or durable writes for one recording.
-
-**Verification:** Tokio concurrency tests plus two-process, suspend/resume, old-owner-survives-update, and fencing tests.
-
-**Dependencies:** Task 1.
-
-**Likely files:** `src-tauri/src/processing_jobs.rs`, `src-tauri/src/lib.rs`, `src/services/recording.service.ts`.
-
-**Scope:** Medium.
-
-### Task 4: Replace manifest persistence with serialized, crash-safe commits
-
-**Description:** Serialize load/save per manifest path, use unique temp/backup files, validate schema before commit, fsync file and parent directory where supported, clean temps on every error path, and reject stale generations.
-
-**Acceptance criteria:**
-
-- Concurrent saves never produce `ENOENT`, corrupted JSON, or stale-state rollback.
-- Killing the process before/after each rename recovers either the previous or next valid generation.
-- Startup quarantines corrupt manifests and recovers the newest valid committed generation.
-
-**Verification:** barrier-controlled multi-writer test, crash-point matrix, 1,000-save stress test.
-
-**Dependencies:** Task 3.
-
-**Likely files:** `src-tauri/src/processing_jobs.rs` and its tests.
-
-**Scope:** Medium.
-
-### Checkpoint A: duplicate processing eliminated
-
-- One event produces one backend job under Strict Mode, HMR, remount, event+poll, and restart recovery.
-- No duplicate Whisper or chat request appears in captured test telemetry.
-- Manifest concurrency and crash tests pass.
-
-### Task 5: Guarantee raw-audio durability
-
-**Description:** Retain raw capture chunks until a managed app-data MP3 has been written, synced, verified, and indexed by recording UUID. Imported sources are copied into the managed store. Revalidate the stored content hash before each stage. No automatic retention policy may delete source audio; deletion follows the tombstoned protocol above.
+**Description:** Create a local-only manifest of representative Indonesian
+meetings: clean headset audio, quiet system audio, overlapping speakers, domain
+names/acronyms, screen-share terminology, and known bad recordings. Store human
+reference transcripts separately from production recordings.
 
 **Acceptance criteria:**
 
-- The MP3 survives transcription, enhancement, provider failures, app crashes, and note deletion.
-- A corrupt/incomplete MP3 is reported before processing without deleting it.
-- Only an explicit user deletion flow can remove source audio, with confirmation and a documented recovery consequence.
-- Removable, read-only, replaced, symlinked, renamed, and same-bytes-imported-twice cases follow the defined UUID/copy semantics.
+- [ ] The human-labeled evaluation subset contains 0.5–5 representative hours,
+  including 10-minute, 65-minute, and 125-minute captures. It is stratified by
+  headset/device, quiet vs. low-system-audio, crosstalk, Indonesian/English
+  terminology, and known-bad recordings.
+- [ ] Each sample has consent/retention classification and a human reference for
+  critical names, numbers, decisions, action items, and a defined annotation
+  guide for uncertainty, overlap, and unintelligible speech.
+- [ ] Baseline metrics are recorded: WER, critical-entity error rate,
+  decision/action error rate, false-clean-note rate, chunk retry rate,
+  completion latency, and storage growth.
 
-**Verification:** forced-stop tests at chunk boundaries and filesystem audit tests asserting source existence.
+**Verification:** A corpus manifest validator rejects missing duration,
+reference, or consent fields. No production recording is copied automatically.
 
-**Dependencies:** Task 3.
+**Dependencies:** None. **Scope:** M.
 
-**Likely files:** `src-tauri/src/audio_recorder.rs`, `src-tauri/src/audio_import.rs`, `src/services/recording.service.ts`.
+### Task 0.2: Specify quality and release thresholds
 
-**Scope:** Medium.
-
-### Task 6: Persist Whisper chunks and make transcription single-flight
-
-**Description:** Replace destructive `take_live_job` with shared single-flight state. Persist each chunk result atomically with index, time range, hash, model, language, attempts, and error. Keep the canonical transcript sidecar; reading it must not consume it.
-
-**Acceptance criteria:**
-
-- Concurrent callers await or reuse the same transcription job.
-- Restart retranscribes only missing/failed chunks.
-- Chunk failures remain typed metadata and never appear as prose inside the transcript.
-
-**Verification:** concurrent `transcribe_audio` test, sidecar reuse test, partial-chunk retry test.
-
-**Dependencies:** Tasks 4 and 5.
-
-**Likely files:** `src-tauri/src/agent.rs`, `src-tauri/src/lib.rs`, processing manifest schema/tests.
-
-**Scope:** Medium.
-
-### Task 7: Add transcript-level hallucination and integrity gates
-
-**Description:** Validate each Whisper chunk before stitching. Use available segment/timestamp/no-speech metadata where supported, audio-energy context, repeated n-gram detection, language drift detection, implausible expansion ratio, and cross-chunk duplication checks. Suspicious chunks are retried conservatively or flagged—not silently deleted.
+**Description:** Turn "sounds good" and "accurate" into measured gates. The
+initial 6 dB warning and 12 dB review/recalibration candidates apply only to
+short speech-active windows, not a whole three-minute chunk containing silence
+or turn-taking. The corpus determines whether the candidates become release
+thresholds.
 
 **Acceptance criteria:**
 
-- Known silence/outro hallucinations and repetitive loops are flagged with a reason and source chunk.
-- Real repeated meeting phrases are preserved unless the duplicate is proven to come from overlap.
-- A partial transcript reports exact missing/suspicious time ranges.
+- [ ] Thresholds distinguish warning, review-required, and hard capture failure.
+- [ ] Every threshold has a corpus measurement and an owner-approved rationale.
+- [ ] Mic preflight tests clipping, signal presence, and noise; it does not
+  claim to know remote/system balance while nobody is speaking. System-balance
+  warnings use a controlled loopback check or live speech-active observation.
+- [ ] Release SLOs are defined: zero loss of committed chunks, zero duplicate
+  note publication, and no clean publication after an integrity failure.
 
-**Verification:** Indonesian silence, noisy audio, mixed-language, repeated-real-speech, and overlap fixtures.
+**Verification:** Fixture tests cover each threshold boundary and preserve raw
+measurements for later recalibration.
 
-**Dependencies:** Task 6.
+**Dependencies:** Task 0.1. **Scope:** S.
 
-**Likely files:** `src-tauri/src/agent.rs`, transcript-quality module/tests.
+### Task 0.3: Define audio data, capacity, and privacy contract
 
-**Scope:** Medium.
-
-### Checkpoint B: source and transcript are recoverable
-
-- A two-hour simulated job resumes after forced termination without redoing successful chunks.
-- MP3 and canonical transcript remain readable after every injected failure.
-- Partial ranges are visible and individually retryable.
-
-### Task 8: Introduce deterministic generated-note quality scoring
-
-**Description:** Validate every section and global synthesis before it becomes a committed artifact. Detect the supplied runaway cascade using paragraph length, sentence-boundary scarcity, unique-token chains, n-gram repetition, output/input expansion, completion saturation, malformed headings, and abnormal vocabulary drift.
+**Description:** Specify the source codec, derivative codecs, storage budget,
+filesystem access policy, provider egress policy, and disk-pressure behavior
+before V2 writes any managed bundle. Source mic/system chunks are immutable
+evidence; playback MP3 and mono ASR input are versioned derivatives.
 
 **Acceptance criteria:**
 
-- The supplied July 15 runaway pattern is rejected before save.
-- Valid long technical notes are not rejected merely for length.
-- Each rejection records machine-readable reasons and request metadata.
+- [ ] New POSIX recording directories/files are created owner-only (`0700` and
+  `0600`); equivalent platform-native access controls are documented and tested.
+- [ ] The manifest records source/derivative codec, hash, byte count, retention
+  class, and configured ASR provider for every outbound derivative.
+- [ ] Capacity tests calculate storage for 65-, 125-, and 180-minute recordings;
+  a configurable warning and hard-stop reserve prevent source loss on full disk.
+- [ ] Legacy recordings remain read-only compatible. Permission hardening and
+  encryption migration for old files require a separate user-approved flow.
 
-**Verification:** golden valid notes plus adversarial loop, word-salad, repeated-line, huge-paragraph, and truncated-output fixtures.
+**Verification:** Permission tests, egress allowlist test, low-disk simulation,
+and storage-budget report.
 
-**Dependencies:** Task 1.
+**Dependencies:** Task 0.1. **Scope:** S.
 
-**Likely files:** new `src/services/note-quality.ts`, `src/services/audio-processor.service.ts`, tests.
+### Checkpoint 0 — baseline approved
 
-**Scope:** Medium.
+- [ ] The team approves the corpus and the initial scorecard.
+- [ ] No production-readiness claim is made from unit tests alone.
 
-### Task 9: Ground generated sections against transcript evidence
+## Phase 1 — Make Recording V2 the runtime authority
 
-**Description:** Keep an accepted transcript separate from raw Whisper hypotheses. Generate structured, preferably extractive section artifacts where every rendered claim carries an exact evidence span plus segment ID. Locally verify that spans occur in accepted segments, expose citations for audit, and use a second bounded verifier only as an additional signal—not proof. Unsupported or ambiguously supported prose forces `needs_review`. Do not ask a global model to recreate detailed content.
+### Task 1.1: Add a managed V2 recording coordinator
 
-**Acceptance criteria:**
-
-- Every rendered detailed section maps to persisted source segment IDs.
-- Every factual sentence—not only names and numbers—has a verified source span or forces review.
-- Missing section output falls back to that section's raw transcript and marks the note partial.
-
-**Verification:** fabricated-name/number fixtures, missing-section test, source-coverage test.
-
-**Dependencies:** Tasks 7 and 8.
-
-**Likely files:** `src/services/audio-processor.service.ts`, `src/services/long-form-processing.ts`, manifest types/tests.
-
-**Scope:** Medium.
-
-### Task 10: Remove unsafe continuation and review fallback behavior
-
-**Description:** For detailed notes, replace free-form continuation with subdivide-and-retry. A failed quality review must not return an already-suspicious draft as success. Global synthesis remains bounded and optional; deterministic section content remains authoritative.
+**Description:** Wire the existing UUID/state-machine contract into runtime.
+Create `<recording-root>/.recording-v2/<uuid>/manifest.v2.json` before capture;
+the legacy MP3 remains where it is during migration.
 
 **Acceptance criteria:**
 
-- `finish_reason=length`, max-token saturation, or quality failure can never be marked complete.
-- Review failure results in `needs_review` or source-backed fallback, not silent acceptance.
-- No model request is responsible for reproducing the entire two-hour note.
+- [ ] `start_desktop_recording` returns `{ recordingId, audioPath }` generated by
+  Rust, not a caller-selected identity.
+- [ ] Runtime uses the canonical recording/stage state model in
+  `recording-v2-spec.md`; obsolete
+  `RecordingState` names and frontend-only status strings are removed or mapped
+  explicitly during the same migration.
+- [ ] Legacy audio resolves read-only without receiving an invented UUID until it
+  is explicitly imported/adopted.
 
-**Verification:** forced truncation, continuation loop, review timeout, and malformed-output tests.
+**Verification:** State-transition, restart, and legacy-resolution tests;
+manual capture confirms a V2 manifest exists before audio arrives.
 
-**Dependencies:** Tasks 8 and 9.
+**Dependencies:** Checkpoint 0. **Scope:** M.
 
-**Likely files:** `src-tauri/src/agent.rs`, `src/services/audio-processor.service.ts`.
+### Task 1.2: Fence every owner and artifact mutation
 
-**Scope:** Medium.
-
-### Checkpoint C: hallucinated notes cannot publish as clean
-
-- The supplied runaway example is blocked deterministically.
-- Unsupported names/numbers/actions are rejected or traceably removed.
-- Clean fixtures remain accepted and preserve all source sections.
-
-### Task 11: Make note saving idempotent and transactional
-
-**Description:** Persist a user-scoped recording UUID idempotency key and processing status with the note. Enforce uniqueness in PostgreSQL and use an upsert/CAS contract. Treat filesystem manifest + PostgreSQL as a recoverable saga: after an unknown commit outcome, query by the unique key before retrying. Never resurrect a user-deleted note automatically.
+**Description:** Extend the existing OS lock and manifest generation check into
+the V2 coordinator. Chunk, transcript, note, and publication mutations must
+verify the same owner generation.
 
 **Acceptance criteria:**
 
-- Replaying a completed job cannot create a duplicate note.
-- Crash between note save and manifest save recovers the original note.
-- A clean note cannot be overwritten by a stale or degraded attempt.
-- Search, RAG, export, and note lists cannot treat `needs_review`/partial artifacts as clean.
+- [ ] 100 concurrent starts yield exactly one owner and one `recordingId`.
+- [ ] A stale owner cannot write after a new owner recovers a dead process.
+- [ ] UI handoff becomes an event convenience only; recovery comes from backend
+  manifests, never `localStorage` alone.
 
-**Verification:** crash-between-writes integration tests and repeated-resume test.
+**Verification:** Two-process lock test, stale-writer test, app-remount test,
+and forced process-death recovery test.
 
-**Dependencies:** Tasks 4, 9, and 10.
+**Dependencies:** Task 1.1. **Scope:** M.
 
-**Likely files:** notes persistence layer, `src/services/audio-processor.service.ts`, manifest schema/tests.
+### Checkpoint 1 — identity and ownership
 
-**Scope:** Medium.
+- [ ] Every new recording is UUID-owned and backend-recoverable.
+- [ ] Existing recordings still open unchanged.
+- [ ] Duplicate provider calls cannot be induced by double click, HMR, or restart.
 
-### Task 12: Add recovery and review UX
+## Phase 2 — Make capture durable and measurable
 
-**Description:** Display durable stages (`recording saved`, `transcribing n/m`, `enhancing n/m`, `needs review`, `complete`), preserve the processing card across navigation, and expose fenced retry only for failed stages. Provide direct access to raw audio, raw hypotheses, accepted transcript, evidence citations, and quality reasons. Persist status with the note so every downstream consumer honors it.
+### Task 2.1: Commit source chunks before processing
 
-**Acceptance criteria:**
-
-- Closing/reopening the app shows the same job and resumes safely.
-- Users can distinguish transcript failure, enhancement failure, partial completion, and suspicious-output rejection.
-- Retry cannot create another job or duplicate note.
-
-**Verification:** real Tauri lifecycle test and manual recovery walkthrough.
-
-**Dependencies:** Tasks 3, 6, 10, and 11.
-
-**Likely files:** `src/components/HomePage.tsx`, recording/job services, status components.
-
-**Scope:** Medium.
-
-### Task 13: Add privacy-safe observability and retention controls
-
-**Description:** Log job IDs, fencing tokens, stage transitions, request IDs, durations, chunk indexes, retry counts, and quality reasons without logging transcript/audio content. Add storage warnings and explicit export/delete controls. “Retention” is informational only; it never authorizes automatic deletion of canonical artifacts.
+**Description:** Replace temporary live-ASR-only chunk handling with a managed
+spool. Each mic/system chunk is fsynced, hashed, described in the manifest, and
+only then eligible for mix/ASR.
 
 **Acceptance criteria:**
 
-- Duplicate starts and quality rejections are diagnosable without exposing meeting text.
-- Storage pressure never triggers silent deletion.
-- Users can explicitly export or delete audio/transcript artifacts.
+- [ ] Killing the app at every capture boundary loses no committed source chunk.
+- [ ] Final MP3 and derivative chunks call file sync before rename; parent
+  directories are synced where supported.
+- [ ] Temporary cleanup cannot remove source evidence or an unacknowledged ASR
+  work item.
 
-**Verification:** log-redaction test, low-disk test, retention-policy test.
+**Verification:** Crash-point matrix, disk-full simulation, and source-hash audit.
 
-**Dependencies:** Tasks 5, 6, and 12.
+**Dependencies:** Checkpoint 1. **Scope:** M.
 
-**Likely files:** processing services, settings UI, logging helpers.
+### Task 2.2: Separate playback mixing from ASR preparation
 
-**Scope:** Medium.
-
-### Task 14: Two-hour qualification and release gate
-
-**Description:** Run deterministic short fixtures plus real/synthetic 10-minute, 1-hour, and 2-hour recordings under normal operation, HMR/remount, offline periods, rate limits, and forced process termination.
+**Description:** Keep mic and system tracks as sources. Produce a balanced
+playback mix and a separately versioned ASR derivative. Do not turn source
+classes into participant identities or use dual-ASR by default.
 
 **Acceptance criteria:**
 
-- No source artifact is lost in the complete fault matrix.
-- Exactly one job and one note exist per recording.
-- Every source chunk is accounted for as complete, suspicious, or failed—never missing silently.
-- No known runaway/hallucination fixture is published as clean.
+- [ ] The quality report includes pre- and post-DSP loudness, clipping, source
+  presence, and mic/system delta for every interval.
+- [ ] Preflight records 10–15 seconds for mic health only. A loopback test or
+  later speech-active monitor evaluates system balance; a silent remote track
+  cannot be treated as an imbalance.
+- [ ] The ASR derivative is deliberately mono with a recorded mix policy;
+  playback may remain stereo. A second source-only ASR pass is opt-in,
+  capability-recorded, and never silently arbitrates speaker identity.
+- [ ] V2 disables AEC by default for headset input unless acoustic echo is
+  actually detected/required; the selected setting and its rationale are
+  recorded for the capture.
 
-**Verification:** full frontend tests, full Rust tests, production build, runtime Tauri smoke test, and artifact audit.
+**Verification:** Replay fixtures with quiet system, hot mic, clipping, silence,
+and overlapping speech; manual preflight on PipeWire.
 
-**Dependencies:** All prior tasks.
+**Dependencies:** Task 2.1. **Scope:** M.
 
-**Likely files:** integration/e2e harness, fixture documentation, release checklist.
+### Checkpoint 2 — trustworthy audio source
 
-**Scope:** Medium.
+- [ ] A 65-minute recording survives stop/restart with all source chunks present.
+- [ ] A user sees an actionable calibration warning before—not after—a bad meeting.
 
-## Fault Matrix Required Before Release
+## Phase 3 — Resumable ASR with an absolute timeline
 
-| Injection point | Required result |
+### Task 3.1: Introduce an ASR capability adapter
+
+**Description:** Encapsulate provider request format, timestamp granularity,
+language, glossary, retry policy, model version, and response parsing. Unsupported
+features are represented as unavailable, never assumed.
+
+**Acceptance criteria:**
+
+- [ ] Every ASR attempt stores provider/model/request ID, audio hash, request
+  parameters, response, and capability version.
+- [ ] Provider/model fallback is explicit in the manifest and UI, not silent.
+- [ ] Initial release uses one configured provider/model. Any provider fallback
+  is a separately approved capability with its own egress, retention, and
+  evaluation policy.
+- [ ] Provider fixtures validate current DeepInfra response shapes offline.
+
+**Verification:** Adapter fixture tests and a controlled 429/500 retry test.
+
+**Dependencies:** Checkpoint 2. **Scope:** M.
+
+### Task 3.2: Persist a per-chunk ASR work ledger
+
+**Description:** Give each durable source chunk a `pending`, `leased`,
+`succeeded`, or `failed-retryable` work state. Resume only unfinished chunks;
+bounded concurrency and backoff protect the provider.
+
+**Acceptance criteria:**
+
+- [ ] Restart after chunk N never uploads chunks 0..N-1 again.
+- [ ] A failed chunk produces a reviewable partial result, never a clean
+  canonical transcript.
+- [ ] The queue is bounded and backpressure is observable.
+- [ ] Queue capacity, maximum in-flight bytes, retry-attempt/time budget,
+  cancellation behavior, and provider circuit-breaker policy are persisted and
+  tested rather than inferred from semaphore defaults.
+
+**Verification:** Offline mid-run restart; injected 500/429; provider-call count
+assertion; queue-saturation test.
+
+**Dependencies:** Task 3.1. **Scope:** M.
+
+### Task 3.3: Normalize timestamps to recording time
+
+**Description:** Convert provider-local timestamps to absolute recording offsets
+using recorded chunk capture start/end, pause intervals, overlap, and drift
+observations—not `chunkIndex × nominalChunkDuration`. Record every correction;
+never infer a speaker merely from mic/system source class.
+
+**Acceptance criteria:**
+
+- [ ] Each evidence range maps to one absolute `[startMs, endMs]` in the source
+  recording.
+- [ ] Overlap stitching preserves speech at seams and records any discarded text.
+- [ ] Missing timestamps force review rather than fabricated evidence.
+- [ ] Sentence-level evidence is the initial supported granularity. Word-level
+  evidence is unavailable unless the provider attempt explicitly records a
+  word-timestamp capability and response.
+
+**Verification:** Synthetic multi-chunk timeline fixtures, seam tests, and a
+manual seek-from-note-to-audio check.
+
+**Dependencies:** Task 3.2. **Scope:** M.
+
+### Checkpoint 3 — resumable transcription
+
+- [ ] A 125-minute capture survives provider failure and app restart without
+  duplicate completed uploads.
+- [ ] Every accepted transcript range can seek to the correct point in audio.
+
+## Phase 4 — Transcript revisions and evidence-backed notes
+
+### Task 4.1: Separate raw, normalized, and accepted transcript revisions
+
+**Description:** Keep raw ASR output immutable. Noise cleanup creates a candidate
+revision with a transformation report; a user/system acceptance creates the only
+revision eligible for note publication.
+
+**Acceptance criteria:**
+
+- [ ] Heuristics never overwrite raw ASR text.
+- [ ] Any deleted/replaced candidate phrase is explainable and reversible.
+- [ ] The accepted revision references all contributing ASR attempts.
+
+**Verification:** Regression fixtures for outro hallucinations, genuine “terima
+kasih”, names, decimals, and manually corrected text.
+
+**Dependencies:** Checkpoint 3. **Scope:** M.
+
+### Task 4.2: Bind generated claims to evidence
+
+**Description:** Generate structured claims for decisions, actions, owners,
+dates, and quantities. Each claim must cite accepted-revision character spans and
+absolute audio ranges.
+
+**Acceptance criteria:**
+
+- [ ] A note cannot label a proposal as a decision without an evidence span.
+- [ ] Named entities and negation/uncertainty are checked, not only numbers and
+  acronyms.
+- [ ] Failed evidence validation produces `needs-review`.
+- [ ] Claim artifacts persist a claim ID, claim type, rendered text, support
+  status, accepted revision ID, source attempt/chunk ID, character span, and
+  absolute audio range. Rendering only assembles accepted claim artifacts.
+
+**Verification:** Adversarial fixtures for “belum/sudah”, proposed/approved,
+owner ambiguity, names, URLs, and numeric facts.
+
+**Dependencies:** Task 4.1. **Scope:** M.
+
+### Checkpoint 4 — truthful transcript-to-note boundary
+
+- [ ] A reviewer can inspect every high-impact note claim against audio/text.
+- [ ] No heuristic cleanup or model output silently becomes ground truth.
+
+## Phase 5 — Clear user recovery and publication behavior
+
+### Task 5.1: Replace ambiguous fallback UI
+
+**Description:** Present explicit processing states: `recording saved`,
+`transcribing`, `partial`, `needs review`, `ready`, and `failed retryable`.
+Fallback notes remain readable but cannot masquerade as an AI-complete note.
+
+**Acceptance criteria:**
+
+- [ ] User sees failure reason, completed chunk count, and safe retry action.
+- [ ] “Fix format” means lossless Markdown-only formatting and may no-op.
+- [ ] “Fix format” is deterministic Markdown normalization and never calls a
+  free-form model. “Review artifact” and “Regenerate draft from accepted
+  transcript” are separate versioned actions with an explicit diff.
+- [ ] “Regenerate draft” is a separate explicit action that preserves the prior
+  note and shows a diff before replacement.
+
+**Verification:** UI states for offline, provider error, partial ASR, formatter
+rejection, manual transcript edit, and successful recovery.
+
+**Dependencies:** Checkpoint 4. **Scope:** M.
+
+### Task 5.2: Add a fenced publication outbox
+
+**Description:** Publish note and RAG state through an idempotent durable outbox
+keyed by `recordingId + acceptedRevisionId`. RAG is optional and never blocks
+source preservation.
+
+**Acceptance criteria:**
+
+- [ ] No duplicate note/RAG document after a crash between database and RAG call.
+- [ ] Review-required or manually edited notes stay out of automatic RAG.
+- [ ] Publication status is durable and visible.
+
+**Verification:** Crash after every outbox transition and duplicate-delivery test.
+
+**Dependencies:** Task 5.1. **Scope:** M.
+
+### Checkpoint 5 — safe product behavior
+
+- [ ] A user can distinguish formatting, regeneration, retry, and review.
+- [ ] Degraded output is never presented as clean success.
+
+## Phase 6 — Operability, qualification, and staged release
+
+### Task 6.1: Add recording-scoped observability
+
+**Description:** Emit structured events with `recordingId`, job generation,
+stage, chunk index, attempt, provider/model, latency, queue wait, and sanitized
+failure class. Correlate logs, metrics, and traces with the same recording/job
+context. Do not log source transcript, audio paths, tokens, or secrets.
+
+**Acceptance criteria:**
+
+- [ ] One recording can be traced from start through publication/review.
+- [ ] Dashboards expose success rate, chunk retries, queue age, p95 completion,
+  quality-warning rate, and duplicate-owner rejections.
+- [ ] Alerts are symptom-based with a short runbook.
+
+**Verification:** Inject an ASR failure and diagnose it from telemetry alone.
+
+**Dependencies:** Tasks 1.1–5.2; instrumentation may be added alongside them.
+**Scope:** M.
+
+### Task 6.2: Run the qualification matrix and staged rollout
+
+**Description:** Test real Linux hardware before enabling the new coordinator for
+all recordings. Keep a kill switch to create legacy-compatible recordings during
+the pilot.
+
+**Acceptance criteria:**
+
+- [ ] Pass 10-minute calibration, 65-minute, and 125-minute tests on target
+  headset/system audio devices.
+- [ ] Pass app-kill, restart, network loss, 429/500, device loss, disk-full,
+  duplicate-click, and manual-review scenarios.
+- [ ] The corpus scorecard meets team-approved accuracy and reliability targets.
+
+**Verification:** Signed qualification report; canary rollout; rollback drill.
+
+**Dependencies:** Checkpoint 5 and Task 6.1. **Scope:** M.
+
+### Production release gate
+
+The system is not production-ready until all of these are true:
+
+- [ ] New recordings use runtime UUID manifests and fenced ownership.
+- [ ] Source chunks and ASR ledger resume after restart without duplicate work.
+- [ ] Controlled loopback and speech-active tests detect a known mic/system
+  imbalance and emit an actionable warning before recording.
+- [ ] Evidence timestamps are absolute and claim-level evidence is inspectable.
+- [ ] Formatter, regeneration, fallback, retry, and review have distinct UI paths.
+- [ ] The one-hour and two-hour qualification matrix passes on real hardware.
+- [ ] New recordings enforce owner-only artifact permissions and stop safely
+  before disk pressure can overwrite or delete committed source evidence.
+- [ ] Telemetry and a rollback/kill switch are verified.
+
+### Parallel work rules
+
+- Sequential: Phase 1 → 2 → 3 → 4; they share the recording identity and source
+  contract.
+- Safe in parallel after the relevant contract is frozen: corpus/threshold work,
+  UI copy/state mockups, provider fixtures, and observability schemas.
+- Ask before: adding a new native dependency, migrating/deleting recordings,
+  changing default retention, enabling cloud upload beyond the existing provider,
+  or changing the database schema.
+
+### Key risks and mitigations
+
+| Risk | Mitigation |
 |---|---|
-| Popup closes during recording | Finalize recoverably or clearly retain incomplete source; never pretend success |
-| Duplicate event/poll/recovery | One job owner; duplicates return existing job |
-| HMR/Strict Mode/remount | One listener and one enqueue |
-| Crash during manifest commit | Previous or next valid generation loads |
-| Crash after chunk transcription | Completed chunks reused |
-| Provider timeout/rate limit | Bounded retry; durable partial status |
-| One Whisper chunk fails | Exact time range marked; no error prose injected |
-| AI truncates/loops/word-salads | Artifact rejected; transcript preserved |
-| Crash after note creation | Existing note recovered; no duplicate |
-| Low disk space | Processing pauses with warning; source is not deleted |
-| Two app processes / overlapping update | OS lock admits one owner; stale fencing token rejects every side effect |
-| OS suspend or wall-clock jump | Ownership does not expire while the process still holds the OS lock |
-| Source file replaced after finalize | Hash mismatch blocks processing; managed immutable copy remains available |
-| Delete during processing | Tombstone fences owner; recovery completes deletion and never publishes |
-| DB commit timeout with unknown outcome | Lookup by unique recording key resolves outcome before retry |
-| App/schema upgrade or downgrade | Versioned reader migrates forward; rollback never writes a newer schema |
-| Read-only/removable import source | Managed copy completes before source is considered finalized |
-
-## Rollout Strategy
-
-1. Land Tasks 1–4 behind a `reliable_job_coordinator` flag. New recordings use exactly one path; rollback disables new processing but never re-routes them into the unsafe path.
-2. Enable durable audio/chunk handling from Tasks 5–7 and migrate existing manifests without deleting legacy artifacts.
-3. Calibrate quality gates against a versioned, human-labeled Indonesian/mixed-language corpus. Shadow mode may create diagnostics only; would-reject output is never indexed or presented as clean.
-4. Switch quality gates to enforcement only after false-positive review.
-5. Enable idempotent save and recovery UX, then complete the two-hour qualification matrix.
-6. Remove the old orchestration path only after at least one release cycle with no duplicate starts or unrecoverable jobs. Rollback is fail-closed: preserve/enqueue recording data and pause processing.
-
-## Definition of Done
-
-- Task-specific acceptance criteria pass at runtime, not only at compile time.
-- New regression tests fail without the corresponding fix and pass with it.
-- `pnpm test`, `pnpm build`, and the complete Rust test suite pass.
-- Tauri runtime is tested with Strict Mode, HMR, restart, and forced failures.
-- No logs contain transcript text, API keys, or raw audio content.
-- Architecture and recovery behavior are documented.
-- Rollback path remains available through staged rollout.
-- Human review approves quality-gate thresholds using real valid and invalid recordings.
-
-## Explicit Non-Guarantee
-
-No speech-recognition or language model can guarantee perfect wording. This plan guarantees preservation, traceability, bounded retries, evidence-backed note construction, and rejection of known suspicious output classes. When confidence is insufficient, the product must say so and preserve the source instead of fabricating certainty.
+| Audio imbalance is only discovered after the meeting | Preflight calibration and interval-level post-DSP diagnostics. |
+| A provider outage triggers duplicate costs/work | Durable per-chunk ledger, bounded queue, idempotency, and backoff. |
+| A model makes a plausible but false note | Accepted transcript revisions, claim/evidence validation, review state. |
+| V2 migration breaks old recordings | Additive resolver; legacy files remain read-only and untouched. |
+| Large refactor becomes unreviewable | Ship each task as a small vertical slice with its tests and checkpoint. |
+| Team cannot diagnose a failure | Recording-scoped structured telemetry plus a runbook. |
