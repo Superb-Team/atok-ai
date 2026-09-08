@@ -30,6 +30,23 @@ function assetMarkersIn(value: string): string[] {
   return (value.match(/\[\[ATOK_ASSET_\d+\]\]/g) ?? []).sort();
 }
 
+interface RepeatedTokenRun {
+  token: string;
+  count: number;
+}
+
+// Compared against the source so real spoken repetition ("jam jam jam") is kept.
+function repeatedTokenRuns(value: string): RepeatedTokenRun[] {
+  const pattern = /\b([\p{L}\p{N}_]{3,})\b(?:[\s,;:.*+\-]+\1\b){2,}/giu;
+  return Array.from(value.matchAll(pattern), (match) => {
+    const token = match[1].toLocaleLowerCase();
+    const count = (match[0].match(/[\p{L}\p{N}_]+/gu) ?? [])
+      .filter((candidate) => candidate.toLocaleLowerCase() === token)
+      .length;
+    return { token, count };
+  });
+}
+
 function actionSectionLines(markdown: string): string[] | null {
   const lines = markdown.split("\n");
   const start = lines.findIndex((line) =>
@@ -145,10 +162,14 @@ export function assessGeneratedNote(
       detail: "Generated note contains model-control commentary or continuation artifacts",
     });
   }
-  if (/\b([\p{L}\p{N}_-]{3,})\b(?:[\s,;:*-]+\1\b){2,}/iu.test(trimmed)) {
+  const sourceRuns = repeatedTokenRuns(source);
+  const generatedRun = repeatedTokenRuns(trimmed).find((run) =>
+    !sourceRuns.some((sourceRun) => sourceRun.token === run.token && sourceRun.count >= run.count),
+  );
+  if (generatedRun) {
     issues.push({
       code: "repetition_loop",
-      detail: "Generated note repeats the same token at least three times consecutively",
+      detail: `Generated note repeats '${generatedRun.token}' at least three times consecutively without the same source pattern`,
     });
   }
   const sourceMarkers = assetMarkersIn(source);
@@ -188,4 +209,27 @@ export function assessGeneratedNote(
   }
 
   return issues;
+}
+
+// Findings that leave the draft unusable. The rest (excessive_expansion,
+// weak_title, action-item size limits) are advisory: logged, not flagged.
+const BLOCKING_ISSUE_CODES: readonly NoteQualityIssueCode[] = [
+  "empty",
+  "truncated",
+  "marker_mismatch",
+  "repetition_loop",
+  "runaway_paragraph",
+  "generation_artifact",
+  "malformed_action_items",
+];
+
+// Only an unsalvageable draft is rebuilt from the extractive fallback.
+export function shouldUseLosslessFallback(issues: readonly NoteQualityIssue[]): boolean {
+  return issues.some(({ code }) =>
+    code === "empty" || code === "truncated" || code === "marker_mismatch"
+  );
+}
+
+export function hasBlockingDefect(issues: readonly NoteQualityIssue[]): boolean {
+  return issues.some((issue) => BLOCKING_ISSUE_CODES.includes(issue.code));
 }

@@ -18,7 +18,14 @@ export default defineConfig(async () => ({
       input: {
         main: path.resolve(__dirname, 'index.html'),
         'recording-popup': path.resolve(__dirname, 'recording-popup.html')
-      }
+      },
+      output: {
+        manualChunks: {
+          markdown: ['react-markdown', 'remark-gfm'],
+          motion: ['framer-motion'],
+          dnd: ['@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities'],
+        },
+      },
     }
   },
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

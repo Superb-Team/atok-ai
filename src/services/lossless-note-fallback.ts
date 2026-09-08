@@ -1,6 +1,17 @@
 const MAX_KEY_POINTS = 8;
 const MAX_ACTION_ITEMS = 10;
 
+const EXTRACTIVE_FALLBACK_WARNING = /^>\s*(?:Pemformatan AI tidak tersedia|AI formatting was unavailable)\b/im;
+
+/**
+ * Detects a durable degraded note produced when the AI enhancement provider
+ * was unavailable. This is intentionally based on the rendered warning, not
+ * on a loose keyword search, so ordinary notes can mention formatting safely.
+ */
+export function isExtractiveFallbackNote(content: string | undefined): boolean {
+  return typeof content === "string" && EXTRACTIVE_FALLBACK_WARNING.test(content);
+}
+
 const ACTION_PATTERN = /\b(akan|harus|perlu|target|besok|malam ini|minggu depan|dalam \d+ hari|fix|perbaiki|membuat|diminta|coba|will|must|need|target|tomorrow|next week|follow up)\b/i;
 const FILLER_PATTERN = /^(?:halo|tes|oke|iya|ya|terima kasih|thank you)[.!?\s]*$|^sampai jumpa\b/i;
 
@@ -9,7 +20,6 @@ interface FallbackLabels {
   summary: string;
   keyPoints: string;
   actionItems: string;
-  transcript: string;
 }
 
 function labelsFor(language: string): FallbackLabels {
@@ -19,7 +29,6 @@ function labelsFor(language: string): FallbackLabels {
       summary: "Ringkasan Ekstraktif",
       keyPoints: "Poin Utama",
       actionItems: "Tindak Lanjut yang Disebutkan",
-      transcript: "Transcript Lengkap",
     };
   }
   return {
@@ -27,7 +36,6 @@ function labelsFor(language: string): FallbackLabels {
     summary: "Extractive Summary",
     keyPoints: "Key Points",
     actionItems: "Mentioned Follow-ups",
-    transcript: "Complete Transcript",
   };
 }
 
@@ -86,6 +94,5 @@ export function buildLosslessStructuredFallback(
   if (actions.length > 0) {
     sections.push(`## ${labels.actionItems}\n\n${actions.map((action) => `- ${action}`).join("\n")}`);
   }
-  sections.push(`## ${labels.transcript}\n\n${transcript}`);
   return sections.join("\n\n");
 }

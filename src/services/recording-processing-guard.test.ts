@@ -39,6 +39,22 @@ test("allows a later retry after the active processing request settles", async (
   assert.equal(calls, 2);
 });
 
+test("can reject an overlapping preview instead of joining a note-writing process", async () => {
+  const guard = createRecordingProcessingGuard();
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const active = guard.run("/recordings/meeting.mp3", () => pending);
+  await assert.rejects(
+    guard.run("/recordings/meeting.mp3", () => "preview", { joinExisting: false }),
+    /already active/u,
+  );
+  release();
+  await active;
+});
+
 test("unlistens when cleanup happens before async listener registration resolves", async () => {
   let resolveRegistration!: (unlisten: () => void) => void;
   let unlistenCalls = 0;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessGeneratedNote } from "./note-quality.ts";
+import { assessGeneratedNote, hasBlockingDefect, shouldUseLosslessFallback } from "./note-quality.ts";
 
 const source = `Rapat membahas pembagian tim engineering dan operasional.
 Dendy akan memperbaiki integrasi dashboard dalam dua hari.
@@ -128,4 +128,43 @@ Format data menggunakan GeoJSON.`;
   });
 
   assert.ok(issues.some((issue) => issue.code === "weak_title"));
+});
+
+test("hasBlockingDefect separates structural failures from soft heuristics", () => {
+  for (const code of ["empty", "truncated", "marker_mismatch", "repetition_loop", "runaway_paragraph", "generation_artifact", "malformed_action_items"] as const) {
+    assert.equal(hasBlockingDefect([{ code, detail: code }]), true);
+  }
+  for (const code of ["excessive_expansion", "weak_title", "oversized_action_item", "too_many_action_items"] as const) {
+    assert.equal(hasBlockingDefect([{ code, detail: code }]), false);
+  }
+  assert.equal(hasBlockingDefect([]), false);
+});
+
+test("shouldUseLosslessFallback triggers only on an unsalvageable draft", () => {
+  assert.equal(shouldUseLosslessFallback([{ code: "empty", detail: "" }]), true);
+  assert.equal(shouldUseLosslessFallback([{ code: "truncated", detail: "" }]), true);
+  assert.equal(shouldUseLosslessFallback([{ code: "marker_mismatch", detail: "" }]), true);
+  assert.equal(shouldUseLosslessFallback([{ code: "repetition_loop", detail: "" }]), false);
+  assert.equal(shouldUseLosslessFallback([{ code: "malformed_action_items", detail: "" }]), false);
+  assert.equal(shouldUseLosslessFallback([]), false);
+});
+
+test("detects a same-line repetition loop absent from the source", () => {
+  const note = "# Rapat\n\n## Pembahasan\n\n- sistem aman terpercaya scalable maintainable correlated correlated correlated correlated.";
+
+  assert.ok(
+    assessGeneratedNote(source, note, { isTruncated: false })
+      .some((issue) => issue.code === "repetition_loop"),
+  );
+});
+
+test("keeps source-grounded repeated speech instead of treating it as a model loop", () => {
+  const grounded = "Tadi kita bahas ngapain-ngapain-ngapain. Jam jam jam, lalu lanjut ke login.";
+  const note = "# Catatan\n\n## Pembahasan\n\n- Tadi kita bahas ngapain-ngapain-ngapain.\n- Jam jam jam, lalu lanjut ke login.";
+
+  assert.equal(
+    assessGeneratedNote(grounded, note, { isTruncated: false })
+      .some((issue) => issue.code === "repetition_loop"),
+    false,
+  );
 });

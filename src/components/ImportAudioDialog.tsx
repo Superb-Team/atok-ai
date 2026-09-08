@@ -7,6 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
+import { recordingService } from "@/services/recording.service";
+import { parseTranscriptionGlossary } from "@/services/transcription-glossary";
 
 interface ImportAudioDialogProps {
     open: boolean;
@@ -30,6 +32,7 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
     const [fileName, setFileName] = useState("");
     const [title, setTitle] = useState("");
     const [language, setLanguage] = useState("id");
+    const [glossaryInput, setGlossaryInput] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
 
@@ -38,6 +41,7 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
         setFileName("");
         setTitle("");
         setLanguage("id");
+        setGlossaryInput("");
         setError("");
     };
 
@@ -70,6 +74,10 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
         setLoading(true);
         try {
             const audioPath = await audioImportService.importAudioFile(filePath);
+            await recordingService.saveGlossary(
+                audioPath,
+                parseTranscriptionGlossary(glossaryInput),
+            );
             const noteTitle = title.trim() || generateNoteTitle();
 
             localStorage.setItem(
@@ -151,6 +159,20 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
                             </select>
                             <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500 dark:text-neutral-400" />
                         </div>
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label htmlFor="import-glossary">Important names and terms (optional)</Label>
+                        <Input
+                            id="import-glossary"
+                            value={glossaryInput}
+                            onChange={(e) => setGlossaryInput(e.target.value)}
+                            placeholder="Acme Fiber, Siti Aminah, project codename"
+                            disabled={loading}
+                        />
+                        <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                            Separate terms with commas. They apply only to this recording.
+                        </p>
                     </div>
 
                     <div className="flex justify-end gap-2 pt-4">

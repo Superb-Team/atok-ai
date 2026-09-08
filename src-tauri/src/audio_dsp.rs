@@ -19,9 +19,7 @@ struct LoudnessLeveler {
     min_gain_db: f32,
     max_gain_db: f32,
     gain: f32,
-    // Mono samples awaiting a loudness measurement. Callers that feed tiny buffers
-    // (e.g. the Windows ~5ms WASAPI loop) accumulate here until a full window is
-    // available, so the leveler engages regardless of per-call buffer size.
+    // Buffer short callbacks until there is enough audio to measure.
     accum: Vec<f32>,
 }
 
@@ -43,7 +41,10 @@ impl LoudnessLeveler {
         // Fast path: a large buffer (Linux 3-min chunk / macOS whole take) already
         // exceeds the window — measure it directly with no cross-call buffering.
         if self.accum.is_empty() && stereo.len() / 2 >= LEVELER_WINDOW_SAMPLES {
-            let mono: Vec<f32> = stereo.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])).collect();
+            let mono: Vec<f32> = stereo
+                .chunks_exact(2)
+                .map(|p| 0.5 * (p[0] + p[1]))
+                .collect();
             self.measure(&mono);
             return;
         }
@@ -97,6 +98,10 @@ pub struct AudioDsp {
 }
 
 impl AudioDsp {
+    pub const DEFAULT_SYSTEM_TRIM_DB: f32 = 3.0;
+    const MIC_TARGET_LUFS: f32 = -22.0;
+    const SYSTEM_TARGET_LUFS: f32 = -19.0;
+
     pub fn new(system_gain_db: f32) -> Self {
         let fs = 48000.0_f32;
 
@@ -106,15 +111,18 @@ impl AudioDsp {
         let (b40, a40) = butterworth_hpf_coeffs(40.0, fs);
 
         Self {
-            // -20 LUFS stems keep speech well under the limiter and not hot/harsh.
-            // Mic starts at -6dB (sane first-chunk level before measurement) and can
-            // be pulled down to -18dB for a hot close-talking mic. Sys starts at the
-            // caller's trim and can be boosted up to +18dB when the user listens at
-            // low volume, so both sides land at comparable loudness for Whisper.
-            mic_leveler: LoudnessLeveler::new(-20.0, -18.0, 12.0, -6.0),
-            sys_leveler: LoudnessLeveler::new(-20.0, -12.0, 18.0, system_gain_db),
-            // 0.60: prevents summed (sys+mic) from slamming the limiter.
-            // Was 0.75 which allowed mic alone to exceed 1.0 before limiter.
+            // Start with a small mic cut and system boost; the levelers converge per chunk.
+            // Headset meetings usually contain a local mic that is hotter than
+            // the playback monitor. Keep remote speech slightly forward while
+            // retaining headroom for the final limiter.
+            mic_leveler: LoudnessLeveler::new(Self::MIC_TARGET_LUFS, -18.0, 12.0, -9.0),
+            sys_leveler: LoudnessLeveler::new(
+                Self::SYSTEM_TARGET_LUFS,
+                -12.0,
+                18.0,
+                system_gain_db,
+            ),
+            // Keep the sum below the limiter for normal speech.
             mix_headroom: 0.60,
 
             noise_gate_threshold: 0.03,
@@ -138,12 +146,7 @@ impl AudioDsp {
         }
     }
 
-    /// Variant tuned for the speech-recognition branch (not playback). Whisper is
-    /// robust to background noise but loses soft consonants and word endings when
-    /// they're gated away, so the gate is much gentler here: a lower threshold and a
-    /// high floor only trim true silence instead of attenuating quiet speech ~40dB.
-    /// Paired with skipping RNNoise (see `process_chunk_batch`), this keeps the audio
-    /// Whisper sees close to natural while playback keeps the firmer default chain.
+    /// Use a gentler gate for speech recognition than for playback.
     pub fn new_for_asr(system_gain_db: f32) -> Self {
         let mut dsp = Self::new(system_gain_db);
         dsp.noise_gate_threshold = 0.012;
@@ -613,6 +616,22 @@ mod tests {
         assert!(
             dsp.mic_leveler.gain < 0.45,
             "mic leveler gain={}",
+            dsp.mic_leveler.gain
+        );
+    }
+
+    #[test]
+    fn default_targets_keep_system_audio_slightly_above_mic() {
+        let mut dsp = AudioDsp::new(0.0);
+        let signal = sine_pcm(0.2, 48000);
+        for _ in 0..4 {
+            let _ = dsp.process(&signal, &signal);
+        }
+
+        assert!(
+            dsp.sys_leveler.gain > dsp.mic_leveler.gain * 1.1,
+            "system gain should retain a small remote-speech bias: system={}, mic={}",
+            dsp.sys_leveler.gain,
             dsp.mic_leveler.gain
         );
     }

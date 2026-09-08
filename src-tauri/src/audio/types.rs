@@ -1,3 +1,13 @@
+use std::path::PathBuf;
+
+#[derive(Clone, Debug)]
+pub(crate) struct LiveAudioChunk {
+    pub index: u32,
+    pub mixed_path: Option<PathBuf>,
+    pub microphone_path: Option<PathBuf>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct DeviceStatus {
     pub mic_available: bool,

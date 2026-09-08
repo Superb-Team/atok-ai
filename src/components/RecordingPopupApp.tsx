@@ -1,8 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow, Window } from '@tauri-apps/api/window';
-import type { AudioDeviceInfo } from '@/services/recording.service';
+import {
+  blockingQualityWarnings,
+  qualityReportRequiresReview,
+  type AudioDeviceInfo,
+} from '@/services/recording.service';
 import type { RecordingNoteContext } from '@/services/recording-note-metadata';
 import { recorderErrorMessage, type RecorderAction } from '@/services/recorder-feedback';
+import { parseTranscriptionGlossary } from '@/services/transcription-glossary';
 
 declare module 'react' {
   interface CSSProperties {
@@ -24,6 +29,7 @@ const LANGUAGES: { code: string; label: string }[] = [
   { code: '', label: 'AUTO' },
 ];
 const MIC_STORAGE_KEY = 'recording-mic-device';
+const GLOSSARY_STORAGE_KEY = 'recording-transcription-glossary';
 
 const RecordingPopupApp: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
@@ -32,6 +38,8 @@ const RecordingPopupApp: React.FC = () => {
   const [isCapturing, setIsCapturing] = useState(false);
   const [shotFlash, setShotFlash] = useState(false);
   const [time, setTime] = useState(0);
+  const startedAtRef = useRef<number | null>(null);
+  const pausedAtRef = useRef<number | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
   const [feedback, setFeedback] = useState<{ message: string; tone: 'error' | 'success' } | null>(null);
@@ -44,6 +52,9 @@ const RecordingPopupApp: React.FC = () => {
   // reads the current value instead of a stale closure.
   const [selectedLanguage, setSelectedLanguage] = useState<string>('id');
   const selectedLanguageRef = useRef<string>('id');
+  const [glossaryInput, setGlossaryInput] = useState(() =>
+    localStorage.getItem(GLOSSARY_STORAGE_KEY) ?? ''
+  );
 
   const showFeedback = (message: string, tone: 'error' | 'success', duration = 4500) => {
     if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
@@ -138,10 +149,16 @@ const RecordingPopupApp: React.FC = () => {
           try {
             const { recordingService } = await import('@/services/recording.service');
             const savedPath = await recordingService.stopRecording();
+            const quality = await recordingService.getQualityReport(savedPath).catch((error) => {
+              console.warn('Failed to read recording quality report:', error);
+              return null;
+            });
             const { generateNoteTitle } = await import('@/services/audio-processor.service');
             const noteTitle = generateNoteTitle();
             const context = recordingContextRef.current;
             const timestamp = Date.now();
+            const qualityWarnings = blockingQualityWarnings(quality?.warnings ?? []);
+            const qualityRequiresReview = qualityReportRequiresReview(quality);
             // localStorage is the fallback handoff; the event below is the fast
             // path that lets the main window start processing immediately.
             localStorage.setItem('audio_to_process', JSON.stringify({
@@ -151,6 +168,8 @@ const RecordingPopupApp: React.FC = () => {
               timestamp,
               recordedAt: context?.recordedAt,
               timezone: context?.timezone,
+              qualityWarnings,
+              qualityRequiresReview,
             }));
             try {
               const { invoke } = await import('@tauri-apps/api/core');
@@ -161,6 +180,8 @@ const RecordingPopupApp: React.FC = () => {
                 timestamp,
                 recordedAt: context?.recordedAt,
                 timezone: context?.timezone,
+                qualityWarnings,
+                qualityRequiresReview,
               });
             } catch {}
           } catch (err) {
@@ -187,11 +208,31 @@ const RecordingPopupApp: React.FC = () => {
     return () => dragArea.removeEventListener('mousedown', handleMouseDown);
   }, [appWindow]);
 
+  // Wall-clock anchor, not a per-tick accumulator that drifts slow under load.
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (isRecording && !isPaused) {
-      interval = setInterval(() => setTime(prev => prev + 0.01), 10);
+    if (!isRecording) {
+      startedAtRef.current = null;
+      pausedAtRef.current = null;
+      return;
     }
+    if (isPaused) {
+      if (startedAtRef.current !== null && pausedAtRef.current === null) {
+        pausedAtRef.current = Date.now();
+        setTime((pausedAtRef.current - startedAtRef.current) / 1000);
+      }
+      return;
+    }
+    let anchor = startedAtRef.current;
+    if (anchor === null) {
+      anchor = Date.now();
+    } else if (pausedAtRef.current !== null) {
+      anchor += Date.now() - pausedAtRef.current;
+      pausedAtRef.current = null;
+    }
+    startedAtRef.current = anchor;
+    const tick = () => setTime((Date.now() - anchor) / 1000);
+    tick();
+    const interval = setInterval(tick, 100);
     return () => clearInterval(interval);
   }, [isRecording, isPaused]);
 
@@ -220,7 +261,12 @@ const RecordingPopupApp: React.FC = () => {
     if (isRecording || isFinalizing) return;
     try {
       const { recordingService } = await import('@/services/recording.service');
-      const started = await recordingService.startRecording(selectedMic || undefined, selectedLanguage);
+      const glossary = parseTranscriptionGlossary(glossaryInput);
+      const started = await recordingService.startRecording(
+        selectedMic || undefined,
+        selectedLanguage,
+        glossary,
+      );
       recordingContextRef.current = {
         recordedAt: started.recordedAt,
         timezone: started.timezone,
@@ -231,6 +277,22 @@ const RecordingPopupApp: React.FC = () => {
     } catch (err) {
       console.error("Failed to start recording:", err);
       showRecorderError('start', err);
+    }
+  };
+
+  const handleGlossaryEdit = () => {
+    if (isRecording || isFinalizing) return;
+    const next = window.prompt(
+      'Nama dan istilah penting untuk rekaman ini (pisahkan dengan koma atau baris baru):',
+      glossaryInput,
+    );
+    if (next === null) return;
+    try {
+      parseTranscriptionGlossary(next);
+      setGlossaryInput(next);
+      localStorage.setItem(GLOSSARY_STORAGE_KEY, next);
+    } catch (error) {
+      showFeedback(String(error), 'error');
     }
   };
 
@@ -283,6 +345,7 @@ const RecordingPopupApp: React.FC = () => {
     if (isFinalizing) return;
     let savedPath: string | null = null;
     let noteTitle: string | null = null;
+    let quality: import('@/services/recording.service').AudioQualityReport | null = null;
 
     if (isRecording) {
       setIsRecording(false);
@@ -291,6 +354,10 @@ const RecordingPopupApp: React.FC = () => {
       try {
         const { recordingService } = await import('@/services/recording.service');
         savedPath = await recordingService.stopRecording();
+        quality = await recordingService.getQualityReport(savedPath).catch((error) => {
+          console.warn('Failed to read recording quality report:', error);
+          return null;
+        });
         const { generateNoteTitle } = await import('@/services/audio-processor.service');
         noteTitle = generateNoteTitle();
         setTime(0);
@@ -309,6 +376,8 @@ const RecordingPopupApp: React.FC = () => {
     if (savedPath && noteTitle) {
       const context = recordingContextRef.current;
       const timestamp = Date.now();
+      const qualityWarnings = blockingQualityWarnings(quality?.warnings ?? []);
+      const qualityRequiresReview = qualityReportRequiresReview(quality);
       // localStorage is the fallback handoff; the event below is the fast path
       // that lets the main window start processing immediately.
       localStorage.setItem('audio_to_process', JSON.stringify({
@@ -318,6 +387,8 @@ const RecordingPopupApp: React.FC = () => {
         timestamp,
         recordedAt: context?.recordedAt,
         timezone: context?.timezone,
+        qualityWarnings,
+        qualityRequiresReview,
       }));
       try {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -328,6 +399,8 @@ const RecordingPopupApp: React.FC = () => {
           timestamp,
           recordedAt: context?.recordedAt,
           timezone: context?.timezone,
+          qualityWarnings,
+          qualityRequiresReview,
         });
       } catch {}
     }
@@ -580,6 +653,30 @@ const RecordingPopupApp: React.FC = () => {
                 ))}
               </select>
             </div>
+
+            <button
+              type="button"
+              onClick={handleGlossaryEdit}
+              disabled={isRecording || isFinalizing}
+              title="Nama dan istilah penting untuk akurasi transkripsi"
+              aria-label="Edit transcription glossary"
+              style={{
+                minWidth: '54px',
+                height: '42px',
+                padding: '0 9px',
+                borderRadius: '10px',
+                border: `1px solid ${palette.border}`,
+                backgroundColor: palette.raised,
+                color: glossaryInput.trim() ? palette.text : palette.subtle,
+                cursor: isRecording || isFinalizing ? 'default' : 'pointer',
+                fontSize: '11px',
+                fontWeight: 700,
+                letterSpacing: '0.04em',
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties}
+            >
+              TERMS{glossaryInput.trim() ? ' ✓' : ''}
+            </button>
           </div>
 
           {/* === CENTER-LEFT: Status indicator === */}

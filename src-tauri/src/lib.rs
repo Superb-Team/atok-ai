@@ -11,12 +11,18 @@ mod audio_import;
 mod auth;
 mod config;
 mod database;
+mod durable_io;
 mod mcp_auth;
 mod models;
 mod note_assets;
 mod notes;
 mod processing_jobs;
+#[cfg(test)]
+mod recording_artifacts;
+mod recording_quality;
 mod tasks;
+mod transcript_integrity;
+mod transcription_glossary;
 
 // Platform-specific audio recording — captures system audio + mic (like Google Meet/Zoom/Discord)
 // Windows: WASAPI loopback + mic (windows_audio.rs)
@@ -46,6 +52,7 @@ async fn start_desktop_recording(
     output_path: String,
     mic_device: Option<String>,
     language: Option<String>,
+    glossary: Option<Vec<String>>,
 ) -> Result<String, String> {
     let aec = AEC_ENABLED.load(AtomicOrdering::Relaxed);
     let language = language.unwrap_or_else(|| "id".to_string());
@@ -72,8 +79,12 @@ async fn start_desktop_recording(
                 .and_then(|s| s.to_str())
                 .unwrap_or("recording")
         ));
+    let recording_glossary = transcription_glossary::build_recording_glossary(glossary)?;
+    transcription_glossary::persist(&mp3_path, &recording_glossary)?;
 
-    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::unbounded_channel::<std::path::PathBuf>();
+    let (chunk_tx, chunk_rx) =
+        tokio::sync::mpsc::unbounded_channel::<audio::types::LiveAudioChunk>();
+    let transcription_run_id = uuid::Uuid::new_v4().to_string();
 
     let api_key = std::env::var("DEEPINFRA_API_KEY").unwrap_or_default();
     let handle = tokio::spawn(agent::transcribe_chunks_live(
@@ -81,20 +92,26 @@ async fn start_desktop_recording(
         api_key,
         transcript_path,
         language,
+        recording_glossary,
+        transcription_run_id,
     ));
     // Register so transcribe_audio awaits this live job instead of racing it into
     // a redundant second full-file split (double Whisper cost / 429 risk).
     agent::register_live_job(&mp3_path, handle);
 
     let recorder = RECORDER.lock().map_err(|e| e.to_string())?;
-    recorder
-        .start_recording_with_aec(
-            std::path::PathBuf::from(output_path),
-            aec,
-            mic_device,
-            Some(chunk_tx),
-        )
-        .map_err(|e| format!("Failed to start recording: {}", e))?;
+    if let Err(error) = recorder.start_recording_with_aec(
+        std::path::PathBuf::from(output_path),
+        aec,
+        mic_device,
+        Some(chunk_tx),
+    ) {
+        // The live ASR task is started before capture so it can consume chunks
+        // immediately. If device setup fails, remove and abort that task or it
+        // will remain registered and interfere with the next processing run.
+        agent::cancel_live_job(&mp3_path);
+        return Err(format!("Failed to start recording: {}", error));
+    }
     Ok("Desktop recording started".to_string())
 }
 
@@ -124,9 +141,8 @@ async fn set_desktop_recording_paused(paused: bool) -> Result<(), String> {
 
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-// On by default: the mic must not re-record speaker playback. WebRTC AEC degrades
-// to near-passthrough when there is no echo, so default-on is safe.
-static AEC_ENABLED: AtomicBool = AtomicBool::new(true);
+// Headset capture has no acoustic echo to cancel; enable AEC explicitly for speakers.
+static AEC_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 async fn get_aec_enabled() -> Result<bool, String> {
@@ -141,6 +157,7 @@ async fn set_aec_enabled(enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn notify_recording_started(
     app: tauri::AppHandle,
     note_title: String,
@@ -149,6 +166,8 @@ async fn notify_recording_started(
     timestamp: Option<i64>,
     recorded_at: Option<String>,
     timezone: Option<String>,
+    quality_warnings: Option<Vec<String>>,
+    quality_requires_review: Option<bool>,
 ) -> Result<(), String> {
     // audio_path lets the main window start processing immediately off this
     // event; without it the listener can only show the loading card and the
@@ -162,10 +181,28 @@ async fn notify_recording_started(
             "timestamp": timestamp,
             "recordedAt": recorded_at,
             "timezone": timezone,
+            "qualityWarnings": quality_warnings.unwrap_or_default(),
+            "qualityRequiresReview": quality_requires_review.unwrap_or(false),
         }),
     )
     .map_err(|e| format!("Failed to emit recording-started event: {}", e))?;
     Ok(())
+}
+
+#[tauri::command]
+async fn get_recording_quality_report(
+    audio_path: String,
+) -> Result<Option<recording_quality::AudioQualityReport>, String> {
+    let path = recording_quality::quality_report_path(std::path::Path::new(&audio_path));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|error| format!("Read audio quality report: {error}"))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| format!("Parse audio quality report: {error}"))
 }
 
 // ==================== Device enumeration ====================
@@ -243,6 +280,7 @@ pub fn run() {
             agent::ensure_recordings_dir,
             agent::ai_chat,
             agent::ai_chat_detailed,
+            agent::ai_chat_detailed_strict,
             agent::get_ai_model_limits,
             agent::ai_chat_stream,
             agent::agent_insert_document,
@@ -258,6 +296,9 @@ pub fn run() {
             processing_jobs::save_processing_manifest,
             processing_jobs::load_processing_manifest,
             processing_jobs::list_processing_manifests,
+            transcript_integrity::evaluate_transcript_integrity,
+            transcript_integrity::accept_transcript_revision,
+            transcription_glossary::save_recording_glossary,
             processing_jobs::claim_processing_job,
             processing_jobs::release_processing_job,
             start_desktop_recording,
@@ -268,6 +309,7 @@ pub fn run() {
             notify_recording_started,
             list_audio_input_devices,
             get_audio_device_status,
+            get_recording_quality_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
