@@ -41,6 +41,11 @@ import {
   replaceDocumentTitle,
   type RecordingNoteContext,
 } from "@/services/recording-note-metadata";
+import {
+  parseStructuredGlobalNote,
+  renderStructuredGlobalNote,
+  STRUCTURED_GLOBAL_NOTE_RESPONSE_FORMAT,
+} from "@/services/structured-global-note";
 
 // ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -93,7 +98,7 @@ const FALLBACK_CONTEXT_TOKENS = 32_768;
 const FALLBACK_OUTPUT_TOKENS = 8_192;
 const MAX_SECTION_SOURCE_TOKENS = 24_000;
 const SECTION_OUTPUT_TOKENS = 1_536;
-const GLOBAL_OUTPUT_TOKENS = 1_536;
+const GLOBAL_OUTPUT_TOKENS = 3_072;
 
 interface ModelLimits {
   model: string;
@@ -258,8 +263,14 @@ function detailedChat(
   messages: Array<{ role: string; content: string }>,
   temperature: number,
   maxTokens: number,
+  responseFormat?: Record<string, unknown>,
 ): Promise<ChatCompletionResult> {
-  return invoke<ChatCompletionResult>("ai_chat_detailed", { messages, temperature, maxTokens });
+  return invoke<ChatCompletionResult>("ai_chat_detailed", {
+    messages,
+    temperature,
+    maxTokens,
+    ...(responseFormat ? { responseFormat } : {}),
+  });
 }
 
 async function mapWithConcurrency<T, R>(
@@ -354,10 +365,28 @@ function globalReduceMessages(
   context: RecordingNoteContext,
   final: boolean,
 ) {
-  const labels = noteSectionLabels(language);
   const instruction = final
-    ? `Create compact front matter for one meeting note in ${langName}. The first line must be one concrete, topic-specific H1 grounded in the source. Never use generic titles or template placeholders. Use H2 headings named "${labels.summary}", "${labels.keyPoints}", "${labels.considerations}", "${labels.decisions}", and "${labels.actions}". Use "${labels.considerations}" only when the source explicitly explains rationale, trade-offs, constraints, risks, or why an option was preferred; never infer hidden reasoning or motives. Omit empty sections completely; never emit placeholders such as "no decisions". Preserve concrete facts and uncertainty, deduplicate, never invent, and do not reproduce detailed section notes. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Put something under "${labels.decisions}" only when the source explicitly records agreement or a decision. ${recordingContextInstruction(context)}`
-    : `Extract compact global facts from these sequential meeting-section notes in ${langName}. Return only concise markdown bullets grouped as Topics, Context/Considerations, Decisions, and Action Items. Preserve names, dates, numbers, owners, deadlines, and every uncertainty qualifier. Include a consideration only when the source explicitly explains rationale, trade-offs, constraints, risks, or why an option was preferred. Never infer hidden reasoning. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Never invent and do not reproduce detailed prose.`;
+    ? `Extract compact front matter for one meeting note in ${langName} as the JSON object required by the response schema.
+
+Rules:
+- title must be concrete, topic-specific, grounded in the source, and must not contain Markdown
+- title states the meeting's main objective and represents 2-3 dominant themes, not one incidental detail
+- title must be a complete phrase and must not end in a connector such as "and", "with", "mencakup", or "terkait"
+- title_evidence contains 2-3 different exact, contiguous source spans supporting the dominant themes named by the title
+- summary contains 3-5 concise sentences
+- key_points and decisions contain atomic, non-duplicated, single-line strings
+- action_items contains at most 15 atomic actions; never combine separate tasks, status, risks, discussion, or decisions into one action
+- action must be concise and imperative
+- evidence must be one exact, contiguous source substring that explicitly supports the action, owner, and deadline
+- never infer an owner from conversational proximity; use "${language === "id" ? "Belum ditugaskan" : "Unassigned"}" unless the evidence explicitly names the owner
+- use "${language === "id" ? "Tidak ditentukan" : "Not specified"}" unless the evidence explicitly states a committed deadline
+- estimates such as "should finish this week", proposals, hopes, or availability are not deadlines
+- omit unsupported decisions and actions instead of guessing
+- preserve uncertainty exactly and never turn reported or unverified progress into confirmed results
+- output JSON only; do not output Markdown or commentary
+
+${recordingContextInstruction(context)}`
+    : `Extract compact global facts from these sequential meeting-section notes in ${langName}. Return only concise markdown bullets grouped as Topics, Decisions, and Action Items. Preserve names, dates, numbers, owners, deadlines, and every uncertainty qualifier. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Never invent and do not reproduce detailed prose.`;
   return [
     { role: "system", content: instruction },
     { role: "user", content },
@@ -375,27 +404,37 @@ async function synthesizeGlobalNote(
     content: string,
     final: boolean,
   ): Promise<string> => {
-    const result = await detailedChat(
-      globalReduceMessages(content, langName, language, context, final),
-      0.1,
-      budget.globalOutputTokens,
-    );
-    const issues = assessGeneratedNote(content, result.content, {
-      isTruncated: result.is_truncated,
-    });
-    if (issues.length === 0) return result.content;
-    // Intermediate levels are internal scratch; only the final note is gated.
-    if (!final) {
-      const salvaged = collapseRepeatedLines(result.content).trim();
-      if (salvaged) return salvaged;
+    let lastIssues = "unknown";
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const result = await detailedChat(
+          globalReduceMessages(content, langName, language, context, final),
+          0.1,
+          budget.globalOutputTokens,
+          final ? STRUCTURED_GLOBAL_NOTE_RESPONSE_FORMAT : undefined,
+        );
+        const candidate = final
+          ? renderStructuredGlobalNote(
+              parseStructuredGlobalNote(result.content, content, language),
+              language,
+            )
+          : result.content;
+        const issues = assessGeneratedNote(content, candidate, {
+          isTruncated: result.is_truncated,
+          requireUsefulTitle: final,
+        });
+        if (issues.length === 0) return candidate;
+        lastIssues = issues.map((issue) => issue.code).join(", ");
+      } catch (error) {
+        lastIssues = `invalid_structured_output: ${String(error)}`;
+      }
+      console.warn(JSON.stringify({
+        event: "global_note_quality_retry",
+        attempt,
+        issues: lastIssues,
+      }));
     }
-    // Heuristic-only findings (anchors, expansion) are usually false positives.
-    // Keep the grounded H1 and structure; the note-level gate re-checks. Only a
-    // structural failure makes the front matter genuinely unusable.
-    if (final && !hasBlockingDefect(issues)) {
-      return result.content;
-    }
-    throw new Error(`Global reduction failed quality checks: ${issues.map((issue) => issue.code).join(", ")}`);
+    throw new Error(`Global reduction failed quality checks after retries: ${lastIssues}`);
   };
 
   let level = sectionNotes.flatMap((note, index) =>
@@ -426,6 +465,10 @@ async function synthesizeGlobalNote(
   }
 
   const source = level.join("\n\n");
+  // The final front matter has already passed provider-side JSON Schema and
+  // local evidence/shape validation. A free-form editor pass here could turn
+  // the deterministic action table back into malformed prose, so only the
+  // validated renderer is allowed to produce the final Markdown structure.
   return stripPlaceholderSections(await qualityCheckedChat(source, true));
 }
 
@@ -886,6 +929,7 @@ If parts of the transcript are unintelligible, silently skip them and write the 
         );
         const singleIssues = assessGeneratedNote(markedTranscript, single.content, {
           isTruncated: single.is_truncated,
+          requireUsefulTitle: true,
         });
         if (singleIssues.length > 0) {
           const recovered = await processSectionReliably(
@@ -962,6 +1006,7 @@ If parts of the transcript are unintelligible, silently skip them and write the 
 
     const finalQualityIssues = assessGeneratedNote(markedTranscript, enhancedText, {
       isTruncated: false,
+      requireUsefulTitle: true,
     });
     if (hasBlockingDefect(finalQualityIssues)) {
       processingDegraded = true;
@@ -1393,7 +1438,10 @@ RULES:
 
     const trimmed = reviewed.trim();
     if (!trimmed || trimmed.length < draft.length * 0.3) return draft;
-    if (assessGeneratedNote(transcript, trimmed, { isTruncated: false }).length > 0) return draft;
+    if (assessGeneratedNote(transcript, trimmed, {
+      isTruncated: false,
+      requireUsefulTitle: /^#\s+.+$/m.test(draft),
+    }).length > 0) return draft;
     return trimmed;
   } catch {
     return draft;

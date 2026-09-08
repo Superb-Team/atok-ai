@@ -1,9 +1,12 @@
 // Versioned so an explicit user regeneration can distinguish older AI drafts.
-export const CURRENT_AI_PIPELINE_VERSION = 14;
+// Bumped past both lines of divergence: this pipeline now runs the structured
+// global note from PR #6 together with the async retry budget.
+export const CURRENT_AI_PIPELINE_VERSION = 15;
 // Bump when transcript normalization, track arbitration, or chunk stitching
 // changes. Old manifests must re-read the canonical sidecar instead of feeding
 // a previously hallucinated transcript back into note generation.
 export const CURRENT_TRANSCRIPTION_PIPELINE_VERSION = 3;
+
 interface ReviewDecisionInput {
   processingDegraded: boolean;
   loopSuspected: boolean;

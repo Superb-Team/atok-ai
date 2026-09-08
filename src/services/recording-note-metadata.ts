@@ -12,6 +12,8 @@ const CONVERSATIONAL_TITLE_PATTERN =
 // "Pertanyaan Pertama", "Bagian 2", "Part 1" — a section label, not the topic.
 const ORDINAL_LABEL_PATTERN =
   /^(?:pertanyaan|bagian|poin|topik|sesi|bab|part|section|question|point|topic|chapter)\s+(?:\d+|pertama|kedua|ketiga|keempat|kelima|keenam|one|two|three|four|five|first|second|third)\b/iu;
+const INCOMPLETE_TITLE_END_PATTERN =
+  /\b(?:dan|atau|dengan|untuk|tentang|terkait|mengenai|mencakup|meliputi|berdasarkan|melalui|serta|and|or|with|for|about|including|based on|through)\s*$/iu;
 const TITLE_STOP_WORDS = new Set([
   "yang", "dan", "atau", "dari", "untuk", "pada", "dengan", "dalam", "ini", "itu",
   "the", "and", "for", "from", "with", "this", "that", "meeting", "rapat", "catatan",
@@ -63,10 +65,15 @@ export function formatRecordedDate(
 
 export function isUsefulGroundedTitle(value: string, transcript: string): boolean {
   const title = cleanTitleCandidate(value);
-  if (title.length < 6 || title.length > 120) return false;
+  if (title.length < 6 || title.length > 90) return false;
   if (PLACEHOLDER_PATTERN.test(title) || GENERIC_TITLE_PATTERN.test(title)) return false;
-  // A note title is a noun phrase; a full sentence is body text that leaked.
-  if (CONVERSATIONAL_TITLE_PATTERN.test(title) || ORDINAL_LABEL_PATTERN.test(title) || /[.?!]\s*$/u.test(title)) {
+  // A section label or a leaked sentence is not a topic.
+  if (
+    CONVERSATIONAL_TITLE_PATTERN.test(title)
+    || ORDINAL_LABEL_PATTERN.test(title)
+    || INCOMPLETE_TITLE_END_PATTERN.test(title)
+    || /[.?!]\s*$/u.test(title)
+  ) {
     return false;
   }
 
@@ -74,7 +81,10 @@ export function isUsefulGroundedTitle(value: string, transcript: string): boolea
   const distinctiveTitleWords = wordsIn(title).filter(
     (word) => word.length >= 4 && !TITLE_STOP_WORDS.has(word),
   );
-  return distinctiveTitleWords.some((word) => transcriptWords.has(word));
+  if (distinctiveTitleWords.length < 2) return false;
+  const groundedWords = distinctiveTitleWords.filter((word) => transcriptWords.has(word));
+  return groundedWords.length >= 2 &&
+    groundedWords.length * 2 >= distinctiveTitleWords.length;
 }
 
 export function deriveRecordingNoteTitle(
@@ -88,7 +98,7 @@ export function deriveRecordingNoteTitle(
   // first "grounded-looking" body line turns a section sub-heading such as
   // "Pertanyaan Pertama: ..." into the note title.
   const heading = enhancedText.match(/^#\s+(.+)$/m)?.[1] ?? "";
-  const rawTopic = [heading, fallbackTitle]
+  const rawTopic = [heading, cleanTitleCandidate(fallbackTitle)]
     .map(cleanTitleCandidate)
     .find((candidate) => isUsefulGroundedTitle(candidate, transcript))
     ?? (language === "id" ? "Catatan Rekaman" : "Recording Notes");

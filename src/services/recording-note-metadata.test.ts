@@ -32,6 +32,14 @@ test("recovers legacy recording time from the cross-platform filename", () => {
 test("rejects generic and placeholder titles", () => {
   assert.equal(isUsefulGroundedTitle("Progress Meeting – [Tanggal]", transcript), false);
   assert.equal(isUsefulGroundedTitle("Meeting Notes", transcript), false);
+  assert.equal(
+    isUsefulGroundedTitle(
+      "Format Data Segmen Kabel: GeoJSON standar dengan koordinat A-B mencakup",
+      "Format data segmen kabel menggunakan GeoJSON standar dengan koordinat A-B.",
+    ),
+    false,
+  );
+  assert.equal(isUsefulGroundedTitle("Pembahasan Sales", transcript), false);
   assert.equal(isUsefulGroundedTitle("Evaluasi Sales dan Content Engine", transcript), true);
 });
 

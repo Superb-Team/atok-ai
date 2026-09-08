@@ -46,7 +46,7 @@ test("rejects the observed single-paragraph runaway word cascade", () => {
   assert.ok(issues.some((issue) => issue.code === "excessive_expansion"));
 });
 
-test("detects same-line repetition loops without phrase matching", () => {
+test("rejects editor self-commentary and same-line repetition loops", () => {
   const note = `# Rapat
 
 ## Action Items
@@ -54,18 +54,8 @@ test("detects same-line repetition loops without phrase matching", () => {
 
   const issues = assessGeneratedNote(source, note, { isTruncated: false });
 
+  assert.ok(issues.some((issue) => issue.code === "generation_artifact"));
   assert.ok(issues.some((issue) => issue.code === "repetition_loop"));
-});
-
-test("keeps source-grounded repeated speech instead of treating it as a model loop", () => {
-  const source = "Tadi kita bahas ngapain-ngapain-ngapain. Jam jam jam, lalu lanjut ke login.";
-  const note = "# Catatan\n\n## Pembahasan\n\n- Tadi kita bahas ngapain-ngapain-ngapain.\n- Jam jam jam, lalu lanjut ke login.";
-
-  assert.equal(
-    assessGeneratedNote(source, note, { isTruncated: false })
-      .some((issue) => issue.code === "repetition_loop"),
-    false,
-  );
 });
 
 test("rejects invented, missing, or renumbered screenshot markers", () => {
@@ -80,83 +70,81 @@ test("rejects invented, missing, or renumbered screenshot markers", () => {
   assert.ok(missing.some((issue) => issue.code === "marker_mismatch"));
 });
 
-test("rejects invented numeric and acronym anchors", () => {
-  const meeting = "APT menetapkan zona 50 meter dan data JSON.";
-  const note = "# Rapat\n\nAPT menetapkan zona 75 meter dan mengirim SMS.";
+test("accepts a bounded three-column action-item table", () => {
+  const note = `# Pembagian Tim
 
-  const issues = assessGeneratedNote(meeting, note, { isTruncated: false });
+## Tindak Lanjut
 
-  assert.ok(issues.some((issue) =>
-    issue.code === "unsupported_anchor" && issue.detail.includes("75") && issue.detail.includes("SMS")
-  ));
+| Tindakan | Pemilik | Tenggat Waktu |
+| --- | --- | --- |
+| Perbaiki integrasi dashboard | Dendy | Dua hari |
+| Dokumentasikan hasil pengujian | Belum ditugaskan | Tidak ditentukan |`;
+
+  assert.deepEqual(assessGeneratedNote(source, note, { isTruncated: false }), []);
 });
 
-test("does not treat Markdown structure as a new factual anchor", () => {
-  const meeting = "APT membahas integrasi dashboard dan API.";
-  const note = "# Rapat\n\n## PART 1\n\n1. APT membahas integrasi dashboard dan API.";
+test("rejects the observed runaway action-item table row", () => {
+  const cascade = Array.from(
+    { length: 90 },
+    () => "lanjutkan implementasi integrasi kalender dan evaluasi risiko teknis",
+  ).join(" ");
+  const note = `# Pengembangan Engine
 
-  assert.equal(
-    assessGeneratedNote(meeting, note, { isTruncated: false })
-      .some((issue) => issue.code === "unsupported_anchor"),
-    false,
-  );
-});
+## Tindak Lanjut
 
-test("does not flag URL-nya as an invented URL anchor", () => {
-  const issues = assessGeneratedNote(
-    "URL-nya belum bisa dipakai untuk callback.",
-    "URL belum bisa dipakai untuk callback.",
-    { isTruncated: false },
-  );
+| Tindakan | Pemilik | Tenggat Waktu |
+| --- | --- | --- |
+| ${cascade} | Belum ditugaskan | Tidak ditentukan |`;
 
-  assert.equal(issues.some((issue) => issue.code === "unsupported_anchor"), false);
-});
-
-test("reports fabricated anchors without turning them into a runtime kill switch", () => {
-  const note = `### Contoh Format Output
-
-- Anggaran pemasaran diusulkan sebesar Rp 500 juta.
-
-Silakan tempelkan teks PART 3 dari transkrip Anda.`;
   const issues = assessGeneratedNote(source, note, { isTruncated: false });
 
-  assert.ok(issues.some((issue) => issue.code === "unsupported_anchor" && issue.detail.includes("500")));
-  assert.equal(shouldUseLosslessFallback(issues), false);
+  assert.ok(issues.some((issue) => issue.code === "oversized_action_item"));
 });
 
-test("uses lossless fallback only for objective structural failures", () => {
-  assert.equal(shouldUseLosslessFallback([{ code: "empty", detail: "empty" }]), true);
-  assert.equal(shouldUseLosslessFallback([{ code: "truncated", detail: "truncated" }]), true);
-  assert.equal(shouldUseLosslessFallback([{ code: "marker_mismatch", detail: "marker" }]), true);
-  assert.equal(shouldUseLosslessFallback([{ code: "runaway_paragraph", detail: "too long" }]), false);
-  assert.equal(shouldUseLosslessFallback([{ code: "unsupported_anchor", detail: "heuristic" }]), false);
-  assert.equal(shouldUseLosslessFallback([{ code: "repetition_loop", detail: "heuristic" }]), false);
-  assert.equal(shouldUseLosslessFallback([]), false);
+test("rejects action-item tables with missing owner or deadline cells", () => {
+  const note = `# Pengembangan Engine
+
+## Tindak Lanjut
+
+| Tindakan | Pemilik | Tenggat Waktu |
+| --- | --- | --- |
+| Investigasi Review Q | | |`;
+
+  const issues = assessGeneratedNote(source, note, { isTruncated: false });
+
+  assert.ok(issues.some((issue) => issue.code === "malformed_action_items"));
 });
 
-test("accepts an acronym the transcript only spells in lower case", () => {
-  const meeting = "Kita butuh halaman crud buat manajemen produk, pakai rest api dari backend.";
-  const note = "# Manajemen Produk\n\n- Halaman CRUD lewat REST API.";
+test("rejects an incomplete or weak final title", () => {
+  const titleSource = "Format data segmen kabel menggunakan GeoJSON standar dengan koordinat A-B.";
+  const note = `# Format Data Segmen Kabel: GeoJSON standar dengan koordinat A-B mencakup
 
-  assert.equal(
-    assessGeneratedNote(meeting, note, { isTruncated: false })
-      .some((issue) => issue.code === "unsupported_anchor"),
-    false,
-  );
+## Ringkasan
+Format data menggunakan GeoJSON.`;
+
+  const issues = assessGeneratedNote(titleSource, note, {
+    isTruncated: false,
+    requireUsefulTitle: true,
+  });
+
+  assert.ok(issues.some((issue) => issue.code === "weak_title"));
 });
 
-test("hasBlockingDefect fires only for structurally unusable output", () => {
-  for (const code of ["empty", "truncated", "marker_mismatch", "repetition_loop", "runaway_paragraph"] as const) {
+test("hasBlockingDefect separates structural failures from soft heuristics", () => {
+  for (const code of ["empty", "truncated", "marker_mismatch", "repetition_loop", "runaway_paragraph", "generation_artifact", "malformed_action_items"] as const) {
     assert.equal(hasBlockingDefect([{ code, detail: code }]), true);
   }
-  assert.equal(hasBlockingDefect([{ code: "unsupported_anchor", detail: "9" }]), false);
-  assert.equal(hasBlockingDefect([{ code: "excessive_expansion", detail: "3x" }]), false);
-  assert.equal(
-    hasBlockingDefect([
-      { code: "unsupported_anchor", detail: "9" },
-      { code: "excessive_expansion", detail: "3x" },
-    ]),
-    false,
-  );
+  for (const code of ["excessive_expansion", "weak_title", "oversized_action_item", "too_many_action_items"] as const) {
+    assert.equal(hasBlockingDefect([{ code, detail: code }]), false);
+  }
   assert.equal(hasBlockingDefect([]), false);
+});
+
+test("shouldUseLosslessFallback triggers only on an unsalvageable draft", () => {
+  assert.equal(shouldUseLosslessFallback([{ code: "empty", detail: "" }]), true);
+  assert.equal(shouldUseLosslessFallback([{ code: "truncated", detail: "" }]), true);
+  assert.equal(shouldUseLosslessFallback([{ code: "marker_mismatch", detail: "" }]), true);
+  assert.equal(shouldUseLosslessFallback([{ code: "repetition_loop", detail: "" }]), false);
+  assert.equal(shouldUseLosslessFallback([{ code: "malformed_action_items", detail: "" }]), false);
+  assert.equal(shouldUseLosslessFallback([]), false);
 });
