@@ -79,8 +79,16 @@ export function assessGeneratedNote(
   }
 
   const sourceAnchors = new Set(factualAnchorsIn(source));
-  const unsupportedAnchors = factualAnchorsIn(generated)
-    .filter((anchor) => !sourceAnchors.has(anchor));
+  const sourceText = source.toLowerCase();
+  const unsupportedAnchors = factualAnchorsIn(generated).filter((anchor) => {
+    if (sourceAnchors.has(anchor)) return false;
+    // ASR lowercases spoken acronyms ("crud", "rest api"); the term is still in
+    // the transcript. Numeric anchors must match exactly.
+    if (/[a-z]/i.test(anchor)) {
+      return !new RegExp(`\\b${anchor.toLowerCase()}\\b`, "u").test(sourceText);
+    }
+    return true;
+  });
   if (unsupportedAnchors.length > 0) {
     issues.push({
       code: "unsupported_anchor",
@@ -118,4 +126,21 @@ export function shouldUseLosslessFallback(issues: NoteQualityIssue[]): boolean {
   return issues.some(({ code }) =>
     code === "empty" || code === "truncated" || code === "marker_mismatch"
   );
+}
+
+// A genuinely unusable draft: looping, truncated, structurally broken, or with
+// corrupted screenshot markers. The heuristic checks left out here —
+// `unsupported_anchor` (ASR casing, cross-section references) and
+// `excessive_expansion` (dense speech written up in full) — fire on healthy
+// notes, so they inform the owner without flagging the note for the reader.
+const BLOCKING_ISSUE_CODES: readonly NoteQualityIssueCode[] = [
+  "empty",
+  "truncated",
+  "marker_mismatch",
+  "repetition_loop",
+  "runaway_paragraph",
+];
+
+export function hasBlockingDefect(issues: readonly NoteQualityIssue[]): boolean {
+  return issues.some((issue) => BLOCKING_ISSUE_CODES.includes(issue.code));
 }

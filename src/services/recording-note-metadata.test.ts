@@ -35,6 +35,18 @@ test("rejects generic and placeholder titles", () => {
   assert.equal(isUsefulGroundedTitle("Evaluasi Sales dan Content Engine", transcript), true);
 });
 
+test("rejects a body sentence that happens to share words with the transcript", () => {
+  const noisyTranscript = "Rapat membahas progres sales. Tidak ada keputusan untuk bagian ini.";
+
+  assert.equal(
+    isUsefulGroundedTitle(
+      "Ringkasan otomatis tidak tersedia untuk rekaman ini. Catatan lengkap per bagian ada di bawah.",
+      noisyTranscript,
+    ),
+    false,
+  );
+});
+
 test("rejects conversational questions and sentence fragments as note titles", () => {
   const noisyTranscript = "Berapa sih dia mau atur untuk pakiran itu dari data yang masih sedikit. Lalu pembicaraan berlanjut.";
 
@@ -85,4 +97,29 @@ test("replaces a model title so the stored title and document stay consistent", 
     replaceDocumentTitle("# Progress Meeting – [Tanggal]\n\n## Ringkasan\nIsi.", "Evaluasi Tim — 20 Juli 2026"),
     "# Evaluasi Tim — 20 Juli 2026\n\n## Ringkasan\nIsi.",
   );
+});
+
+test("does not turn a section sub-heading into the note title", () => {
+  const note = [
+    "## Pembahasan Terperinci",
+    "",
+    "### Pertanyaan Pertama: Pendekatan Masuk ke Proyek yang Sudah Berjalan",
+    "",
+    "- Koordinasi dulu dengan tim programmer untuk minta arahan.",
+  ].join("\n");
+  const interview =
+    "Ketika kamu masuk ke sebuah proyek yang sudah berjalan, apa pendekatan pertama untuk koordinasi dengan tim programmer.";
+
+  assert.equal(
+    deriveRecordingNoteTitle(note, interview, "Recording - 22:04:33", context, "id"),
+    "Catatan Rekaman — 20 Juli 2026",
+  );
+});
+
+test("rejects an ordinal section label as a grounded title", () => {
+  const interview =
+    "Pembahasan soal pendekatan masuk ke proyek dan strategi deployment yang sudah berjalan.";
+
+  assert.equal(isUsefulGroundedTitle("Pertanyaan Pertama: Pendekatan Masuk ke Proyek", interview), false);
+  assert.equal(isUsefulGroundedTitle("Bagian 2 - Strategi Deployment", interview), false);
 });

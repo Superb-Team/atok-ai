@@ -14,16 +14,20 @@ import {
   sectionSourceFingerprint,
   type ProcessedSection,
 } from "@/services/long-form-processing";
-import { assessGeneratedNote, shouldUseLosslessFallback } from "@/services/note-quality";
+import { assessGeneratedNote, hasBlockingDefect, shouldUseLosslessFallback } from "@/services/note-quality";
 import { recordingProcessingGuard } from "@/services/recording-processing-guard";
 import {
   buildLosslessStructuredFallback,
   isExtractiveFallbackNote,
 } from "@/services/lossless-note-fallback";
 import { stripTranscriptSection } from "@/services/canonical-transcript";
+import { stripMetaCommentary } from "@/services/note-commentary";
 import {
   CURRENT_AI_PIPELINE_VERSION,
   CURRENT_TRANSCRIPTION_PIPELINE_VERSION,
+  classifyProcessingFailure,
+  nextProcessingAttemptAt,
+  type ProcessingFailureKind,
   shouldRepairWithStructuredFallback,
   shouldPublishRecordingToRag,
   shouldOpenAiDraftPreview,
@@ -37,7 +41,6 @@ import {
   replaceDocumentTitle,
   type RecordingNoteContext,
 } from "@/services/recording-note-metadata";
-import { appendTranscriptReviewSections } from "@/services/transcript-review-sections";
 
 // ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
 const LANGUAGE_NAMES: Record<string, string> = {
@@ -157,6 +160,9 @@ interface ProcessingManifest {
   upgradingAi?: boolean;
   timingsMs?: Record<string, number>;
   error?: string;
+  attempt?: number;
+  nextAttemptAt?: string;
+  failureKind?: ProcessingFailureKind;
   createdAt: string;
   updatedAt: string;
 }
@@ -165,16 +171,36 @@ interface TranscriptIntegrityReport {
   revisionId: string;
   transcriptSha256?: string;
   requiresReview: boolean;
-  issues: Array<{ code: string; detail: string }>;
+  issues: Array<{ code: string; detail: string; advisory?: boolean }>;
 }
 
+// A read failure must not be reported as "no manifest": that loses savedNoteId
+// and the next run publishes a second note for the same recording.
 async function loadProcessingManifest(audioPath: string): Promise<ProcessingManifest | null> {
-  const manifest = await invoke<ProcessingManifest | null>("load_processing_manifest", { audioPath })
-    .catch(() => null);
+  const manifest = await invoke<ProcessingManifest | null>("load_processing_manifest", { audioPath });
   if (!manifest || manifest.schemaVersion !== 1 || manifest.audioPath !== audioPath) return null;
   // Legacy v1 manifests predate compare-and-swap generations.
   manifest.generation ??= 0;
   return manifest;
+}
+
+// A claim that is never released blocks every later run for this recording, and
+// the caller reports that as "already processing" — so it must not stay silent.
+function reportReleaseFailure(error: unknown): void {
+  console.error(JSON.stringify({
+    event: "recording_claim_release_failed",
+    reason: String(error),
+  }));
+}
+
+function recordProcessingFailure(manifest: ProcessingManifest, error: unknown): void {
+  const attempt = manifest.attempt ?? 1;
+  manifest.status = "failed";
+  manifest.error = String(error);
+  manifest.failureKind = classifyProcessingFailure(manifest.error, attempt);
+  manifest.nextAttemptAt = manifest.failureKind === "retryable"
+    ? nextProcessingAttemptAt(attempt)
+    : undefined;
 }
 
 async function saveProcessingManifest(manifest: ProcessingManifest): Promise<void> {
@@ -312,11 +338,10 @@ async function processSectionReliably(
     const qualityIssues = assessGeneratedNote(section, result.content, {
       isTruncated: result.is_truncated,
     });
-    if (qualityIssues.length === 0) {
-      return { markdown: result.content, isDegraded: false };
-    }
-
-    return { markdown: result.content, isDegraded: true };
+    // Anchors and expansion are checked per section against a narrow transcript
+    // slice, so they misfire on cross-section references and dense speech. The
+    // note-level gate re-checks anchors against the whole transcript.
+    return { markdown: result.content, isDegraded: hasBlockingDefect(qualityIssues) };
   } catch {
     return { markdown: section, isDegraded: true };
   }
@@ -359,6 +384,17 @@ async function synthesizeGlobalNote(
       isTruncated: result.is_truncated,
     });
     if (issues.length === 0) return result.content;
+    // Intermediate levels are internal scratch; only the final note is gated.
+    if (!final) {
+      const salvaged = collapseRepeatedLines(result.content).trim();
+      if (salvaged) return salvaged;
+    }
+    // Heuristic-only findings (anchors, expansion) are usually false positives.
+    // Keep the grounded H1 and structure; the note-level gate re-checks. Only a
+    // structural failure makes the front matter genuinely unusable.
+    if (final && !hasBlockingDefect(issues)) {
+      return result.content;
+    }
     throw new Error(`Global reduction failed quality checks: ${issues.map((issue) => issue.code).join(", ")}`);
   };
 
@@ -410,6 +446,8 @@ export interface AudioProcessingOptions {
   forceAiUpgrade?: boolean;
   /** Generate and validate content without saving the note or mutating the manifest. */
   previewOnly?: boolean;
+  /** Operator recovery: restart the automatic retry budget for this recording. */
+  retryFromUser?: boolean;
 }
 
 export function processAudioRecording(
@@ -428,7 +466,7 @@ export function processAudioRecording(
     try {
       return await processAudioRecordingOnce(audioPath, noteTitle, language, context, options);
     } finally {
-      await invoke("release_processing_job", { audioPath, runId }).catch(() => {});
+      await invoke("release_processing_job", { audioPath, runId }).catch(reportReleaseFailure);
     }
   }, { joinExisting: options.previewOnly !== true });
 }
@@ -530,7 +568,17 @@ async function processAudioRecordingOnce(
       }
     }
 
-    const refreshTranscript = shouldRefreshTranscript(manifest.transcriptionPipelineVersion);
+    // Counted before the work, not after it: a run that is killed mid-transcript
+    // must still consume its budget, or a crash at the same point replays forever.
+    manifest.attempt = options.retryFromUser === true ? 1 : (manifest.attempt ?? 0) + 1;
+    manifest.failureKind = undefined;
+    manifest.nextAttemptAt = undefined;
+    await persistManifest();
+
+    const refreshTranscript = shouldRefreshTranscript(
+      manifest.transcriptionPipelineVersion,
+      manifest.transcript,
+    );
     if (refreshTranscript) {
       // Transcript changes invalidate every derived section. The sidecar is the
       // durable source; cached note sections must never mix with a new run.
@@ -612,10 +660,13 @@ async function processAudioRecordingOnce(
         issues: [{
           code: "integrity_evaluation_failed",
           detail: `Transcript integrity evaluation failed: ${String(error)}`,
+          advisory: false,
         }],
       }));
       transcriptRequiresReview = integrity.requiresReview;
-      transcriptReviewIssues = integrity.issues.map((issue) => `${issue.code}: ${issue.detail}`);
+      transcriptReviewIssues = integrity.issues
+        .filter((issue) => issue.advisory !== true)
+        .map((issue) => `${issue.code}: ${issue.detail}`);
       manifest.transcriptRevisionId = integrity.revisionId;
       manifest.transcriptReviewIssues = transcriptReviewIssues;
       const enhancementStageKey = `note:${CURRENT_AI_PIPELINE_VERSION}:${lang}:${integrity.revisionId}`;
@@ -627,8 +678,7 @@ async function processAudioRecordingOnce(
       if (!repairWithStructuredFallback) manifest.error = undefined;
       await persistManifest();
     } catch (transcribeError) {
-      manifest.status = "failed";
-      manifest.error = String(transcribeError);
+      recordProcessingFailure(manifest, transcribeError);
       await persistManifestBestEffort();
       const user = authService.getUser();
       console.error(JSON.stringify({
@@ -786,7 +836,9 @@ async function processAudioRecordingOnce(
           processingError = sectionBackedDraft
             ? undefined
             : `Global synthesis failed: ${String(globalError)}`;
-          globalNote = `# ${noteTitle}`;
+          // Front matter is derived into the note title, so a placeholder here
+          // becomes the title and its digits fail the transcript anchor gate.
+          globalNote = "";
           console.warn(JSON.stringify({
             event: "recording_global_synthesis_fallback",
             jobId: manifest.jobId,
@@ -825,7 +877,7 @@ Do not create a "Transcript Lengkap" or "Complete Transcript" section. The canon
 
 The summary should be 3-5 sentences. Keep key points concise, but make the discussion comprehensive enough that every clear fact, status, concern, proposal, number, owner, deadline, and explicitly stated rationale remains represented exactly once.
 
-If the transcript is mostly noise or unintelligible, say so briefly and extract only the clear parts.`,
+If parts of the transcript are unintelligible, silently skip them and write the note from the clear parts only. Never state, imply, or apologize for the quality of the audio, the recording, or the transcript.`,
             },
             { role: "user", content: userContent },
           ],
@@ -845,7 +897,7 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
             budget,
           );
           enhancedText = composeLongFormNote(
-            `# ${noteTitle}\n\n## ${labels.summary}\n\n${lang === "id" ? "Detail catatan dipertahankan di bawah." : "The detailed note is preserved below."}`,
+            "",
             [{
               id: "section-0001",
               index: 0,
@@ -911,17 +963,19 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
     const finalQualityIssues = assessGeneratedNote(markedTranscript, enhancedText, {
       isTruncated: false,
     });
-    if (finalQualityIssues.length > 0) {
+    if (hasBlockingDefect(finalQualityIssues)) {
       processingDegraded = true;
       processingError = `Generated note rejected by quality checks: ${finalQualityIssues.map((issue) => issue.code).join(", ")}`;
       if (!previewOnly && shouldUseLosslessFallback(finalQualityIssues)) {
         usedStructuredFallback = true;
         enhancedText = buildLosslessStructuredFallback(noteTitle, markedTranscript, lang);
       }
-    }
-
-    if (transcriptRequiresReview && transcriptReviewIssues.length > 0) {
-      enhancedText = appendTranscriptReviewSections(enhancedText, transcriptReviewIssues, lang);
+    } else if (finalQualityIssues.length > 0) {
+      console.warn(JSON.stringify({
+        event: "recording_note_advisory_findings",
+        jobId: manifest.jobId,
+        findings: finalQualityIssues.map((issue) => issue.code),
+      }));
     }
 
     // Keep semantic markers in the quality-gate input. Convert them to local
@@ -1066,6 +1120,8 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
     manifest.error = manifest.status === "partial"
       ? processingError ?? "One or more transcript sections used a lossless fallback"
       : undefined;
+    manifest.failureKind = undefined;
+    manifest.nextAttemptAt = undefined;
     await persistManifest();
     console.log(JSON.stringify({
       event: "recording_processing_completed",
@@ -1078,8 +1134,7 @@ If the transcript is mostly noise or unintelligible, say so briefly and extract 
     return { noteTitle: finalTitle, enhancedText, success: true, outcome: "note_created" };
   } catch (error) {
     if (manifest) {
-      manifest.status = "failed";
-      manifest.error = String(error);
+      recordProcessingFailure(manifest, error);
       await persistManifestBestEffort();
     }
     return {
@@ -1188,7 +1243,7 @@ export function commitAudioRecordingDraft(input: AudioDraftCommitInput): Promise
       await invoke("release_processing_job", {
         audioPath: input.audioPath,
         runId,
-      }).catch(() => {});
+      }).catch(reportReleaseFailure);
     }
   }, { joinExisting: false });
 }
@@ -1302,20 +1357,6 @@ function collapseRepeatedLines(text: string): string {
   }
 
   return kept.join("\n").replace(/\n{3,}/g, "\n\n");
-}
-
-// Models sometimes close the note with a parenthesized editorial remark about
-// transcript quality ("(Catatan: ...)"). That is meta-commentary, not content —
-// drop such trailing paragraphs deterministically.
-function stripMetaCommentary(text: string): string {
-  const paragraphs = text.trimEnd().split(/\n{2,}/);
-  while (paragraphs.length > 0) {
-    const last = paragraphs[paragraphs.length - 1].trim();
-    const isMeta = /^\(\s*(catatan|note|nb)\b/i.test(last) && last.endsWith(")");
-    if (!isMeta) break;
-    paragraphs.pop();
-  }
-  return paragraphs.join("\n\n");
 }
 
 // Second "thinking" pass: an editor model fact-checks the draft against the

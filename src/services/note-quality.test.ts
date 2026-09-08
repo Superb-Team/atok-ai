@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessGeneratedNote, shouldUseLosslessFallback } from "./note-quality.ts";
+import { assessGeneratedNote, hasBlockingDefect, shouldUseLosslessFallback } from "./note-quality.ts";
 
 const source = `Rapat membahas pembagian tim engineering dan operasional.
 Dendy akan memperbaiki integrasi dashboard dalam dua hari.
@@ -132,4 +132,31 @@ test("uses lossless fallback only for objective structural failures", () => {
   assert.equal(shouldUseLosslessFallback([{ code: "unsupported_anchor", detail: "heuristic" }]), false);
   assert.equal(shouldUseLosslessFallback([{ code: "repetition_loop", detail: "heuristic" }]), false);
   assert.equal(shouldUseLosslessFallback([]), false);
+});
+
+test("accepts an acronym the transcript only spells in lower case", () => {
+  const meeting = "Kita butuh halaman crud buat manajemen produk, pakai rest api dari backend.";
+  const note = "# Manajemen Produk\n\n- Halaman CRUD lewat REST API.";
+
+  assert.equal(
+    assessGeneratedNote(meeting, note, { isTruncated: false })
+      .some((issue) => issue.code === "unsupported_anchor"),
+    false,
+  );
+});
+
+test("hasBlockingDefect fires only for structurally unusable output", () => {
+  for (const code of ["empty", "truncated", "marker_mismatch", "repetition_loop", "runaway_paragraph"] as const) {
+    assert.equal(hasBlockingDefect([{ code, detail: code }]), true);
+  }
+  assert.equal(hasBlockingDefect([{ code: "unsupported_anchor", detail: "9" }]), false);
+  assert.equal(hasBlockingDefect([{ code: "excessive_expansion", detail: "3x" }]), false);
+  assert.equal(
+    hasBlockingDefect([
+      { code: "unsupported_anchor", detail: "9" },
+      { code: "excessive_expansion", detail: "3x" },
+    ]),
+    false,
+  );
+  assert.equal(hasBlockingDefect([]), false);
 });

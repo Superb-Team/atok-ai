@@ -143,7 +143,7 @@ test("composer preserves every detail without exposing internal section numbers"
   assert.match(note, /^### Progres Sales Engine$/m);
   assert.match(note, /^### Strategi Konten$/m);
   assert.doesNotMatch(note, /(?:Section|Bagian)\s+\d+/i);
-  assert.match(note, /membutuhkan pemeriksaan/i);
+  assert.doesNotMatch(note, /membutuhkan pemeriksaan|needs review/i);
 });
 
 test("placeholder decision sections are omitted instead of published", () => {

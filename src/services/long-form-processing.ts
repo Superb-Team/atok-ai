@@ -212,14 +212,9 @@ export function composeLongFormNote(
   language = "en",
 ): string {
   const ordered = [...sections].sort((a, b) => a.index - b.index);
-  const details = ordered.map((section) => {
-    const warning = section.isDegraded
-      ? `\n\n> ${language === "id"
-        ? "Bagian ini membutuhkan pemeriksaan; bandingkan dengan transcript lengkap sebelum menyimpan."
-        : "This section needs review; compare it with the complete transcript before saving."}`
-      : "";
-    return `${normalizeTopicHeadings(section.markdown)}${warning}`.trim();
-  });
+  // A degraded section is tracked in the manifest, never announced in the note
+  // body — the reader gets clean prose, the owner gets the signal out of band.
+  const details = ordered.map((section) => normalizeTopicHeadings(section.markdown).trim());
   const detailsHeading = language === "id" ? "## Pembahasan Terperinci" : "## Detailed Discussion";
 
   return [globalMarkdown.trim(), detailsHeading, ...details]

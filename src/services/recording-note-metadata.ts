@@ -9,6 +9,9 @@ const PLACEHOLDER_PATTERN =
   /\[(?:tanggal|date|main topic|topic|judul|title)\]|\{(?:tanggal|date|main topic|topic|judul|title)\}|<(?:tanggal|date|main topic|topic|judul|title)>/iu;
 const CONVERSATIONAL_TITLE_PATTERN =
   /^(?:berapa|kenapa|mengapa|gimana|bagaimana|siapa|kapan|di mana|dimana|apakah|kok|nah|jadi|terus|lalu|tadi)\b/iu;
+// "Pertanyaan Pertama", "Bagian 2", "Part 1" — a section label, not the topic.
+const ORDINAL_LABEL_PATTERN =
+  /^(?:pertanyaan|bagian|poin|topik|sesi|bab|part|section|question|point|topic|chapter)\s+(?:\d+|pertama|kedua|ketiga|keempat|kelima|keenam|one|two|three|four|five|first|second|third)\b/iu;
 const TITLE_STOP_WORDS = new Set([
   "yang", "dan", "atau", "dari", "untuk", "pada", "dengan", "dalam", "ini", "itu",
   "the", "and", "for", "from", "with", "this", "that", "meeting", "rapat", "catatan",
@@ -62,7 +65,10 @@ export function isUsefulGroundedTitle(value: string, transcript: string): boolea
   const title = cleanTitleCandidate(value);
   if (title.length < 6 || title.length > 120) return false;
   if (PLACEHOLDER_PATTERN.test(title) || GENERIC_TITLE_PATTERN.test(title)) return false;
-  if (CONVERSATIONAL_TITLE_PATTERN.test(title) || /[?!]\s*$/u.test(title)) return false;
+  // A note title is a noun phrase; a full sentence is body text that leaked.
+  if (CONVERSATIONAL_TITLE_PATTERN.test(title) || ORDINAL_LABEL_PATTERN.test(title) || /[.?!]\s*$/u.test(title)) {
+    return false;
+  }
 
   const transcriptWords = new Set(wordsIn(transcript));
   const distinctiveTitleWords = wordsIn(title).filter(
@@ -78,13 +84,11 @@ export function deriveRecordingNoteTitle(
   context: RecordingNoteContext,
   language: string,
 ): string {
+  // Only a real H1 or the caller's fallback is a title source. Scraping the
+  // first "grounded-looking" body line turns a section sub-heading such as
+  // "Pertanyaan Pertama: ..." into the note title.
   const heading = enhancedText.match(/^#\s+(.+)$/m)?.[1] ?? "";
-  const firstContentLine = enhancedText
-    .split("\n")
-    .map(cleanTitleCandidate)
-    .find((line) => isUsefulGroundedTitle(line, transcript)) ?? "";
-  const fallback = cleanTitleCandidate(fallbackTitle);
-  const rawTopic = [heading, firstContentLine, fallback]
+  const rawTopic = [heading, fallbackTitle]
     .map(cleanTitleCandidate)
     .find((candidate) => isUsefulGroundedTitle(candidate, transcript))
     ?? (language === "id" ? "Catatan Rekaman" : "Recording Notes");

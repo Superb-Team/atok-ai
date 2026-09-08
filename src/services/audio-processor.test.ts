@@ -4,6 +4,9 @@ import { describe, it } from "node:test";
 import {
   CURRENT_AI_PIPELINE_VERSION,
   CURRENT_TRANSCRIPTION_PIPELINE_VERSION,
+  MAX_PROCESSING_ATTEMPTS,
+  classifyProcessingFailure,
+  nextProcessingAttemptAt,
   shouldRecoverProcessingJob,
   shouldRepairWithStructuredFallback,
   shouldReviewGeneratedNote,
@@ -13,7 +16,7 @@ import {
   shouldUpgradeExtractiveFallback,
 } from "./processing-review-policy.ts";
 import { stripTranscriptSection } from "./canonical-transcript.ts";
-import { appendTranscriptReviewSections } from "./transcript-review-sections.ts";
+import { stripMetaCommentary } from "./note-commentary.ts";
 
 describe("canonical transcript separation", () => {
   it("removes a model-created Indonesian transcript section from the note", () => {
@@ -31,21 +34,42 @@ describe("canonical transcript separation", () => {
   });
 });
 
-describe("review sections", () => {
-  it("separates transcript evidence issues from capture diagnostics", () => {
-    const result = appendTranscriptReviewSections(
-      "# Rapat\n\n## Ringkasan\n\nIsi.",
-      [
-        "missing_timestamp_provenance: Provider tidak mengembalikan timestamp.",
-        "audio_quality_requires_review: mic_clipping: chunk 0 has clipped samples",
-      ],
-      "id",
-    );
+describe("model commentary about the recording", () => {
+  it("drops a closing parenthetical remark about transcript quality", () => {
+    const draft = "# Rapat\n\n## Ringkasan\n\nIsi.\n\n(Catatan: transkrip mengandung bagian yang tidak jelas.)";
 
-    assert.match(result, /## Perlu Verifikasi Transkrip/u);
-    assert.match(result, /## Kualitas Capture/u);
-    assert.ok(result.indexOf("missing_timestamp_provenance") < result.indexOf("Kualitas Capture"));
-    assert.ok(result.indexOf("mic_clipping") > result.indexOf("Kualitas Capture"));
+    assert.equal(stripMetaCommentary(draft), "# Rapat\n\n## Ringkasan\n\nIsi.");
+  });
+
+  it("drops a mid-document aside about audio quality", () => {
+    const draft = "# Rapat\n\nCatatan: kualitas audio rekaman ini kurang baik.\n\n## Keputusan\n\nDeploy hari Jumat.";
+
+    assert.equal(stripMetaCommentary(draft), "# Rapat\n\n## Keputusan\n\nDeploy hari Jumat.");
+  });
+
+  it("keeps a note that merely mentions a recording without judging it", () => {
+    const draft = "# Rapat\n\nNote: the transcript will be shared with the team.\n\n## Decisions\n\nShip on Friday.";
+
+    assert.equal(stripMetaCommentary(draft), draft);
+  });
+
+  it("keeps discussion whose subject really is audio quality", () => {
+    const draft = "# Rapat\n\n## Pembahasan\n\nTim membahas kualitas audio pada produk baru.";
+
+    assert.equal(stripMetaCommentary(draft), draft);
+  });
+
+  it("drops a hedge about the transcript that has no explicit lead-in", () => {
+    const draft =
+      "# Rapat\n\n## Ringkasan\n\nIsi.\n\nBeberapa bagian rekaman kurang jelas sehingga sebagian rangkuman bersifat perkiraan.";
+
+    assert.equal(stripMetaCommentary(draft), "# Rapat\n\n## Ringkasan\n\nIsi.");
+  });
+
+  it("keeps a sentence that scopes work without judging the recording", () => {
+    const draft = "# Rapat\n\nBeberapa bagian fitur akan dikerjakan minggu depan.\n\n## Keputusan\n\nRilis Jumat.";
+
+    assert.equal(stripMetaCommentary(draft), draft);
   });
 });
 
@@ -110,116 +134,115 @@ describe("shouldReviewGeneratedNote", () => {
 });
 
 describe("processing recovery policy", () => {
-  it("refreshes manifests written before the transcript normalization pipeline", () => {
-    assert.equal(shouldRefreshTranscript(undefined), true);
+  it("refreshes a stored transcript written before the normalization pipeline", () => {
+    assert.equal(shouldRefreshTranscript(undefined, "transkrip lama"), true);
     assert.equal(
-      shouldRefreshTranscript(CURRENT_TRANSCRIPTION_PIPELINE_VERSION - 1),
+      shouldRefreshTranscript(CURRENT_TRANSCRIPTION_PIPELINE_VERSION - 1, "transkrip lama"),
       true,
     );
     assert.equal(
-      shouldRefreshTranscript(CURRENT_TRANSCRIPTION_PIPELINE_VERSION),
+      shouldRefreshTranscript(CURRENT_TRANSCRIPTION_PIPELINE_VERSION, "transkrip baru"),
       false,
     );
+  });
+
+  it("never re-uploads audio for a recording that has no stored transcript yet", () => {
+    assert.equal(shouldRefreshTranscript(undefined, undefined), false);
+    assert.equal(shouldRefreshTranscript(undefined, "   "), false);
   });
 
   it("keeps terminal partial jobs idle until an explicit user retry", () => {
-    assert.equal(shouldRecoverProcessingJob("partial", undefined), false);
+    assert.equal(shouldRecoverProcessingJob({ status: "partial" }), false);
+    assert.equal(shouldRecoverProcessingJob({ status: "partial", repairingFallback: true }), false);
+    assert.equal(shouldRecoverProcessingJob({ status: "partial", upgradingAi: true }), false);
     assert.equal(shouldRepairWithStructuredFallback("partial", 128, undefined), true);
-    assert.equal(shouldRecoverProcessingJob("partial", 1), false);
-    assert.equal(
-      shouldRecoverProcessingJob(
-        "partial",
-        1,
-        false,
-        undefined,
-        CURRENT_AI_PIPELINE_VERSION,
-        false,
-        undefined,
-        true,
-      ),
-      false,
-    );
-    assert.equal(
-      shouldRecoverProcessingJob(
-        "partial",
-        1,
-        false,
-        undefined,
-        CURRENT_AI_PIPELINE_VERSION,
-        false,
-        CURRENT_TRANSCRIPTION_PIPELINE_VERSION - 1,
-        false,
-      ),
-      false,
-    );
-    assert.equal(
-      shouldRecoverProcessingJob(
-        "partial",
-        1,
-        false,
-        undefined,
-        CURRENT_AI_PIPELINE_VERSION,
-        false,
-        1,
-        true,
-      ),
-      false,
-    );
-    assert.equal(
-      shouldRecoverProcessingJob(
-        "partial",
-        1,
-        false,
-        undefined,
-        CURRENT_AI_PIPELINE_VERSION,
-        false,
-        CURRENT_TRANSCRIPTION_PIPELINE_VERSION,
-        true,
-      ),
-      false,
-    );
     assert.equal(shouldRepairWithStructuredFallback("partial", 128, 1), false);
-    assert.equal(shouldRecoverProcessingJob("partial", 2), false);
     assert.equal(shouldRepairWithStructuredFallback("partial", 128, 2), false);
-    assert.equal(
-      shouldRecoverProcessingJob(
-        "partial",
-        1,
-        false,
-        "hybrid",
-        CURRENT_AI_PIPELINE_VERSION - 1,
-        false,
-        CURRENT_TRANSCRIPTION_PIPELINE_VERSION,
-        true,
-      ),
-      false,
-    );
-    assert.equal(
-      shouldRecoverProcessingJob(
-        "partial",
-        1,
-        false,
-        "hybrid",
-        CURRENT_AI_PIPELINE_VERSION,
-        false,
-        CURRENT_TRANSCRIPTION_PIPELINE_VERSION,
-        true,
-      ),
-      false,
-    );
-    assert.equal(shouldRecoverProcessingJob("saving", undefined, true), true);
+  });
+
+  it("recovers interrupted jobs but never reopens completed ones", () => {
+    assert.equal(shouldRecoverProcessingJob({ status: "transcribing" }), true);
+    assert.equal(shouldRecoverProcessingJob({ status: "extracting" }), true);
+    assert.equal(shouldRecoverProcessingJob({ status: "synthesizing" }), true);
+    assert.equal(shouldRecoverProcessingJob({ status: "saving" }), true);
+    assert.equal(shouldRecoverProcessingJob({ status: "complete" }), false);
+    assert.equal(shouldRecoverProcessingJob({ status: "unknown-status" }), false);
+    assert.equal(shouldRecoverProcessingJob({ status: "saving", repairingFallback: true }), true);
     assert.equal(shouldRepairWithStructuredFallback("saving", 128, undefined, true), true);
   });
 
-  it("recovers interrupted jobs but never reopens terminal jobs", () => {
-    assert.equal(shouldRecoverProcessingJob("transcribing", undefined), true);
-    assert.equal(shouldRecoverProcessingJob("extracting", undefined), true);
-    assert.equal(shouldRecoverProcessingJob("synthesizing", undefined), true);
-    assert.equal(shouldRecoverProcessingJob("saving", undefined), true);
-    assert.equal(shouldRecoverProcessingJob("failed", undefined), false);
-    assert.equal(shouldRecoverProcessingJob("failed", undefined, true), false);
-    assert.equal(shouldRecoverProcessingJob("complete", undefined), false);
-    assert.equal(shouldRecoverProcessingJob("unknown-status", undefined), false);
+  it("retries a transient failure only once its backoff has elapsed", () => {
+    const now = new Date("2026-08-31T10:00:00Z");
+    const due = {
+      status: "failed",
+      failureKind: "retryable" as const,
+      attempt: 1,
+      nextAttemptAt: "2026-08-31T09:59:00Z",
+    };
+
+    assert.equal(shouldRecoverProcessingJob(due, now), true);
+    assert.equal(
+      shouldRecoverProcessingJob({ ...due, nextAttemptAt: "2026-08-31T10:05:00Z" }, now),
+      false,
+    );
+  });
+
+  it("never reopens a terminal failure", () => {
+    assert.equal(shouldRecoverProcessingJob({ status: "failed" }), false);
+    assert.equal(
+      shouldRecoverProcessingJob({ status: "failed", failureKind: "terminal", attempt: 1 }),
+      false,
+    );
+  });
+
+  it("stops replaying a job that dies at the same point on every launch", () => {
+    assert.equal(
+      shouldRecoverProcessingJob({
+        status: "transcribing",
+        attempt: MAX_PROCESSING_ATTEMPTS - 1,
+      }),
+      true,
+    );
+    assert.equal(
+      shouldRecoverProcessingJob({ status: "transcribing", attempt: MAX_PROCESSING_ATTEMPTS }),
+      false,
+    );
+  });
+
+  it("separates network failures from credential failures", () => {
+    assert.equal(
+      classifyProcessingFailure("Transcription request failed: error sending request", 1),
+      "retryable",
+    );
+    assert.equal(
+      classifyProcessingFailure("Transcription failed (503 Service Unavailable): busy", 1),
+      "retryable",
+    );
+    assert.equal(
+      classifyProcessingFailure("DEEPINFRA_API_KEY not configured in .env", 1),
+      "terminal",
+    );
+    assert.equal(
+      classifyProcessingFailure("Transcription failed (401 Unauthorized): invalid token", 1),
+      "terminal",
+    );
+    assert.equal(classifyProcessingFailure("User not authenticated", 1), "terminal");
+  });
+
+  it("gives up on a transient failure once the attempt budget is spent", () => {
+    const transient = "Transcription request failed: error sending request";
+
+    assert.equal(classifyProcessingFailure(transient, MAX_PROCESSING_ATTEMPTS - 1), "retryable");
+    assert.equal(classifyProcessingFailure(transient, MAX_PROCESSING_ATTEMPTS), "terminal");
+  });
+
+  it("waits longer before each further attempt", () => {
+    const now = new Date("2026-08-31T10:00:00Z");
+
+    assert.equal(nextProcessingAttemptAt(1, now), "2026-08-31T10:01:00.000Z");
+    assert.equal(nextProcessingAttemptAt(2, now), "2026-08-31T10:02:00.000Z");
+    assert.equal(nextProcessingAttemptAt(3, now), "2026-08-31T10:04:00.000Z");
+    assert.equal(nextProcessingAttemptAt(9, now), "2026-08-31T10:16:00.000Z");
   });
 
   it("detects an upgrade candidate without replaying it automatically", () => {
@@ -228,35 +251,14 @@ describe("processing recovery policy", () => {
       true,
     );
     assert.equal(
-      shouldRecoverProcessingJob(
+      shouldUpgradeExtractiveFallback(
         "partial",
-        1,
-        false,
-        "extractive-fallback",
-        CURRENT_AI_PIPELINE_VERSION - 1,
-      ),
-      false,
-    );
-    assert.equal(
-      shouldRecoverProcessingJob(
-        "partial",
-        1,
-        false,
         "extractive-fallback",
         CURRENT_AI_PIPELINE_VERSION,
       ),
       false,
     );
-    assert.equal(
-      shouldRecoverProcessingJob(
-        "saving",
-        1,
-        false,
-        "extractive-fallback",
-        CURRENT_AI_PIPELINE_VERSION,
-        true,
-      ),
-      true,
-    );
+    assert.equal(shouldRecoverProcessingJob({ status: "partial" }), false);
+    assert.equal(shouldRecoverProcessingJob({ status: "saving", upgradingAi: true }), true);
   });
 });
