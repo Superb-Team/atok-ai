@@ -33,6 +33,7 @@ export interface AudioQualityReport {
   sourceArtifacts: AudioSourceArtifact[];
   warnings: string[];
   micDroppedBytes?: number;
+  aecEnabled?: boolean;
   requiresReview: boolean;
 }
 
@@ -78,6 +79,7 @@ export interface ProcessingJobSummary {
   recordedAt?: string;
   timezone?: string;
   savedNoteId?: number;
+  failureNoteId?: number;
   enhancementMode?: 'ai' | 'hybrid' | 'extractive-fallback';
   fallbackVersion?: number;
   repairingFallback?: boolean;
@@ -85,6 +87,9 @@ export interface ProcessingJobSummary {
   upgradingAi?: boolean;
   transcriptionPipelineVersion?: number;
   transcript?: string;
+  attempt?: number;
+  nextAttemptAt?: string;
+  failureKind?: 'retryable' | 'terminal';
 }
 
 export interface RecordingStartInfo extends RecordingNoteContext {

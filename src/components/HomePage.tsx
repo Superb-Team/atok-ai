@@ -228,16 +228,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     import('@/services/recording.service').then(({ recordingService }) =>
       recordingService.listProcessingJobs().then((jobs) => {
         jobs
-          .filter((job) => shouldRecoverProcessingJob(
-            job.status,
-            job.fallbackVersion,
-            job.repairingFallback,
-            job.enhancementMode,
-            job.aiPipelineVersion,
-            job.upgradingAi,
-            job.transcriptionPipelineVersion,
-            job.transcript !== undefined,
-          ))
+          .filter((job) => shouldRecoverProcessingJob(job))
           .forEach((job) => {
             const timestamp = Date.parse(job.updatedAt) || Date.now();
             enqueueRecovery(() => startProcessing(

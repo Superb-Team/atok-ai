@@ -817,7 +817,8 @@ impl DesktopAudioRecorder {
             })?);
         let mut dsp = AudioDsp::new(AudioDsp::DEFAULT_SYSTEM_TRIM_DB);
         let mut denoisers: Vec<Box<nnnoiseless::DenoiseState>> = Vec::new();
-        let mut quality = AudioQualityReport::new(sample_rate, channels, mic_sr, mic_ch);
+        let mut quality =
+            AudioQualityReport::new(sample_rate, channels, mic_sr, mic_ch, aec_enabled);
         let source_dir = recording_quality::source_directory(&mp3_path);
         let audio_parent = mp3_path.parent().unwrap_or_else(|| Path::new("."));
 
@@ -954,12 +955,7 @@ impl DesktopAudioRecorder {
                     match artifact {
                         Ok(Some(artifact)) => quality.source_artifacts.push(artifact),
                         Ok(None) => {}
-                        Err(error) => {
-                            quality.requires_review = true;
-                            quality
-                                .warnings
-                                .push(format!("source_artifact_failed: {error}"));
-                        }
+                        Err(error) => quality.record_source_artifact_failure(&error),
                     }
                 }
 
@@ -1085,7 +1081,7 @@ impl DesktopAudioRecorder {
         }
 
         Self::finalize_chunk_encoder(&mut encoder, &mut mp3_file)?;
-        quality.record_mic_overrun(mic_overruns.load(Ordering::Relaxed));
+        quality.finalize(mic_overruns.load(Ordering::Relaxed));
         recording_quality::persist_report(&mp3_path, &quality)?;
         drop(mp3_file);
         if mp3_path.exists() {

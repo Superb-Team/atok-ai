@@ -836,12 +836,18 @@ const WHISPER_MAX_BYTES: usize = 20 * 1024 * 1024;
 // Max concurrent Whisper requests — DeepInfra rate-limits under load; 2 keeps
 // throughput high without triggering 429 floods when splitting large files.
 const WHISPER_MAX_CONCURRENT: usize = 2;
+// Chunk payloads read into memory at once. Deliberately above the request limit:
+// a chunk waiting out a backoff must not keep a healthy chunk from uploading.
+const WHISPER_MAX_BUFFERED_CHUNKS: usize = 4;
 // Retry up to this many times on 429 / "Model busy" with exponential backoff.
 const WHISPER_MAX_RETRIES: u32 = 5;
 // A provider request must never hold a live transcription job forever. Three
 // minutes is longer than the normal processing time for one 180-second chunk,
 // while still allowing the retry loop to recover from a stalled request.
 const WHISPER_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+// The live pipeline normally has a chunk or two left when capture stops. Past
+// this it is stuck, and a caller must never wait on it forever.
+const LIVE_JOB_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 // Language pinned when the caller doesn't pass one. Without a language the API
 // auto-detects per request, and since we upload many chunks separately, quiet
 // chunks get misdetected (en/es/fi) → polyglot garbage. A fixed language stops that.
@@ -1465,9 +1471,21 @@ pub async fn transcribe_audio(
     };
     let _transcribe_guard = transcribe_lock.lock().await;
 
-    // Wait for the live job before reading or rebuilding its sidecar.
+    // Wait for the live job before reading or rebuilding its sidecar. Abandoning
+    // a stuck one is safe: every finished chunk is already checkpointed on disk.
     if let Some(job) = take_live_job(&audio_path) {
-        let _ = job.await;
+        let abort = job.abort_handle();
+        if tokio::time::timeout(LIVE_JOB_WAIT_TIMEOUT, job)
+            .await
+            .is_err()
+        {
+            abort.abort();
+            eprintln!(
+                "[transcribe] live transcription exceeded {}s for '{}'; rebuilding from the recording",
+                LIVE_JOB_WAIT_TIMEOUT.as_secs(),
+                audio_path
+            );
+        }
     }
 
     // Pipeline upgrades must not return a stale sidecar.
@@ -1529,7 +1547,6 @@ pub async fn transcribe_audio(
     // Each task also retries on 429 / "Model busy" with exponential backoff.
     let client = std::sync::Arc::new(build_whisper_client()?);
     let shared = std::sync::Arc::new(audio_bytes);
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(WHISPER_MAX_CONCURRENT));
     let mut handles = Vec::with_capacity(num_chunks);
 
     for (i, (start, end)) in ranges.into_iter().enumerate() {
@@ -1537,11 +1554,9 @@ pub async fn transcribe_audio(
         let name = format!("recording_part{}.mp3", i + 1);
         let c = client.clone();
         let buf = shared.clone();
-        let sem = sem.clone();
         let lang = lang.clone();
         let prompt_terms = recording_glossary.prompt_terms.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
             transcribe_with_retry(&c, &key, &buf[start..end], &name, &lang, &prompt_terms).await
         }));
     }
@@ -1639,7 +1654,7 @@ pub async fn transcribe_chunks_live(
             return;
         }
     };
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(WHISPER_MAX_CONCURRENT));
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(WHISPER_MAX_BUFFERED_CHUNKS));
     let mut tasks = tokio::task::JoinSet::<Result<usize, String>>::new();
     let mut capture_failures = Vec::new();
 
@@ -1788,9 +1803,13 @@ pub async fn transcribe_chunks_live(
     }
 }
 
-/// Retry wrapper for a single chunk upload. Retries only on 429 / "Model busy"
-/// with exponential backoff; other errors (auth, quota, network) fail fast.
-async fn transcribe_with_retry(
+fn whisper_retry_backoff(attempt: u32) -> Duration {
+    Duration::from_secs((2u64 << attempt.min(5)).min(60))
+}
+
+/// One queued upload. The permit covers the request only, so a chunk that is
+/// backing off releases its provider slot to the chunks still waiting.
+async fn transcribe_chunk_queued(
     client: &Client,
     api_key: &str,
     audio_bytes: &[u8],
@@ -1810,9 +1829,29 @@ async fn transcribe_with_retry(
             queue_wait_ms, file_name
         );
     }
-    let mut delay_secs = 2u64;
+    transcribe_chunk_with_client(
+        client,
+        api_key,
+        audio_bytes,
+        file_name,
+        language,
+        prompt_terms,
+    )
+    .await
+}
+
+/// Retry wrapper for a single chunk upload. Retries only on 429 / "Model busy"
+/// with exponential backoff; other errors (auth, quota, network) fail fast.
+async fn transcribe_with_retry(
+    client: &Client,
+    api_key: &str,
+    audio_bytes: &[u8],
+    file_name: &str,
+    language: &str,
+    prompt_terms: &[String],
+) -> Result<AsrProviderResponse, String> {
     for attempt in 0..=WHISPER_MAX_RETRIES {
-        match transcribe_chunk_with_client(
+        match transcribe_chunk_queued(
             client,
             api_key,
             audio_bytes,
@@ -1824,16 +1863,16 @@ async fn transcribe_with_retry(
         {
             Ok(text) => return Ok(text),
             Err(e) if attempt < WHISPER_MAX_RETRIES && is_retryable_transcription_error(&e) => {
+                let delay = whisper_retry_backoff(attempt);
                 eprintln!(
                     "[transcribe] {} transient failure (attempt {}/{}): {}; retrying in {}s",
                     file_name,
                     attempt + 1,
                     WHISPER_MAX_RETRIES,
                     e,
-                    delay_secs
+                    delay.as_secs()
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-                delay_secs = (delay_secs * 2).min(60);
+                tokio::time::sleep(delay).await;
             }
             Err(e) => return Err(e),
         }
@@ -2122,6 +2161,23 @@ mod tests {
         assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
         assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn buffered_chunks_exceed_in_flight_requests() {
+        // Equal limits would let two backing-off chunks hold the whole queue.
+        assert!(WHISPER_MAX_BUFFERED_CHUNKS > WHISPER_MAX_CONCURRENT);
+    }
+
+    #[test]
+    fn whisper_backoff_doubles_and_stays_within_its_budget() {
+        let schedule: Vec<u64> = (0..WHISPER_MAX_RETRIES)
+            .map(|attempt| whisper_retry_backoff(attempt).as_secs())
+            .collect();
+
+        assert_eq!(schedule, vec![2, 4, 8, 16, 32]);
+        assert_eq!(schedule.iter().sum::<u64>(), 62);
+        assert_eq!(whisper_retry_backoff(20).as_secs(), 60);
     }
 
     #[test]

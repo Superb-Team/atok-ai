@@ -15,14 +15,21 @@ struct ActiveJobClaim {
     _lock_file: std::fs::File,
 }
 
+// Canonicalizes the directory rather than the recording: the key must stay the
+// same after the file is deleted or moved, or its claim can never be released.
 fn canonical_audio_key(audio_path: &Path) -> Result<PathBuf, String> {
-    std::fs::canonicalize(audio_path).map_err(|error| {
+    let file_name = audio_path
+        .file_name()
+        .ok_or_else(|| format!("Recording path has no file name: {}", audio_path.display()))?;
+    let parent = audio_path.parent().unwrap_or_else(|| Path::new("."));
+    let directory = std::fs::canonicalize(parent).map_err(|error| {
         format!(
-            "Resolve recording path '{}': {}",
-            audio_path.display(),
+            "Resolve recording directory '{}': {}",
+            parent.display(),
             error
         )
-    })
+    })?;
+    Ok(directory.join(file_name))
 }
 
 fn claim(audio_path: &Path, run_id: &str) -> Result<bool, String> {
@@ -534,6 +541,24 @@ mod tests {
         assert!(!release_claim(&audio, "not-owner").unwrap());
         assert!(!claim(&audio, "next").unwrap());
         assert!(release_claim(&audio, "owner").unwrap());
+        assert!(claim(&audio, "next").unwrap());
+
+        clear_claim_for_test(&audio);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_claim_survives_its_recording_being_deleted() {
+        let dir = temp_dir("claim-deleted-audio");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("take.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        assert!(claim(&audio, "owner").unwrap());
+        std::fs::remove_file(&audio).unwrap();
+
+        assert!(release_claim(&audio, "owner").unwrap());
+        std::fs::write(&audio, b"audio").unwrap();
         assert!(claim(&audio, "next").unwrap());
 
         clear_claim_for_test(&audio);

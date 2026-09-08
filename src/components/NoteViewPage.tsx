@@ -236,6 +236,44 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
     }
   };
 
+  // Re-runs the whole pipeline from the audio. Needed when processing never got
+  // far enough to produce a transcript, which leaves nothing to regenerate from.
+  const handleRetryProcessing = async (job: ProcessingJobSummary) => {
+    if (!note || regeneratingAi) return;
+
+    setRegeneratingAi(true);
+    setAiDraftError(null);
+    setFormatNotice(null);
+    try {
+      const { processAudioRecording } = await import("@/services/audio-processor.service");
+      const result = await processAudioRecording(
+        job.audioPath,
+        job.noteTitle || note.title,
+        job.language || undefined,
+        job.recordedAt && job.timezone
+          ? { recordedAt: job.recordedAt, timezone: job.timezone }
+          : undefined,
+        { retryFromUser: true },
+      );
+      if (result.outcome === "already_processing") {
+        throw new Error("Rekaman masih sedang diproses. Tunggu sampai proses selesai lalu coba lagi.");
+      }
+      if (!result.success) {
+        throw new Error(result.error ?? "Pemrosesan rekaman gagal.");
+      }
+      setFormatNotice(
+        result.outcome === "no_speech"
+          ? result.message ?? "Rekaman tersimpan, tetapi tidak ada percakapan yang terdeteksi."
+          : "Rekaman berhasil diproses ulang.",
+      );
+      await loadNote();
+    } catch (err) {
+      setAiDraftError(err instanceof Error ? err.message : "Pemrosesan rekaman gagal.");
+    } finally {
+      setRegeneratingAi(false);
+    }
+  };
+
   const handleImproveNote = async () => {
     if (!note) return;
     try {
@@ -247,6 +285,10 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
       );
       if (route.kind === "recording") {
         await handleRegenerateWithAi(route.job);
+        return;
+      }
+      if (route.kind === "retry_processing") {
+        await handleRetryProcessing(route.job);
         return;
       }
       if (route.kind === "missing_recording_source") {
