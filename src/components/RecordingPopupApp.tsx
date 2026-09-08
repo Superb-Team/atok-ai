@@ -38,6 +38,8 @@ const RecordingPopupApp: React.FC = () => {
   const [isCapturing, setIsCapturing] = useState(false);
   const [shotFlash, setShotFlash] = useState(false);
   const [time, setTime] = useState(0);
+  const startedAtRef = useRef<number | null>(null);
+  const pausedAtRef = useRef<number | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [appWindow, setAppWindow] = useState<Window | null>(null);
   const [feedback, setFeedback] = useState<{ message: string; tone: 'error' | 'success' } | null>(null);
@@ -206,11 +208,32 @@ const RecordingPopupApp: React.FC = () => {
     return () => dragArea.removeEventListener('mousedown', handleMouseDown);
   }, [appWindow]);
 
+  // Elapsed time comes from a wall-clock anchor, not a per-tick accumulator that
+  // drifts slow under load. Resume slides the anchor past the paused interval.
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (isRecording && !isPaused) {
-      interval = setInterval(() => setTime(prev => prev + 0.01), 10);
+    if (!isRecording) {
+      startedAtRef.current = null;
+      pausedAtRef.current = null;
+      return;
     }
+    if (isPaused) {
+      if (startedAtRef.current !== null && pausedAtRef.current === null) {
+        pausedAtRef.current = Date.now();
+        setTime((pausedAtRef.current - startedAtRef.current) / 1000);
+      }
+      return;
+    }
+    let anchor = startedAtRef.current;
+    if (anchor === null) {
+      anchor = Date.now();
+    } else if (pausedAtRef.current !== null) {
+      anchor += Date.now() - pausedAtRef.current;
+      pausedAtRef.current = null;
+    }
+    startedAtRef.current = anchor;
+    const tick = () => setTime((Date.now() - anchor) / 1000);
+    tick();
+    const interval = setInterval(tick, 100);
     return () => clearInterval(interval);
   }, [isRecording, isPaused]);
 
