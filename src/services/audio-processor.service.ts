@@ -879,8 +879,9 @@ async function processAudioRecordingOnce(
           processingError = sectionBackedDraft
             ? undefined
             : `Global synthesis failed: ${String(globalError)}`;
-          // Front matter is derived into the note title, so a placeholder here
-          // becomes the title and its digits fail the transcript anchor gate.
+          // The first heading of the front matter becomes the note title, so a
+          // placeholder here would surface as the title. Leave it empty and let
+          // deriveRecordingNoteTitle fall back to a grounded or generic title.
           globalNote = "";
           console.warn(JSON.stringify({
             event: "recording_global_synthesis_fallback",
