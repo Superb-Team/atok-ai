@@ -148,3 +148,23 @@ test("shouldUseLosslessFallback triggers only on an unsalvageable draft", () => 
   assert.equal(shouldUseLosslessFallback([{ code: "malformed_action_items", detail: "" }]), false);
   assert.equal(shouldUseLosslessFallback([]), false);
 });
+
+test("detects a same-line repetition loop absent from the source", () => {
+  const note = "# Rapat\n\n## Pembahasan\n\n- sistem aman terpercaya scalable maintainable correlated correlated correlated correlated.";
+
+  assert.ok(
+    assessGeneratedNote(source, note, { isTruncated: false })
+      .some((issue) => issue.code === "repetition_loop"),
+  );
+});
+
+test("keeps source-grounded repeated speech instead of treating it as a model loop", () => {
+  const grounded = "Tadi kita bahas ngapain-ngapain-ngapain. Jam jam jam, lalu lanjut ke login.";
+  const note = "# Catatan\n\n## Pembahasan\n\n- Tadi kita bahas ngapain-ngapain-ngapain.\n- Jam jam jam, lalu lanjut ke login.";
+
+  assert.equal(
+    assessGeneratedNote(grounded, note, { isTruncated: false })
+      .some((issue) => issue.code === "repetition_loop"),
+    false,
+  );
+});
