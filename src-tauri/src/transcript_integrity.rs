@@ -9,6 +9,29 @@ pub struct TranscriptIssue {
     pub detail: String,
     pub candidate: Option<String>,
     pub expected: Option<String>,
+    // Records what could not be verified; only a blocking issue forces review.
+    #[serde(default)]
+    pub advisory: bool,
+}
+
+fn advisory_issue(code: &str, detail: String) -> TranscriptIssue {
+    TranscriptIssue {
+        code: code.to_string(),
+        detail,
+        candidate: None,
+        expected: None,
+        advisory: true,
+    }
+}
+
+fn blocking_issue(code: &str, detail: String) -> TranscriptIssue {
+    TranscriptIssue {
+        code: code.to_string(),
+        detail,
+        candidate: None,
+        expected: None,
+        advisory: false,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +164,7 @@ fn entity_issues(transcript: &str, glossary_terms: &[String]) -> Vec<TranscriptI
                     ),
                     candidate: Some(candidate),
                     expected: Some(expected.clone()),
+                    advisory: false,
                 });
                 break;
             }
@@ -176,6 +200,7 @@ fn cross_attempt_glossary_issues(
                 ),
                 candidate: None,
                 expected: Some(expected.clone()),
+                advisory: false,
             })
         })
         .collect()
@@ -229,7 +254,7 @@ fn blocking_quality_detail(value: &serde_json::Value) -> Option<String> {
         .into_iter()
         .flatten()
         .filter_map(|warning| warning.as_str())
-        .filter(|warning| !warning.starts_with("track_imbalance:"))
+        .filter(|warning| !crate::recording_quality::is_advisory_warning(warning))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if warnings.is_empty()
@@ -283,23 +308,18 @@ pub async fn evaluate_transcript_integrity(
         &attempts,
     ));
     if attempts.is_empty() {
-        issues.push(TranscriptIssue {
-            code: "missing_asr_provenance".to_string(),
-            detail: "No immutable ASR attempt artifact was found".to_string(),
-            candidate: None,
-            expected: None,
-        });
-    }
-    if attempts
+        issues.push(blocking_issue(
+            "missing_asr_provenance",
+            "No immutable ASR attempt artifact was found".to_string(),
+        ));
+    } else if attempts
         .iter()
         .all(|attempt| attempt.response.segments.is_empty() && attempt.response.words.is_empty())
     {
-        issues.push(TranscriptIssue {
-            code: "missing_timestamp_provenance".to_string(),
-            detail: "The ASR provider returned no timestamped words or segments".to_string(),
-            candidate: None,
-            expected: None,
-        });
+        issues.push(advisory_issue(
+            "missing_timestamp_provenance",
+            "The ASR provider returned no timestamped words or segments; evidence is limited to transcript text".to_string(),
+        ));
     }
     if let Ok(value) = std::fs::read(&quality_path)
         .ok()
@@ -307,12 +327,7 @@ pub async fn evaluate_transcript_integrity(
         .ok_or(())
     {
         if let Some(detail) = blocking_quality_detail(&value) {
-            issues.push(TranscriptIssue {
-                code: "audio_quality_requires_review".to_string(),
-                detail,
-                candidate: None,
-                expected: None,
-            });
+            issues.push(blocking_issue("audio_quality_requires_review", detail));
         }
     }
 
@@ -353,11 +368,11 @@ pub async fn evaluate_transcript_integrity(
         }
     }
     let report = TranscriptIntegrityReport {
-        schema_version: 1,
+        schema_version: 2,
         revision_id,
         transcript_sha256,
         generated_at: chrono::Utc::now().to_rfc3339(),
-        requires_review: !issues.is_empty(),
+        requires_review: issues.iter().any(|issue| !issue.advisory),
         issues,
         evidence,
         asr_attempt_count: attempts.len(),
@@ -419,6 +434,30 @@ mod tests {
         });
 
         assert_eq!(blocking_quality_detail(&report), None);
+    }
+
+    #[test]
+    fn treats_brief_capture_hiccups_as_advisory() {
+        let report = serde_json::json!({
+            "requiresReview": true,
+            "warnings": [
+                "mic_overrun_advisory: 512 input bytes (~5ms) were dropped before durable capture",
+                "mic_clipping_advisory: chunk 3 has 0.60% near-full-scale samples",
+                "mic_missing_advisory: chunk 9 has no microphone samples"
+            ]
+        });
+
+        assert_eq!(blocking_quality_detail(&report), None);
+    }
+
+    #[test]
+    fn a_provider_without_timestamps_does_not_require_review() {
+        let issues = vec![advisory_issue(
+            "missing_timestamp_provenance",
+            "no timestamps".to_string(),
+        )];
+
+        assert!(!issues.iter().any(|issue| !issue.advisory));
     }
 
     #[test]
