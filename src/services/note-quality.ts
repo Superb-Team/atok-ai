@@ -35,8 +35,7 @@ interface RepeatedTokenRun {
   count: number;
 }
 
-// Compared against the source so genuine spoken repetition ("jam jam jam") is
-// not mistaken for a model loop.
+// Compared against the source so real spoken repetition ("jam jam jam") is kept.
 function repeatedTokenRuns(value: string): RepeatedTokenRun[] {
   const pattern = /\b([\p{L}\p{N}_]{3,})\b(?:[\s,;:.*+\-]+\1\b){2,}/giu;
   return Array.from(value.matchAll(pattern), (match) => {
@@ -212,11 +211,8 @@ export function assessGeneratedNote(
   return issues;
 }
 
-// A genuinely unusable draft: structurally broken, looping, truncated, or with a
-// corrupted screenshot marker or malformed action table. The soft heuristics
-// left out here — excessive_expansion, weak_title (the title is replaced
-// downstream), and the action-item size limits — inform the owner without
-// flagging the note for the reader.
+// Findings that leave the draft unusable. The rest (excessive_expansion,
+// weak_title, action-item size limits) are advisory: logged, not flagged.
 const BLOCKING_ISSUE_CODES: readonly NoteQualityIssueCode[] = [
   "empty",
   "truncated",
@@ -227,9 +223,7 @@ const BLOCKING_ISSUE_CODES: readonly NoteQualityIssueCode[] = [
   "malformed_action_items",
 ];
 
-// Only these leave the draft with nothing salvageable, so only these trigger a
-// rebuild from the deterministic extractive fallback. A loop or malformed table
-// still degrades the note but keeps the model's text for the owner to fix.
+// Only an unsalvageable draft is rebuilt from the extractive fallback.
 export function shouldUseLosslessFallback(issues: readonly NoteQualityIssue[]): boolean {
   return issues.some(({ code }) =>
     code === "empty" || code === "truncated" || code === "marker_mismatch"

@@ -177,9 +177,7 @@ impl AudioQualityReport {
         }) else {
             return;
         };
-        // Excusable only for a brief closing remnant of a capture that did record
-        // the microphone: a longer gap, or no microphone audio at all, is a real
-        // capture failure.
+        // Excusable only for a brief closing remnant of a capture that did record mic.
         let remnant_is_excusable = last_span_ms <= TRAILING_GAP_ADVISORY_MS
             && self.windows.iter().any(|window| window.mic_bytes > 0);
         let gaps: Vec<(u32, bool)> = self

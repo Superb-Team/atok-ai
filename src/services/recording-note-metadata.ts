@@ -9,7 +9,6 @@ const PLACEHOLDER_PATTERN =
   /\[(?:tanggal|date|main topic|topic|judul|title)\]|\{(?:tanggal|date|main topic|topic|judul|title)\}|<(?:tanggal|date|main topic|topic|judul|title)>/iu;
 const CONVERSATIONAL_TITLE_PATTERN =
   /^(?:berapa|kenapa|mengapa|gimana|bagaimana|siapa|kapan|di mana|dimana|apakah|kok|nah|jadi|terus|lalu|tadi)\b/iu;
-// "Pertanyaan Pertama", "Bagian 2", "Part 1" — a section label, not the topic.
 const ORDINAL_LABEL_PATTERN =
   /^(?:pertanyaan|bagian|poin|topik|sesi|bab|part|section|question|point|topic|chapter)\s+(?:\d+|pertama|kedua|ketiga|keempat|kelima|keenam|one|two|three|four|five|first|second|third)\b/iu;
 const INCOMPLETE_TITLE_END_PATTERN =
@@ -67,7 +66,6 @@ export function isUsefulGroundedTitle(value: string, transcript: string): boolea
   const title = cleanTitleCandidate(value);
   if (title.length < 6 || title.length > 90) return false;
   if (PLACEHOLDER_PATTERN.test(title) || GENERIC_TITLE_PATTERN.test(title)) return false;
-  // A section label or a leaked sentence is not a topic.
   if (
     CONVERSATIONAL_TITLE_PATTERN.test(title)
     || ORDINAL_LABEL_PATTERN.test(title)
@@ -94,9 +92,7 @@ export function deriveRecordingNoteTitle(
   context: RecordingNoteContext,
   language: string,
 ): string {
-  // Only a real H1 or the caller's fallback is a title source. Scraping the
-  // first "grounded-looking" body line turns a section sub-heading such as
-  // "Pertanyaan Pertama: ..." into the note title.
+  // Never scrape a body line: a section sub-heading is not the recording's topic.
   const heading = enhancedText.match(/^#\s+(.+)$/m)?.[1] ?? "";
   const rawTopic = [heading, cleanTitleCandidate(fallbackTitle)]
     .map(cleanTitleCandidate)

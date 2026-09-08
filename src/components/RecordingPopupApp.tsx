@@ -208,8 +208,7 @@ const RecordingPopupApp: React.FC = () => {
     return () => dragArea.removeEventListener('mousedown', handleMouseDown);
   }, [appWindow]);
 
-  // Elapsed time comes from a wall-clock anchor, not a per-tick accumulator that
-  // drifts slow under load. Resume slides the anchor past the paused interval.
+  // Wall-clock anchor, not a per-tick accumulator that drifts slow under load.
   useEffect(() => {
     if (!isRecording) {
       startedAtRef.current = null;

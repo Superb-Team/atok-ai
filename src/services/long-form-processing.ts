@@ -212,8 +212,7 @@ export function composeLongFormNote(
   language = "en",
 ): string {
   const ordered = [...sections].sort((a, b) => a.index - b.index);
-  // A degraded section is tracked in the manifest, never announced in the note
-  // body — the reader gets clean prose, the owner gets the signal out of band.
+  // A degraded section is tracked in the manifest, not announced in the note body.
   const details = ordered.map((section) => normalizeTopicHeadings(section.markdown).trim());
   const detailsHeading = language === "id" ? "## Pembahasan Terperinci" : "## Detailed Discussion";
 

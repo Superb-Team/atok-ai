@@ -1,6 +1,4 @@
 // Versioned so an explicit user regeneration can distinguish older AI drafts.
-// Bumped past both lines of divergence: this pipeline now runs the structured
-// global note from PR #6 together with the async retry budget.
 export const CURRENT_AI_PIPELINE_VERSION = 15;
 // Bump when transcript normalization, track arbitration, or chunk stitching
 // changes. Old manifests must re-read the canonical sidecar instead of feeding

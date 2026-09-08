@@ -179,8 +179,7 @@ interface TranscriptIntegrityReport {
   issues: Array<{ code: string; detail: string; advisory?: boolean }>;
 }
 
-// A read failure must not be reported as "no manifest": that loses savedNoteId
-// and the next run publishes a second note for the same recording.
+// A read failure must not look like "no manifest" — that drops savedNoteId and duplicates the note.
 async function loadProcessingManifest(audioPath: string): Promise<ProcessingManifest | null> {
   const manifest = await invoke<ProcessingManifest | null>("load_processing_manifest", { audioPath });
   if (!manifest || manifest.schemaVersion !== 1 || manifest.audioPath !== audioPath) return null;
@@ -189,8 +188,7 @@ async function loadProcessingManifest(audioPath: string): Promise<ProcessingMani
   return manifest;
 }
 
-// A claim that is never released blocks every later run for this recording, and
-// the caller reports that as "already processing" — so it must not stay silent.
+// A leaked claim blocks every later run and reports as "already processing" — never swallow it.
 function reportReleaseFailure(error: unknown): void {
   console.error(JSON.stringify({
     event: "recording_claim_release_failed",
@@ -349,9 +347,7 @@ async function processSectionReliably(
     const qualityIssues = assessGeneratedNote(section, result.content, {
       isTruncated: result.is_truncated,
     });
-    // Anchors and expansion are checked per section against a narrow transcript
-    // slice, so they misfire on cross-section references and dense speech. The
-    // note-level gate re-checks anchors against the whole transcript.
+    // Judged against a narrow slice, so only structural defects degrade a section.
     return { markdown: result.content, isDegraded: hasBlockingDefect(qualityIssues) };
   } catch {
     return { markdown: section, isDegraded: true };
@@ -611,8 +607,7 @@ async function processAudioRecordingOnce(
       }
     }
 
-    // Counted before the work, not after it: a run that is killed mid-transcript
-    // must still consume its budget, or a crash at the same point replays forever.
+    // Counted before the work: a run killed mid-transcript must still spend its budget.
     manifest.attempt = options.retryFromUser === true ? 1 : (manifest.attempt ?? 0) + 1;
     manifest.failureKind = undefined;
     manifest.nextAttemptAt = undefined;
@@ -879,9 +874,7 @@ async function processAudioRecordingOnce(
           processingError = sectionBackedDraft
             ? undefined
             : `Global synthesis failed: ${String(globalError)}`;
-          // The first heading of the front matter becomes the note title, so a
-          // placeholder here would surface as the title. Leave it empty and let
-          // deriveRecordingNoteTitle fall back to a grounded or generic title.
+          // Empty, not a placeholder: a placeholder H1 would become the note title.
           globalNote = "";
           console.warn(JSON.stringify({
             event: "recording_global_synthesis_fallback",
