@@ -1,4 +1,4 @@
-import { detailedChat, type ChatCompletionResult } from "@/features/note-generation/api/ai-chat";
+import { detailedChat, type ChatCompletionResult } from "@/features/note-generation/api/ai";
 import type { LongFormBudget } from "@/features/note-generation/lib/long-form-budget";
 import { assessGeneratedNote, hasBlockingDefect } from "@/features/note-generation/lib/note-quality";
 import { sectionNotesSystemPrompt } from "@/features/note-generation/lib/prompts";

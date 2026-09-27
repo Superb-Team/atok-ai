@@ -1,4 +1,4 @@
-import type { RecordingAsset } from "../../notes/api/note-asset.service.ts";
+import type { RecordingAsset, RecordingAssets } from "../../notes/api/note-asset.service.ts";
 
 // Place each screenshot marker at the word position proportional to when it was
 // taken. Approximate by design (speech density varies), but lands the image in
@@ -54,4 +54,32 @@ export function formatElapsed(elapsedMs: number): string {
   const mins = Math.floor(totalSeconds / 60);
   const secs = totalSeconds % 60;
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+}
+
+export interface TranscriptWithAssets {
+  assets: RecordingAsset[];
+  markedTranscript: string;
+  /** One line per marker with the vision description, for the prompt. */
+  assetContext: string;
+}
+
+// Anchor the screenshots into the transcript as short markers so the note can
+// reference what was on screen.
+export function anchorAssetsInTranscript(
+  transcript: string,
+  loaded: { taken: RecordingAssets; descriptions: string[] } | null,
+): TranscriptWithAssets {
+  const assets = loaded?.taken.assets ?? [];
+  if (!loaded || assets.length === 0) {
+    return { assets, markedTranscript: transcript, assetContext: "" };
+  }
+  return {
+    assets,
+    markedTranscript: insertAssetMarkers(transcript, assets, loaded.taken.duration_ms),
+    assetContext: assets
+      .map((a, i) =>
+        `[[ATOK_ASSET_${i + 1}]] (screen at ${formatElapsed(a.elapsed_ms)})${loaded.descriptions[i] ? `: ${loaded.descriptions[i]}` : ""}`,
+      )
+      .join("\n"),
+  };
 }

@@ -3,6 +3,7 @@ import {
   FALLBACK_MODEL_LIMITS,
   type ModelLimits,
 } from "@/features/note-generation/lib/long-form-budget";
+import type { TranscriptIntegrityReport } from "@/features/note-generation/types";
 
 export interface ChatCompletionResult {
   request_id: string;
@@ -32,4 +33,27 @@ export function detailedChat(
     maxTokens,
     ...(responseFormat ? { responseFormat } : {}),
   });
+}
+
+export function transcribeAudio(audioPath: string, language: string, forceRefresh: boolean): Promise<string> {
+  return invoke<string>("transcribe_audio", { audioPath, language, forceRefresh });
+}
+
+export function evaluateTranscriptIntegrity(
+  audioPath: string,
+  transcript: string,
+): Promise<TranscriptIntegrityReport> {
+  return invoke<TranscriptIntegrityReport>("evaluate_transcript_integrity", { audioPath, transcript });
+}
+
+export function describeImage(imagePath: string, language: string): Promise<string> {
+  return invoke<string>("describe_image", { imagePath, language });
+}
+
+export function insertRagDocument(
+  userId: string,
+  text: string,
+  metadata: Record<string, unknown>,
+): Promise<boolean> {
+  return invoke<boolean>("agent_insert_document", { userId, text, metadata });
 }

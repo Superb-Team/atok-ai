@@ -10,6 +10,7 @@ src/
       components/ React pages and components for this feature
       api/        thin wrappers around Tauri `invoke` commands
       lib/        pure logic, unit-tested with `*.test.ts` beside it
+      pipeline/   stages of a multi-step flow (note-generation only)
       types.ts    types shared inside the feature
   components/     components shared across features (shadcn `ui/`, MarkdownRenderer)
   lib/            app-wide helpers (utils, theme)

@@ -1,4 +1,4 @@
-import { detailedChat } from "@/features/note-generation/api/ai-chat";
+import { detailedChat } from "@/features/note-generation/api/ai";
 import { mapWithConcurrency } from "@/features/note-generation/lib/concurrency";
 import {
   SECTION_MAX_CONCURRENT,

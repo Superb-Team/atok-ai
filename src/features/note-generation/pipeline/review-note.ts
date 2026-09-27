@@ -1,4 +1,4 @@
-import { detailedChat } from "@/features/note-generation/api/ai-chat";
+import { detailedChat } from "@/features/note-generation/api/ai";
 import { assessGeneratedNote } from "@/features/note-generation/lib/note-quality";
 import { reviewSystemPrompt } from "@/features/note-generation/lib/prompts";
 

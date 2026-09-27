@@ -51,3 +51,24 @@ export interface TranscriptIntegrityReport {
   requiresReview: boolean;
   issues: Array<{ code: string; detail: string; advisory?: boolean }>;
 }
+
+export interface AudioProcessingResult {
+  noteTitle: string;
+  enhancedText: string;
+  success: boolean;
+  canonicalTranscript?: string;
+  transcriptRevisionId?: string;
+  warnings?: string[];
+  outcome?: "note_created" | "draft_preview" | "no_speech" | "already_processing";
+  message?: string;
+  error?: string;
+}
+
+export interface AudioProcessingOptions {
+  /** Re-run AI enhancement even when the manifest already reached the current version. */
+  forceAiUpgrade?: boolean;
+  /** Generate and validate content without saving the note or mutating the manifest. */
+  previewOnly?: boolean;
+  /** Operator recovery: restart the automatic retry budget for this recording. */
+  retryFromUser?: boolean;
+}
