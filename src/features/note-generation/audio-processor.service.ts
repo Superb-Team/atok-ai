@@ -1,20 +1,39 @@
-import { invoke } from "@tauri-apps/api/core";
 import { NoteConflictError, noteService } from "@/features/notes/api/note.service";
 import { authService } from "@/features/auth/api/auth.service";
 import type { Note } from "@/features/notes/types";
 import { noteAssetService, type RecordingAsset } from "@/features/notes/api/note-asset.service";
+import { invoke } from "@tauri-apps/api/core";
+import { detailedChat, getModelLimits } from "@/features/note-generation/api/ai-chat";
+import {
+  claimProcessingJob,
+  loadProcessingManifest,
+  releaseProcessingJob,
+  saveProcessingManifest,
+} from "@/features/note-generation/api/processing-manifest";
+import { applyAssetMarkers, formatElapsed, insertAssetMarkers } from "@/features/note-generation/lib/asset-markers";
+import { mapWithConcurrency } from "@/features/note-generation/lib/concurrency";
+import {
+  DETERMINISTIC_FALLBACK_BUDGET,
+  SECTION_MAX_CONCURRENT,
+  longFormBudgetFor,
+} from "@/features/note-generation/lib/long-form-budget";
 import {
   composeLongFormNote,
   estimateTokenUpperBound,
   isUsableSectionBackedDraft,
-  operationalSourceTokenBudget,
-  packByTokenBudget,
   splitTranscriptByTokenBudget,
   stripPlaceholderSections,
   sectionSourceFingerprint,
   type ProcessedSection,
 } from "@/features/note-generation/lib/long-form-processing";
 import { assessGeneratedNote, hasBlockingDefect, shouldUseLosslessFallback } from "@/features/note-generation/lib/note-quality";
+import {
+  LANGUAGE_NAMES,
+  noteSectionLabels,
+  screenshotPromptRules,
+  singlePassSystemPrompt,
+} from "@/features/note-generation/lib/prompts";
+import { collapseRepeatedLines } from "@/features/note-generation/lib/repeated-lines";
 import { recordingProcessingGuard } from "@/features/recording/lib/recording-processing-guard";
 import {
   buildLosslessStructuredFallback,
@@ -27,7 +46,6 @@ import {
   CURRENT_TRANSCRIPTION_PIPELINE_VERSION,
   classifyProcessingFailure,
   nextProcessingAttemptAt,
-  type ProcessingFailureKind,
   shouldRepairWithStructuredFallback,
   shouldPublishRecordingToRag,
   shouldOpenAiDraftPreview,
@@ -41,160 +59,14 @@ import {
   replaceDocumentTitle,
   type RecordingNoteContext,
 } from "@/features/recording/lib/recording-note-metadata";
-import {
-  parseStructuredGlobalNote,
-  renderStructuredGlobalNote,
-  STRUCTURED_GLOBAL_NOTE_RESPONSE_FORMAT,
-} from "@/features/note-generation/lib/structured-global-note";
-
-// ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
-const LANGUAGE_NAMES: Record<string, string> = {
-  id: "Bahasa Indonesia",
-  en: "English",
-  ja: "Japanese",
-  ko: "Korean",
-  zh: "Chinese",
-  es: "Spanish",
-  ar: "Arabic",
-};
-
-function noteSectionLabels(language: string) {
-  if (language === "id") {
-    return {
-      summary: "Ringkasan",
-      keyPoints: "Poin Utama",
-      details: "Pembahasan",
-      considerations: "Konteks & Pertimbangan",
-      decisions: "Keputusan",
-      actions: "Tindak Lanjut",
-    };
-  }
-  return {
-    summary: "Summary",
-    keyPoints: "Key Points",
-    details: "Discussion",
-    considerations: "Context & Considerations",
-    decisions: "Decisions",
-    actions: "Action Items",
-  };
-}
-
-function recordingContextInstruction(context: RecordingNoteContext): string {
-  return `Recording started at ${context.recordedAt} in timezone ${context.timezone}. Never treat this as spoken transcript content and do not put the date in the generated H1; the application appends the localized date deterministically.`;
-}
-
-// max_tokens only hurts when the model loops until it exhausts the budget
-// (which has happened — that's why collapseRepeatedLines exists). Scale the
-// budget to the input so a pathological loop on a short take can't burn the
-// full 8192 tokens of generation time.
-function maxTokensFor(input: string): number {
-  return Math.min(8192, Math.max(1024, Math.ceil(input.length / 2)));
-}
-
-// Parallel enough to cut wall time, low enough not to trip DeepInfra rate
-// limits (same spirit as WHISPER_MAX_CONCURRENT on the backend).
-const SECTION_MAX_CONCURRENT = 2;
-const FALLBACK_CONTEXT_TOKENS = 32_768;
-const FALLBACK_OUTPUT_TOKENS = 8_192;
-const MAX_SECTION_SOURCE_TOKENS = 24_000;
-const SECTION_OUTPUT_TOKENS = 1_536;
-const GLOBAL_OUTPUT_TOKENS = 3_072;
-
-interface ModelLimits {
-  model: string;
-  context_tokens: number;
-  max_output_tokens: number;
-  source: string;
-}
-
-interface ChatCompletionResult {
-  request_id: string;
-  content: string;
-  finish_reason: string;
-  model: string;
-  prompt_tokens: number;
-  completion_tokens: number;
-  estimated_cost: number;
-  continuation_count: number;
-  is_truncated: boolean;
-}
-
-interface LongFormBudget {
-  model: string;
-  maxSourceTokens: number;
-  maxReduceTokens: number;
-  sectionOutputTokens: number;
-  globalOutputTokens: number;
-}
-
-type ProcessingStatus = "transcribing" | "extracting" | "synthesizing" | "saving" | "complete" | "partial" | "failed";
-
-interface ManifestSection {
-  id: string;
-  index: number;
-  sourceHash: string;
-  markdown: string;
-  markers: string[];
-  isDegraded: boolean;
-  status: "complete" | "failed";
-}
-
-interface ProcessingManifest {
-  schemaVersion: 1;
-  generation: number;
-  jobId: string;
-  audioPath: string;
-  noteTitle: string;
-  language: string;
-  recordedAt?: string;
-  timezone?: string;
-  status: ProcessingStatus;
-  transcript?: string;
-  transcriptionPipelineVersion?: number;
-  transcriptRevisionId?: string;
-  transcriptReviewIssues?: string[];
-  enhancementStageKey?: string;
-  sections: ManifestSection[];
-  savedNoteId?: number;
-  savedNoteUpdatedAt?: string;
-  failureNoteId?: number;
-  enhancementMode?: "ai" | "hybrid" | "extractive-fallback";
-  fallbackVersion?: number;
-  repairingFallback?: boolean;
-  aiPipelineVersion?: number;
-  upgradingAi?: boolean;
-  timingsMs?: Record<string, number>;
-  error?: string;
-  attempt?: number;
-  nextAttemptAt?: string;
-  failureKind?: ProcessingFailureKind;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface TranscriptIntegrityReport {
-  revisionId: string;
-  transcriptSha256?: string;
-  requiresReview: boolean;
-  issues: Array<{ code: string; detail: string; advisory?: boolean }>;
-}
-
-// A read failure must not look like "no manifest" — that drops savedNoteId and duplicates the note.
-async function loadProcessingManifest(audioPath: string): Promise<ProcessingManifest | null> {
-  const manifest = await invoke<ProcessingManifest | null>("load_processing_manifest", { audioPath });
-  if (!manifest || manifest.schemaVersion !== 1 || manifest.audioPath !== audioPath) return null;
-  // Legacy v1 manifests predate compare-and-swap generations.
-  manifest.generation ??= 0;
-  return manifest;
-}
-
-// A leaked claim blocks every later run and reports as "already processing" — never swallow it.
-function reportReleaseFailure(error: unknown): void {
-  console.error(JSON.stringify({
-    event: "recording_claim_release_failed",
-    reason: String(error),
-  }));
-}
+import { processSectionReliably } from "@/features/note-generation/pipeline/section-notes";
+import { synthesizeGlobalNote } from "@/features/note-generation/pipeline/global-synthesis";
+import { reviewNote } from "@/features/note-generation/pipeline/review-note";
+import type {
+  ManifestSection,
+  ProcessingManifest,
+  TranscriptIntegrityReport,
+} from "@/features/note-generation/types";
 
 function recordProcessingFailure(manifest: ProcessingManifest, error: unknown): void {
   const attempt = manifest.attempt ?? 1;
@@ -206,267 +78,6 @@ function recordProcessingFailure(manifest: ProcessingManifest, error: unknown): 
     : undefined;
 }
 
-async function saveProcessingManifest(manifest: ProcessingManifest): Promise<void> {
-  manifest.updatedAt = new Date().toISOString();
-  const saved = await invoke<ProcessingManifest>("save_processing_manifest", {
-    audioPath: manifest.audioPath,
-    manifest,
-  });
-  manifest.generation = saved.generation;
-  manifest.updatedAt = saved.updatedAt;
-}
-
-async function resolveLongFormBudget(): Promise<LongFormBudget> {
-  const limits = await invoke<ModelLimits>("get_ai_model_limits").catch(() => ({
-    model: "unknown",
-    context_tokens: FALLBACK_CONTEXT_TOKENS,
-    max_output_tokens: FALLBACK_OUTPUT_TOKENS,
-    source: "frontend-fallback",
-  }));
-  const context = Math.max(4_096, limits.context_tokens);
-  const sectionOutputTokens = Math.max(
-    512,
-    Math.min(SECTION_OUTPUT_TOKENS, limits.max_output_tokens, Math.floor(context / 4)),
-  );
-  const globalOutputTokens = Math.max(
-    512,
-    Math.min(GLOBAL_OUTPUT_TOKENS, limits.max_output_tokens, Math.floor(context / 4)),
-  );
-  const safety = Math.max(512, Math.floor(context * 0.1));
-  const promptReserve = Math.max(1_024, Math.min(8_000, Math.floor(context * 0.2)));
-  // The backend may continue a length-limited answer twice. Reserve all three
-  // possible output windows so a continuation cannot push the request beyond
-  // the advertised context size.
-  const sectionAvailable = Math.max(
-    512,
-    context - (sectionOutputTokens * 3) - safety - promptReserve,
-  );
-  const reduceAvailable = Math.max(
-    512,
-    context - (globalOutputTokens * 3) - safety - promptReserve,
-  );
-
-  return {
-    model: limits.model,
-    maxSourceTokens: operationalSourceTokenBudget(
-      Math.min(MAX_SECTION_SOURCE_TOKENS, sectionAvailable),
-    ),
-    maxReduceTokens: Math.min(20_000, reduceAvailable),
-    sectionOutputTokens,
-    globalOutputTokens,
-  };
-}
-
-function detailedChat(
-  messages: Array<{ role: string; content: string }>,
-  temperature: number,
-  maxTokens: number,
-  responseFormat?: Record<string, unknown>,
-): Promise<ChatCompletionResult> {
-  return invoke<ChatCompletionResult>("ai_chat_detailed", {
-    messages,
-    temperature,
-    maxTokens,
-    ...(responseFormat ? { responseFormat } : {}),
-  });
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i], i);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
-}
-
-// Map step: detailed notes for one section of a long recording. Deliberately
-// NO title/summary/conclusions — the merge pass owns the final structure.
-function summarizeSection(
-  section: string,
-  index: number,
-  total: number,
-  langName: string,
-  hasMarkers: boolean,
-  maxTokens: number,
-): Promise<ChatCompletionResult> {
-  const markerRule = hasMarkers
-    ? "\n- Keep every [[ATOK_ASSET_N]] marker exactly once, on its own line, at its current position — never rewrite, translate, renumber, or drop a marker"
-    : "";
-  return detailedChat(
-    [
-      {
-        role: "system",
-        content: `You are an expert meeting-notes writer. You receive PART ${index + 1} of ${total} of one long recording's transcript. Write detailed notes for THIS PART ONLY — they will be merged with the other parts later.
-
-RULES:
-- ONLY use information actually in this part — never invent speakers, names, numbers, or content
-- Capture EVERY clear point; preserve concrete specifics: numbers, dates, quantities, names, technical/product terms
-- Preserve epistemic status exactly: distinguish reported progress from verified results, proposals from decisions, estimates from deadlines, and suspected causes from confirmed causes
-- If someone says "should", "probably", "not checked", "dummy", "plan", "maybe", or an equivalent qualifier, keep that uncertainty; never upgrade it into a completed or confirmed fact
-- Never infer an action owner from conversational proximity. Attribute an action only when the part explicitly identifies who owns it; otherwise label it unassigned
-- When the speakers explicitly explain rationale, trade-offs, constraints, risks, or why an option was preferred, preserve that as context/consideration. Never infer hidden reasoning or motives.
-- Do not speculate about the meaning of isolated or unclear words. Omit them instead of inventing a possible visual, positional, or situational context
-- Write in ${langName}
-- Ignore transcription-noise filler such as "thank you", "terima kasih", "like and subscribe" — that is leftover noise, not real content
-- Never repeat the same bullet; never add meta commentary about transcript quality${markerRule}
-- Output: markdown bullets grouped under short sub-headings. NO document title, NO summary, NO conclusions — raw material only.`,
-      },
-      { role: "user", content: section },
-    ],
-    0.2,
-    maxTokens,
-  );
-}
-
-async function processSectionReliably(
-  section: string,
-  index: number,
-  total: number,
-  langName: string,
-  hasMarkers: boolean,
-  budget: LongFormBudget,
-): Promise<{ markdown: string; isDegraded: boolean }> {
-  try {
-    const result = await summarizeSection(
-      section,
-      index,
-      total,
-      langName,
-      hasMarkers,
-      budget.sectionOutputTokens,
-    );
-    const qualityIssues = assessGeneratedNote(section, result.content, {
-      isTruncated: result.is_truncated,
-    });
-    // Judged against a narrow slice, so only structural defects degrade a section.
-    return { markdown: result.content, isDegraded: hasBlockingDefect(qualityIssues) };
-  } catch {
-    return { markdown: section, isDegraded: true };
-  }
-}
-
-function globalReduceMessages(
-  content: string,
-  langName: string,
-  language: string,
-  context: RecordingNoteContext,
-  final: boolean,
-) {
-  const instruction = final
-    ? `Extract compact front matter for one meeting note in ${langName} as the JSON object required by the response schema.
-
-Rules:
-- title must be concrete, topic-specific, grounded in the source, and must not contain Markdown
-- title states the meeting's main objective and represents 2-3 dominant themes, not one incidental detail
-- title must be a complete phrase and must not end in a connector such as "and", "with", "mencakup", or "terkait"
-- title_evidence contains 2-3 different exact, contiguous source spans supporting the dominant themes named by the title
-- summary contains 3-5 concise sentences
-- key_points and decisions contain atomic, non-duplicated, single-line strings
-- action_items contains at most 15 atomic actions; never combine separate tasks, status, risks, discussion, or decisions into one action
-- action must be concise and imperative
-- evidence must be one exact, contiguous source substring that explicitly supports the action, owner, and deadline
-- never infer an owner from conversational proximity; use "${language === "id" ? "Belum ditugaskan" : "Unassigned"}" unless the evidence explicitly names the owner
-- use "${language === "id" ? "Tidak ditentukan" : "Not specified"}" unless the evidence explicitly states a committed deadline
-- estimates such as "should finish this week", proposals, hopes, or availability are not deadlines
-- omit unsupported decisions and actions instead of guessing
-- preserve uncertainty exactly and never turn reported or unverified progress into confirmed results
-- output JSON only; do not output Markdown or commentary
-
-${recordingContextInstruction(context)}`
-    : `Extract compact global facts from these sequential meeting-section notes in ${langName}. Return only concise markdown bullets grouped as Topics, Decisions, and Action Items. Preserve names, dates, numbers, owners, deadlines, and every uncertainty qualifier. Never turn a proposal, expectation, unverified report, estimate, or suspected cause into a decision or confirmed result. Never invent and do not reproduce detailed prose.`;
-  return [
-    { role: "system", content: instruction },
-    { role: "user", content },
-  ];
-}
-
-async function synthesizeGlobalNote(
-  sectionNotes: string[],
-  langName: string,
-  language: string,
-  context: RecordingNoteContext,
-  budget: LongFormBudget,
-): Promise<string> {
-  const qualityCheckedChat = async (
-    content: string,
-    final: boolean,
-  ): Promise<string> => {
-    let lastIssues = "unknown";
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      try {
-        const result = await detailedChat(
-          globalReduceMessages(content, langName, language, context, final),
-          0.1,
-          budget.globalOutputTokens,
-          final ? STRUCTURED_GLOBAL_NOTE_RESPONSE_FORMAT : undefined,
-        );
-        const candidate = final
-          ? renderStructuredGlobalNote(
-              parseStructuredGlobalNote(result.content, content, language),
-              language,
-            )
-          : result.content;
-        const issues = assessGeneratedNote(content, candidate, {
-          isTruncated: result.is_truncated,
-          requireUsefulTitle: final,
-        });
-        if (issues.length === 0) return candidate;
-        lastIssues = issues.map((issue) => issue.code).join(", ");
-      } catch (error) {
-        lastIssues = `invalid_structured_output: ${String(error)}`;
-      }
-      console.warn(JSON.stringify({
-        event: "global_note_quality_retry",
-        attempt,
-        issues: lastIssues,
-      }));
-    }
-    throw new Error(`Global reduction failed quality checks after retries: ${lastIssues}`);
-  };
-
-  let level = sectionNotes.flatMap((note, index) =>
-    splitTranscriptByTokenBudget(`PART ${index + 1}\n${note}`, budget.maxReduceTokens)
-      .map((section) => section.text),
-  );
-
-  if (estimateTokenUpperBound(level.join("\n\n")) <= budget.maxReduceTokens) {
-    return stripPlaceholderSections(
-      await qualityCheckedChat(level.join("\n\n"), true),
-    );
-  }
-
-  for (let depth = 0; level.length > 1 && depth < 8; depth += 1) {
-    const batches = packByTokenBudget(level, budget.maxReduceTokens);
-    const nextLevel = await mapWithConcurrency(batches, SECTION_MAX_CONCURRENT, async (batch) => {
-      return qualityCheckedChat(batch.join("\n\n"), false);
-    });
-    if (batches.length > 1 && nextLevel.length >= level.length) {
-      throw new Error("Global reduction did not converge within its token budget");
-    }
-    level = nextLevel;
-    if (batches.length === 1) break;
-  }
-
-  if (level.length > 1) {
-    throw new Error("Global reduction exceeded maximum depth");
-  }
-
-  const source = level.join("\n\n");
-  // The final front matter has already passed provider-side JSON Schema and
-  // local evidence/shape validation. A free-form editor pass here could turn
-  // the deterministic action table back into malformed prose, so only the
-  // validated renderer is allowed to produce the final Markdown structure.
-  return stripPlaceholderSections(await qualityCheckedChat(source, true));
-}
 
 export interface AudioProcessingResult {
   noteTitle: string;
@@ -498,14 +109,14 @@ export function processAudioRecording(
 ): Promise<AudioProcessingResult> {
   return recordingProcessingGuard.run(audioPath, async () => {
     const runId = globalThis.crypto.randomUUID();
-    const claimed = await invoke<boolean>("claim_processing_job", { audioPath, runId });
+    const claimed = await claimProcessingJob(audioPath, runId);
     if (!claimed) {
       return { noteTitle, enhancedText: "", success: true, outcome: "already_processing" };
     }
     try {
       return await processAudioRecordingOnce(audioPath, noteTitle, language, context, options);
     } finally {
-      await invoke("release_processing_job", { audioPath, runId }).catch(reportReleaseFailure);
+      await releaseProcessingJob(audioPath, runId);
     }
   }, { joinExisting: options.previewOnly !== true });
 }
@@ -768,11 +379,7 @@ async function processAudioRecordingOnce(
       }
     }
 
-    const screenshotRules = assets.length > 0
-      ? `
-- The transcript contains markers like [[ATOK_ASSET_1]]: screenshots taken at that exact moment. Keep EVERY marker exactly once, on its own line, at the matching position in your note — never collect markers into one section at the end. Never rewrite, translate, renumber, or drop a marker.
-- Use the provided "Screenshot contexts" to enrich the note (slide titles, numbers, diagrams), but only where the transcript supports it.`
-      : "";
+    const screenshotRules = screenshotPromptRules(assets.length > 0);
 
     const userContent = assets.length > 0
       ? `Screenshot contexts (what was on screen at each marker):\n${assetContext}\n\nTranscript:\n${markedTranscript}`
@@ -781,13 +388,9 @@ async function processAudioRecordingOnce(
     // Step 2: every request is planned against a conservative token budget.
     // Long-form detail is assembled from bounded section outputs; only compact
     // global front matter goes through a hierarchical reduce.
-    const budget = repairWithStructuredFallback ? {
-      model: "deterministic-fallback",
-      maxSourceTokens: MAX_SECTION_SOURCE_TOKENS,
-      maxReduceTokens: 20_000,
-      sectionOutputTokens: SECTION_OUTPUT_TOKENS,
-      globalOutputTokens: GLOBAL_OUTPUT_TOKENS,
-    } : await resolveLongFormBudget();
+    const budget = repairWithStructuredFallback
+      ? DETERMINISTIC_FALLBACK_BUDGET
+      : longFormBudgetFor(await getModelLimits());
     let usedMapReduce = !repairWithStructuredFallback &&
       estimateTokenUpperBound(userContent) > budget.maxSourceTokens;
     let processingDegraded = false;
@@ -888,33 +491,8 @@ async function processAudioRecordingOnce(
         const single = await detailedChat(
           [
             {
-            role: "system",
-            content: `You are an expert meeting-notes writer. Turn this voice-recording transcript into a clean, well-structured, and COMPREHENSIVE note.
-
-RECORDING METADATA:
-${recordingContextInstruction(resolvedContext)}
-
-RULES:
-- ONLY use information actually in the transcript — never invent speakers, names, numbers, or content
-- The transcript may be noisy/garbled in places: skip unintelligible parts, but capture EVERY clear point — do not over-summarize away real detail
-- Preserve concrete specifics: numbers, dates, quantities, names, technical/product terms
-- Do NOT list "Speaker (unnamed)" — just write the content
-- Write the ENTIRE note (headings included) in ${langName}. Do not translate to another language.
-- Ignore transcription-noise filler such as "thank you", "terima kasih", "like and subscribe" — that is leftover noise, not real content
-- Never repeat the same bullet point or sentence. Each Key Point / Decision / Action Item must appear exactly once — if you notice you're about to restate something already written, stop that section instead
-- Decisions and Action Items: max 15 items each, one line per item, ONLY things explicitly stated in the transcript. If you notice you are producing a repeating pattern of similar lines, STOP that section immediately
-- If the transcript explicitly explains rationale, trade-offs, constraints, risks, or why an option was preferred, capture it once under "${labels.considerations}". Never invent hidden reasoning, motives, or causal links.
-- Never append meta commentary, disclaimers, or notes about transcript quality or what you excluded — silently skip noise
-- The first line must be a concise H1 describing the actual main topic. Never use generic titles or placeholders such as [Main Topic], [Tanggal], or [Date].
-- Use the exact H2 headings "${labels.summary}", "${labels.keyPoints}", "${labels.details}", "${labels.considerations}", "${labels.decisions}", and "${labels.actions}" where they have real content.
-- Under "${labels.details}", group the discussion beneath descriptive H3 sub-headings based on actual topics, projects, or people. Never use numbered labels such as "Section 1" or "Part 1".
-- Omit sections with no real content. Never write empty sections or text saying that no items were found.${screenshotRules}
-
-Do not create a "Transcript Lengkap" or "Complete Transcript" section. The canonical transcript is stored separately by the recorder.
-
-The summary should be 3-5 sentences. Keep key points concise, but make the discussion comprehensive enough that every clear fact, status, concern, proposal, number, owner, deadline, and explicitly stated rationale remains represented exactly once.
-
-If parts of the transcript are unintelligible, silently skip them and write the note from the clear parts only. Never state, imply, or apologize for the quality of the audio, the recording, or the transcript.`,
+              role: "system",
+              content: singlePassSystemPrompt(resolvedContext, langName, labels, screenshotRules),
             },
             { role: "user", content: userContent },
           ],
@@ -1206,10 +784,7 @@ export interface AudioDraftCommitInput {
 export function commitAudioRecordingDraft(input: AudioDraftCommitInput): Promise<Note> {
   return recordingProcessingGuard.run(input.audioPath, async () => {
     const runId = globalThis.crypto.randomUUID();
-    const claimed = await invoke<boolean>("claim_processing_job", {
-      audioPath: input.audioPath,
-      runId,
-    });
+    const claimed = await claimProcessingJob(input.audioPath, runId);
     if (!claimed) throw new Error("This recording is still being processed. Try again in a moment.");
 
     try {
@@ -1279,10 +854,7 @@ export function commitAudioRecordingDraft(input: AudioDraftCommitInput): Promise
 
       return updated;
     } finally {
-      await invoke("release_processing_job", {
-        audioPath: input.audioPath,
-        runId,
-      }).catch(reportReleaseFailure);
+      await releaseProcessingJob(input.audioPath, runId);
     }
   }, { joinExisting: false });
 }
@@ -1313,134 +885,6 @@ async function saveNote(
     : noteService.createNote(userId, request);
 }
 
-// Place each screenshot marker at the word position proportional to when it was
-// taken. Approximate by design (speech density varies), but lands the image in
-// the right part of the conversation; the LLM keeps it on section boundaries.
-export function insertAssetMarkers(
-  transcript: string,
-  assets: RecordingAsset[],
-  durationMs: number,
-): string {
-  const words = transcript.split(/\s+/).filter(Boolean);
-  if (words.length === 0 || durationMs <= 0) {
-    const markers = assets.map((_, i) => `[[ATOK_ASSET_${i + 1}]]`).join("\n");
-    return `${transcript}\n\n${markers}`.trim();
-  }
-
-  const pieces: string[] = [];
-  let cursor = 0;
-  assets.forEach((asset, i) => {
-    const ratio = Math.min(Math.max(asset.elapsed_ms / durationMs, 0), 1);
-    const index = Math.min(Math.round(ratio * words.length), words.length);
-    pieces.push(words.slice(cursor, index).join(" "));
-    pieces.push(`\n\n[[ATOK_ASSET_${i + 1}]]\n\n`);
-    cursor = Math.max(cursor, index);
-  });
-  pieces.push(words.slice(cursor).join(" "));
-  return pieces.join(" ").replace(/[ \t]+\n/g, "\n").trim();
-}
-
-// Swap markers for image embeds; markers the LLM dropped are appended under a
-// trailing "## Screenshots" section so no capture is ever lost.
-export function applyAssetMarkers(text: string, assets: RecordingAsset[]): string {
-  const used = new Set<number>();
-  let result = text.replace(/\[\[ATOK_ASSET_(\d+)\]\]/g, (match, num: string) => {
-    const idx = Number(num) - 1;
-    const asset = assets[idx];
-    if (!asset || used.has(idx)) return used.has(idx) ? "" : match;
-    used.add(idx);
-    return `![Screenshot ${formatElapsed(asset.elapsed_ms)}](${asset.path})`;
-  });
-
-  const missing = assets.filter((_, i) => !used.has(i));
-  if (missing.length > 0) {
-    const lines = missing
-      .map((a) => `![Screenshot ${formatElapsed(a.elapsed_ms)}](${a.path})`)
-      .join("\n\n");
-    result = `${result.trimEnd()}\n\n## Screenshots\n\n${lines}\n`;
-  }
-  return result;
-}
-
-function formatElapsed(elapsedMs: number): string {
-  const totalSeconds = Math.floor(elapsedMs / 1000);
-  const mins = Math.floor(totalSeconds / 60);
-  const secs = totalSeconds % 60;
-  return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-}
-
-// Backstop for the model looping near the token budget: any content line seen
-// more than twice in the WHOLE document is dropped, so repetition cycles of any
-// length can't survive. Headings, blanks, and asset markers/embeds are exempt.
-function collapseRepeatedLines(text: string): string {
-  const MAX_REPEATS = 2;
-  const counts = new Map<string, number>();
-  const kept: string[] = [];
-
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    const exempt =
-      trimmed === "" ||
-      /^#{1,6}\s/.test(trimmed) ||
-      trimmed.startsWith("![") ||
-      trimmed.includes("[[ATOK_ASSET");
-    if (exempt) {
-      kept.push(line);
-      continue;
-    }
-
-    const norm = trimmed.toLowerCase();
-    const seen = (counts.get(norm) ?? 0) + 1;
-    counts.set(norm, seen);
-    if (seen <= MAX_REPEATS) kept.push(line);
-  }
-
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n");
-}
-
-// Second "thinking" pass: an editor model fact-checks the draft against the
-// transcript so unsupported claims and residual loops never reach the note.
-// Best-effort — any failure or suspicious output falls back to the draft.
-async function reviewNote(transcript: string, draft: string, langName: string): Promise<string> {
-  try {
-    const result = await detailedChat(
-      [
-        {
-          role: "system",
-          content: `You are a meticulous fact-checking editor for meeting notes.
-You receive a TRANSCRIPT and a DRAFT note. Return the corrected note and nothing else.
-
-RULES:
-- Remove every claim, name, number, or action item NOT supported by the transcript
-- Preserve epistemic status: reported or unverified progress must not become confirmed; proposals must not become decisions; estimates must not become deadlines; suspected causes must not become confirmed causes
-- Keep a Decisions section only for decisions or agreements explicitly present in the source
-- Never infer an action owner from surrounding dialogue. Keep the owner unassigned unless the source explicitly identifies that person
-- Remove duplicated or looping bullets — each point appears exactly once
-- Keep every [[ATOK_ASSET_N]] marker exactly once, at its current position
-- Keep the section structure and keep the note in ${langName}
-- Do not add new content, commentary, or explanations of your edits
-- Return ONLY the note itself — no closing remarks, no parenthetical notes about transcript quality or exclusions`,
-        },
-        { role: "user", content: `TRANSCRIPT:\n${transcript}\n\nDRAFT:\n${draft}` },
-      ],
-      0,
-      maxTokensFor(transcript + draft),
-    );
-
-    if (result.is_truncated) return draft;
-    const reviewed = result.content;
-
-    const trimmed = reviewed.trim();
-    if (!trimmed || trimmed.length < draft.length * 0.3) return draft;
-    if (assessGeneratedNote(transcript, trimmed, {
-      isTruncated: false,
-      requireUsefulTitle: /^#\s+.+$/m.test(draft),
-    }).length > 0) return draft;
-    return trimmed;
-  } catch {
-    return draft;
-  }
-}
 
 export function generateNoteTitle(): string {
   const now = new Date();
