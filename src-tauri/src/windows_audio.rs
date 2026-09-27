@@ -47,7 +47,7 @@ impl DesktopAudioRecorder {
             if let Err(e) =
                 Self::recording_thread_fn(output_path, is_recording, is_paused, aec_enabled)
             {
-                eprintln!("Recording error: {}", e);
+                tracing::error!("Recording error: {}", e);
             }
             // Windows still writes one progressive MP3. Closing the sender is
             // intentional: the transcription job then falls back to the final
@@ -77,7 +77,7 @@ impl DesktopAudioRecorder {
         use std::mem::MaybeUninit;
 
         unsafe {
-            println!("🎙️ Starting MIC + DESKTOP recording...");
+            tracing::info!("🎙️ Starting MIC + DESKTOP recording...");
 
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             if hr.0 < 0 {
@@ -116,34 +116,43 @@ impl DesktopAudioRecorder {
             let capture_channels = Self::normalized_channel_count(mic_channels as usize);
             let processing_sample_rate = AEC_SAMPLE_RATE;
 
-            println!(
+            tracing::info!(
                 "🔊 Desktop: {}Hz, {} ch, {} bits",
-                sample_rate, channels, desktop_bits
+                sample_rate,
+                channels,
+                desktop_bits
             );
-            println!(
+            tracing::info!(
                 "🎤 Mic: {}Hz, {} ch, {} bits",
-                mic_sample_rate, mic_channels, mic_bits
+                mic_sample_rate,
+                mic_channels,
+                mic_bits
             );
-            println!(
+            tracing::info!(
                 "🎚️ Normalized mix: {}Hz, {}ch output, {}ch mic",
-                processing_sample_rate, output_channels, capture_channels
+                processing_sample_rate,
+                output_channels,
+                capture_channels
             );
             if aec_enabled && sample_rate != AEC_SAMPLE_RATE {
-                println!(
+                tracing::info!(
                     "🔁 AEC path resampling desktop {}Hz → {}Hz",
-                    sample_rate, AEC_SAMPLE_RATE
+                    sample_rate,
+                    AEC_SAMPLE_RATE
                 );
             }
             if aec_enabled && mic_sample_rate != AEC_SAMPLE_RATE {
-                println!(
+                tracing::info!(
                     "🔁 AEC path resampling mic {}Hz → {}Hz",
-                    mic_sample_rate, AEC_SAMPLE_RATE
+                    mic_sample_rate,
+                    AEC_SAMPLE_RATE
                 );
             }
             if !aec_enabled && mic_sample_rate != processing_sample_rate {
-                println!(
+                tracing::info!(
                     "🔁 Mix path resampling mic {}Hz → {}Hz",
-                    mic_sample_rate, processing_sample_rate
+                    mic_sample_rate,
+                    processing_sample_rate
                 );
             }
             desktop_client.Initialize(
@@ -163,7 +172,7 @@ impl DesktopAudioRecorder {
             desktop_client.Start()?;
             mic_client.Start()?;
 
-            println!("✅ Recording started!");
+            tracing::info!("✅ Recording started!");
 
             let mp3_path = if output_path.extension().and_then(|s| s.to_str()) == Some("mp3") {
                 output_path.clone()
@@ -171,8 +180,8 @@ impl DesktopAudioRecorder {
                 output_path.with_extension("mp3")
             };
 
-            println!("📁 Output file: {}", mp3_path.display());
-            println!("📁 Parent directory: {:?}", mp3_path.parent());
+            tracing::info!("📁 Output file: {}", mp3_path.display());
+            tracing::info!("📁 Parent directory: {:?}", mp3_path.parent());
 
             let mut mp3_encoder = Builder::new()
                 .ok_or_else(|| Error::from_hresult(HRESULT(0x80070002_u32 as i32)))?;
@@ -197,20 +206,20 @@ impl DesktopAudioRecorder {
             if let Some(parent) = mp3_path.parent() {
                 if !parent.exists() {
                     std::fs::create_dir_all(parent).map_err(|e| {
-                        eprintln!("❌ Failed to create directory: {}", e);
+                        tracing::warn!("❌ Failed to create directory: {}", e);
                         Error::from_hresult(HRESULT(0x80070002_u32 as i32))
                     })?;
-                    println!("✅ Created directory: {:?}", parent);
+                    tracing::info!("✅ Created directory: {:?}", parent);
                 }
             }
 
             let mut mp3_file = File::create(&mp3_path).map_err(|e| {
-                eprintln!("❌ Failed to create MP3 file: {}", e);
-                eprintln!("❌ Path: {}", mp3_path.display());
+                tracing::error!("❌ Failed to create MP3 file: {}", e);
+                tracing::error!("❌ Path: {}", mp3_path.display());
                 Error::from_hresult(HRESULT(0x80070002_u32 as i32))
             })?;
 
-            println!(
+            tracing::info!(
                 "✅ MP3 file created successfully at: {}",
                 mp3_path.display()
             );
@@ -236,14 +245,14 @@ impl DesktopAudioRecorder {
             let mut mic_sample_count = 0u64;
             let mut desktop_sample_count = 0u64;
 
-            println!("🎬 Starting capture loop...");
+            tracing::info!("🎬 Starting capture loop...");
 
             // Recording loop - encode to MP3 in real-time
             loop {
                 {
                     let should_stop = !*is_recording.lock().unwrap();
                     if should_stop {
-                        println!("🛑 Stop signal received, exiting loop...");
+                        tracing::info!("🛑 Stop signal received, exiting loop...");
                         break;
                     }
                 }
@@ -346,7 +355,7 @@ impl DesktopAudioRecorder {
                         mp3_encoder.encode(InterleavedPcm(&chunk), &mut mp3_buffer)
                     }
                     .map_err(|e| {
-                        eprintln!("❌ MP3 encode error: {:?}", e);
+                        tracing::error!("❌ MP3 encode error: {:?}", e);
                         Error::from_hresult(HRESULT(0x80070002_u32 as i32))
                     })?;
 
@@ -356,22 +365,23 @@ impl DesktopAudioRecorder {
                             bytes_written,
                         );
                         mp3_file.write_all(mp3_data).map_err(|e| {
-                            eprintln!("❌ MP3 write error: {}", e);
+                            tracing::error!("❌ MP3 write error: {}", e);
                             Error::from_hresult(HRESULT(0x80070002_u32 as i32))
                         })?;
                     }
                 }
             }
 
-            println!(
+            tracing::info!(
                 "📊 Captured - Desktop: {} samples, Mic: {} samples",
-                desktop_sample_count, mic_sample_count
+                desktop_sample_count,
+                mic_sample_count
             );
 
             desktop_client.Stop()?;
             mic_client.Stop()?;
 
-            println!("🎵 Finalizing MP3...");
+            tracing::info!("🎵 Finalizing MP3...");
 
             Self::process_windows_buffers(
                 &mut desktop_buffer,
@@ -417,20 +427,20 @@ impl DesktopAudioRecorder {
             }
 
             mp3_file.sync_all().map_err(|e| {
-                eprintln!("❌ Failed to sync file: {}", e);
+                tracing::warn!("❌ Failed to sync file: {}", e);
                 Error::from_hresult(HRESULT(0x80070002_u32 as i32))
             })?;
 
             drop(mp3_file);
 
-            println!("✅ Recording saved: {}", mp3_path.display());
+            tracing::info!("✅ Recording saved: {}", mp3_path.display());
 
             if mp3_path.exists() {
                 let metadata = std::fs::metadata(&mp3_path)
                     .map_err(|_| Error::from_hresult(HRESULT(0x80070002_u32 as i32)))?;
-                println!("✅ File size: {} bytes", metadata.len());
+                tracing::info!("✅ File size: {} bytes", metadata.len());
             } else {
-                eprintln!("❌ File does not exist after recording!");
+                tracing::error!("❌ File does not exist after recording!");
             }
 
             Ok(())
@@ -700,12 +710,12 @@ impl DesktopAudioRecorder {
     }
 
     pub fn stop_recording(&self) -> Result<(), String> {
-        println!("Stopping recording...");
+        tracing::info!("Stopping recording...");
 
         {
             let mut recording = self.is_recording.lock().map_err(|e| e.to_string())?;
             if !*recording {
-                println!("Recording already stopped");
+                tracing::info!("Recording already stopped");
                 return Ok(());
             }
             *recording = false;
@@ -721,16 +731,16 @@ impl DesktopAudioRecorder {
             for _ in 0..20 {
                 if join_handle.is_finished() {
                     let _ = join_handle.join();
-                    println!("Recording stopped gracefully");
+                    tracing::info!("Recording stopped gracefully");
                     return Ok(());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
 
-            println!("Recording thread took too long, continuing anyway");
+            tracing::warn!("Recording thread took too long, continuing anyway");
         }
 
-        println!("Recording stopped");
+        tracing::info!("Recording stopped");
         Ok(())
     }
 

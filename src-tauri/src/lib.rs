@@ -154,7 +154,7 @@ async fn get_aec_enabled() -> Result<bool, String> {
 #[tauri::command]
 async fn set_aec_enabled(enabled: bool) -> Result<(), String> {
     AEC_ENABLED.store(enabled, AtomicOrdering::Relaxed);
-    eprintln!("[settings] AEC enabled = {}", enabled);
+    tracing::info!("[settings] AEC enabled = {}", enabled);
     Ok(())
 }
 
@@ -292,6 +292,7 @@ pub fn run() {
             match app.path().app_log_dir() {
                 Ok(dir) => {
                     if let Err(error) = logging::init(&dir) {
+                        // tracing has no subscriber yet, so report on stderr.
                         eprintln!("File logging disabled: {error}");
                     }
                 }

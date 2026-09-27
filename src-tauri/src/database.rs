@@ -23,7 +23,7 @@ pub async fn init_database() -> Database {
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) if url != "DB_URL" && !url.is_empty() => url,
         _ => {
-            eprintln!("DATABASE_URL not set — running without database");
+            tracing::warn!("DATABASE_URL not set — running without database");
             return Database(None);
         }
     };
@@ -31,22 +31,24 @@ pub async fn init_database() -> Database {
     let mut last_error = String::new();
 
     for attempt in 1..=MAX_RETRIES {
-        println!(
+        tracing::info!(
             "Connecting to database... (attempt {}/{})",
-            attempt, MAX_RETRIES
+            attempt,
+            MAX_RETRIES
         );
 
         match connect_with_timeout(&database_url).await {
             Ok(pool) => {
-                println!("Database connected successfully!");
+                tracing::info!("Database connected successfully!");
                 return Database(Some(Arc::new(pool)));
             }
             Err(e) => {
                 last_error = e;
                 if attempt < MAX_RETRIES {
-                    println!(
+                    tracing::warn!(
                         "Connection failed, retrying in {}s: {}",
-                        RETRY_DELAY_SECS, last_error
+                        RETRY_DELAY_SECS,
+                        last_error
                     );
                     tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
                 }
@@ -54,9 +56,10 @@ pub async fn init_database() -> Database {
         }
     }
 
-    eprintln!(
+    tracing::warn!(
         "Failed to connect to database after {} attempts: {}. App will run without database.",
-        MAX_RETRIES, last_error
+        MAX_RETRIES,
+        last_error
     );
     Database(None)
 }
@@ -99,7 +102,7 @@ async fn connect_with_timeout(database_url: &str) -> Result<PgPool, String> {
         .await
         .map_err(|e| format!("Connection test failed: {}", e))?;
 
-    println!("Database pool ready: min=2, max=20, tcp_keepalive=30s");
+    tracing::info!("Database pool ready: min=2, max=20, tcp_keepalive=30s");
     Ok(pool)
 }
 

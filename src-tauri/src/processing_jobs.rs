@@ -318,7 +318,7 @@ pub async fn list_processing_manifests(directory: String) -> Result<Vec<Value>, 
                 match load_serialized(&path) {
                     Ok(Some(manifest)) => manifests.push(manifest),
                     Ok(None) => {}
-                    Err(error) => eprintln!(
+                    Err(error) => tracing::warn!(
                         "[processing] Skipping invalid manifest '{}': {}",
                         path.display(),
                         error

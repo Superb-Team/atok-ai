@@ -103,7 +103,7 @@ impl DesktopAudioRecorder {
                 chunk_tx,
             );
             if let Err(ref e) = result {
-                eprintln!("Recording error: {}", e);
+                tracing::error!("Recording error: {}", e);
             }
             let _ = tx.send(result);
         });
@@ -116,7 +116,7 @@ impl DesktopAudioRecorder {
         if !self.is_recording.swap(false, Ordering::SeqCst) {
             return Ok(());
         }
-        eprintln!("[recorder] Stop signal sent");
+        tracing::info!("[recorder] Stop signal sent");
 
         let rx = self
             .completion
@@ -135,13 +135,13 @@ impl DesktopAudioRecorder {
             .map_err(|e| format!("Lock poisoned: {}", e))?;
         if let Some(handle) = thread_lock.take() {
             if let Err(e) = handle.join() {
-                eprintln!("[recorder] Recording thread panicked: {:?}", e);
+                tracing::error!("[recorder] Recording thread panicked: {:?}", e);
             }
         }
 
         match result {
             Ok(path) => {
-                eprintln!("[recorder] Thread finished OK: {}", path.display());
+                tracing::debug!("[recorder] Thread finished OK: {}", path.display());
                 Ok(())
             }
             Err(e) => Err(e),
@@ -231,13 +231,13 @@ impl DesktopAudioRecorder {
         use cpal::traits::DeviceTrait;
         use cpal::SampleFormat;
 
-        eprintln!("[recorder] Linux capture starting");
+        tracing::info!("[recorder] Linux capture starting");
 
         let sample_rate = AEC_SAMPLE_RATE;
         let channels = 2u32;
         let sys_device = Self::linux_default_monitor_source();
         if let Some(device) = &sys_device {
-            eprintln!("[recorder] System monitor: {}", device);
+            tracing::info!("[recorder] System monitor: {}", device);
         }
 
         let host = cpal::default_host();
@@ -270,7 +270,7 @@ impl DesktopAudioRecorder {
             .or_else(|| crate::linux_pulse::default_sink_and_source().map(|(_, src)| src));
         if let Some(source) = mic_source {
             if crate::linux_pulse::clamp_source_volume_to_norm(&source) == Some(true) {
-                eprintln!(
+                tracing::warn!(
                     "[recorder] Mic source '{}' volume was >100% — clamped to 100% to prevent clipping",
                     source
                 );
@@ -289,12 +289,15 @@ impl DesktopAudioRecorder {
         let mic_sr = mic_cfg.sample_rate().0;
         let mic_ch = mic_cfg.channels() as u32;
 
-        eprintln!(
+        tracing::info!(
             "[recorder] Mic: {}Hz, {}ch, F32 | Sys: {}Hz, {}ch via parec",
-            mic_sr, mic_ch, sample_rate, channels
+            mic_sr,
+            mic_ch,
+            sample_rate,
+            channels
         );
 
-        eprintln!("[recorder] Chunked capture path (progressive processing)");
+        tracing::info!("[recorder] Chunked capture path (progressive processing)");
         Self::record_linux_chunked(
             mp3_path,
             is_recording,
@@ -330,12 +333,12 @@ impl DesktopAudioRecorder {
         // Opening with None would capture the default *source* (mic), not system
         // audio. Signal the worker so it doesn't wait on a sys stream that never arrives.
         let Some(device) = device else {
-            eprintln!("[recorder] No sink monitor; recording mic only");
+            tracing::info!("[recorder] No sink monitor; recording mic only");
             let _ = std::fs::File::create(session_dir.join("sys_done.flag"));
             return Ok(());
         };
 
-        eprintln!("[recorder] pulse capture starting (chunked): {}", device);
+        tracing::info!("[recorder] pulse capture starting (chunked): {}", device);
 
         let mut capture = crate::linux_pulse::MonitorCapture::open(Some(&device))
             .map_err(|e| format!("Failed to open pulse monitor: {}", e))?;
@@ -372,7 +375,7 @@ impl DesktopAudioRecorder {
 
         file.flush().ok();
         let _ = std::fs::File::create(session_dir.join("sys_done.flag"));
-        eprintln!(
+        tracing::info!(
             "[recorder] pulse capture stopped (chunked, {} chunks)",
             chunk_idx + 1
         );
@@ -392,7 +395,7 @@ impl DesktopAudioRecorder {
     ) -> Result<(), String> {
         use cpal::traits::{DeviceTrait, StreamTrait};
 
-        eprintln!("[recorder] mic starting (chunked, ringbuf)");
+        tracing::info!("[recorder] mic starting (chunked, ringbuf)");
 
         let mic_sr = mic_cfg.sample_rate().0;
         let mic_ch = mic_cfg.channels() as u32;
@@ -426,7 +429,7 @@ impl DesktopAudioRecorder {
                                 .fetch_add((scratch.len() - pushed) as u64, Ordering::Relaxed);
                         }
                     },
-                    move |err| eprintln!("[recorder] Mic stream error: {}", err),
+                    move |err| tracing::error!("[recorder] Mic stream error: {}", err),
                     None,
                 )
                 .map_err(|e| format!("Mic stream build failed: {}", e))?
@@ -494,13 +497,13 @@ impl DesktopAudioRecorder {
 
         let dropped = overruns.load(Ordering::Relaxed);
         if dropped > 0 {
-            eprintln!(
+            tracing::warn!(
                 "[recorder] WARNING: mic ring overran, dropped {} bytes",
                 dropped
             );
         }
         let _ = std::fs::File::create(session_dir.join("mic_done.flag"));
-        eprintln!("[recorder] mic stopped (chunked)");
+        tracing::info!("[recorder] mic stopped (chunked)");
         Ok(())
     }
 
@@ -677,17 +680,19 @@ impl DesktopAudioRecorder {
         if sys_start < mic_start {
             let offset = mic_start - sys_start;
             let trim = Self::trim_lead_bytes(offset, sample_rate, channels);
-            eprintln!(
+            tracing::debug!(
                 "[Worker] Stream alignment: sys leads by {}ms, trimming {} bytes from sys",
-                offset, trim
+                offset,
+                trim
             );
             (trim, 0)
         } else {
             let offset = sys_start - mic_start;
             let trim = Self::trim_lead_bytes(offset, mic_sr, mic_ch);
-            eprintln!(
+            tracing::debug!(
                 "[Worker] Stream alignment: mic leads by {}ms, trimming {} bytes from mic",
-                offset, trim
+                offset,
+                trim
             );
             (0, trim)
         }
@@ -861,7 +866,7 @@ impl DesktopAudioRecorder {
                     break;
                 }
 
-                eprintln!("[Worker] Processing chunk {:04}...", current_chunk);
+                tracing::debug!("[Worker] Processing chunk {:04}...", current_chunk);
 
                 let mut sys_data = if sys_path.is_file() {
                     std::fs::read(&sys_path).map_err(|error| {
@@ -899,12 +904,12 @@ impl DesktopAudioRecorder {
 
                 let clip = Self::clipped_ratio(&mic_data);
                 if clip > 0.01 {
-                    eprintln!(
+                    tracing::warn!(
                         "[Worker] Mic input clipping ({:.1}% of samples) — audio may sound distorted; lower the mic input gain",
                         clip * 100.0
                     );
                 } else if clip > 0.005 {
-                    eprintln!(
+                    tracing::warn!(
                         "[Worker] Marginal mic clipping ({:.1}% of samples) — recording remains usable",
                         clip * 100.0
                     );
@@ -1040,7 +1045,7 @@ impl DesktopAudioRecorder {
                                     error: None,
                                 };
                                 if let Err(error) = tx.send(live_chunk) {
-                                    eprintln!(
+                                    tracing::info!(
                                         "[Worker] Live ASR receiver closed at chunk {:04}",
                                         current_chunk
                                     );
@@ -1050,9 +1055,10 @@ impl DesktopAudioRecorder {
                                 }
                             }
                             Err(error) => {
-                                eprintln!(
+                                tracing::warn!(
                                     "[Worker] Chunk {:04} standalone encode failed: {}",
-                                    current_chunk, error
+                                    current_chunk,
+                                    error
                                 );
                                 let _ = tx.send(LiveAudioChunk {
                                     index: current_chunk,
@@ -1104,7 +1110,7 @@ impl DesktopAudioRecorder {
                 .map_err(|error| format!("Sync recording directory: {error}"))?;
         }
         output_guard.committed = true;
-        eprintln!(
+        tracing::info!(
             "[Worker] All chunks processed. MP3 ready: {}",
             mp3_path.display()
         );
@@ -1246,7 +1252,7 @@ impl DesktopAudioRecorder {
         let session_dir = std::env::temp_dir().join(format!("atok_{}", session_id));
         std::fs::create_dir_all(&session_dir).map_err(|e| format!("Create session dir: {}", e))?;
 
-        eprintln!(
+        tracing::info!(
             "[recorder] Chunked capture: session={}",
             session_dir.display()
         );
@@ -1313,12 +1319,12 @@ impl DesktopAudioRecorder {
             })
             .map_err(|e| format!("Failed to spawn worker: {}", e))?;
 
-        eprintln!("[recorder] Streams playing (chunked)");
+        tracing::debug!("[recorder] Streams playing (chunked)");
 
         while is_recording.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        eprintln!("[recorder] Stop signal sent");
+        tracing::info!("[recorder] Stop signal sent");
 
         let sys_result = match sys_thread.join() {
             Ok(result) => result,
@@ -1363,7 +1369,7 @@ impl DesktopAudioRecorder {
                 ));
             }
             None => {
-                eprintln!(
+                tracing::warn!(
                     "[recorder] Worker join timed out; leaving session dir intact: {}",
                     session_dir.display()
                 );
@@ -1376,7 +1382,7 @@ impl DesktopAudioRecorder {
 
         sys_result?;
         mic_result?;
-        eprintln!("[recorder] Encoding done");
+        tracing::info!("[recorder] Encoding done");
         Self::verify_output(mp3_path)
     }
 
@@ -1557,9 +1563,10 @@ impl DesktopAudioRecorder {
             return pcm.to_vec();
         }
 
-        eprintln!(
+        tracing::debug!(
             "[recorder] RNNoise mic denoise: {} frames, {}ch",
-            full_frames, channels
+            full_frames,
+            channels
         );
 
         let mut denoisers: Vec<_> = (0..channel_count)
@@ -1604,7 +1611,7 @@ impl DesktopAudioRecorder {
         if let Some(want) = name.filter(|n| !n.is_empty()) {
             #[cfg(target_os = "linux")]
             if Self::is_pulse_source_name(want) {
-                eprintln!(
+                tracing::info!(
                     "[recorder] Routing selected PulseAudio mic '{}' through the CPAL default input",
                     want
                 );
@@ -1615,11 +1622,11 @@ impl DesktopAudioRecorder {
             }
             if let Ok(mut devices) = host.input_devices() {
                 if let Some(dev) = devices.find(|d| d.name().map(|n| n == want).unwrap_or(false)) {
-                    eprintln!("[recorder] Using selected mic: {}", want);
+                    tracing::info!("[recorder] Using selected mic: {}", want);
                     return Ok(dev);
                 }
             }
-            eprintln!(
+            tracing::info!(
                 "[recorder] Mic '{}' not found via cpal; using default",
                 want
             );
@@ -1869,9 +1876,10 @@ impl DesktopAudioRecorder {
         let sample_rate = cfg.sample_rate().0;
         let channels = cfg.channels() as u32;
 
-        eprintln!(
+        tracing::warn!(
             "[recorder] Fallback cpal: {}Hz, {}ch, F32",
-            sample_rate, channels
+            sample_rate,
+            channels
         );
 
         let mp3_file = Arc::new(Mutex::new(BufWriter::new(
@@ -1910,7 +1918,7 @@ impl DesktopAudioRecorder {
                     }
                     let _ = mic_prod.push_slice(&scratch);
                 },
-                move |err| eprintln!("Stream error: {}", err),
+                move |err| tracing::error!("Stream error: {}", err),
                 None,
             )
             .map_err(|e| format!("Stream failed: {}", e))?

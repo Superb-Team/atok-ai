@@ -204,23 +204,23 @@ pub async fn get_ai_model_limits() -> Result<ModelLimits, String> {
     let limits = match fetched {
         Ok(response) if response.status().is_success() => match response.json().await {
             Ok(data) => parse_model_limits(&data, &model).unwrap_or_else(|error| {
-                eprintln!("[model-limits] {}. Using conservative fallback.", error);
+                tracing::warn!("[model-limits] {}. Using conservative fallback.", error);
                 fallback_model_limits(model.clone())
             }),
             Err(error) => {
-                eprintln!("[model-limits] Invalid metadata response: {}", error);
+                tracing::warn!("[model-limits] Invalid metadata response: {}", error);
                 fallback_model_limits(model.clone())
             }
         },
         Ok(response) => {
-            eprintln!(
+            tracing::info!(
                 "[model-limits] Metadata request returned {}",
                 response.status()
             );
             fallback_model_limits(model.clone())
         }
         Err(error) => {
-            eprintln!("[model-limits] Metadata request failed: {}", error);
+            tracing::warn!("[model-limits] Metadata request failed: {}", error);
             fallback_model_limits(model.clone())
         }
     };
@@ -290,9 +290,12 @@ async fn post_chat_with_retry(
                     return Ok(response);
                 }
                 let wait = retry_after.unwrap_or(delay_secs).min(30);
-                eprintln!(
+                tracing::warn!(
                     "[ai_chat] Retryable {} (attempt {}/{}), retrying in {}s",
-                    status, attempt, MAX_ATTEMPTS, wait
+                    status,
+                    attempt,
+                    MAX_ATTEMPTS,
+                    wait
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             }
@@ -301,9 +304,11 @@ async fn post_chat_with_retry(
                 if attempt == MAX_ATTEMPTS {
                     break;
                 }
-                eprintln!(
+                tracing::warn!(
                     "[ai_chat] Transport failure (attempt {}/{}), retrying in {}s",
-                    attempt, MAX_ATTEMPTS, delay_secs
+                    attempt,
+                    MAX_ATTEMPTS,
+                    delay_secs
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
             }
@@ -402,7 +407,7 @@ async fn ai_chat_detailed_with_policy(
         .await
         {
             Ok(result) => {
-                eprintln!(
+                tracing::warn!(
                     "{}",
                     serde_json::json!({
                         "event": "ai_chat_completed",
@@ -419,9 +424,10 @@ async fn ai_chat_detailed_with_policy(
                 return Ok(result);
             }
             Err(error) => {
-                eprintln!(
+                tracing::warn!(
                     "{{\"event\":\"ai_model_failed\",\"model\":{:?},\"reason\":{:?}}}",
-                    model, error
+                    model,
+                    error
                 );
                 failures.push(format!("{}: {}", model, error));
             }
@@ -518,7 +524,7 @@ async fn ai_chat_detailed_for_model(
 
         if !parsed.is_truncated() || round == max_continuations {
             if parsed.is_truncated() {
-                eprintln!(
+                tracing::info!(
                     "[ai_chat] Output still truncated after {} continuations",
                     max_continuations
                 );
@@ -526,7 +532,7 @@ async fn ai_chat_detailed_for_model(
             break;
         }
 
-        eprintln!(
+        tracing::info!(
             "[ai_chat] Output hit max_tokens; requesting continuation {}",
             round + 1
         );
@@ -1503,7 +1509,7 @@ pub async fn transcribe_audio(
             .is_err()
         {
             abort.abort();
-            eprintln!(
+            tracing::warn!(
                 "[transcribe] live transcription exceeded {}s for '{}'; rebuilding from the recording",
                 LIVE_JOB_WAIT_TIMEOUT.as_secs(),
                 audio_path
@@ -1514,7 +1520,7 @@ pub async fn transcribe_audio(
     // Pipeline upgrades must not return a stale sidecar.
     if !force_refresh {
         if let Some(text) = read_transcript_sidecar(&audio_path)? {
-            eprintln!(
+            tracing::info!(
                 "[transcribe] Returning persisted transcript ({} chars)",
                 text.len()
             );
@@ -1559,7 +1565,7 @@ pub async fn transcribe_audio(
     }
     let num_chunks = ranges.len();
 
-    eprintln!(
+    tracing::info!(
         "[transcribe] Splitting {}MB file into {} chunks for parallel upload",
         audio_bytes.len() / (1024 * 1024),
         num_chunks
@@ -1608,11 +1614,11 @@ pub async fn transcribe_audio(
                 all_transcripts.push(response);
             }
             Ok(Err(e)) => {
-                eprintln!("[transcribe] Chunk {} failed: {}", i, e);
+                tracing::warn!("[transcribe] Chunk {} failed: {}", i, e);
                 failures.push(format!("part {}: {}", i + 1, e));
             }
             Err(e) => {
-                eprintln!("[transcribe] Chunk {} task panicked: {}", i, e);
+                tracing::error!("[transcribe] Chunk {} task panicked: {}", i, e);
                 failures.push(format!("part {}: task join error", i + 1));
             }
         }
@@ -1633,7 +1639,7 @@ pub async fn transcribe_audio(
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
-    eprintln!("[transcribe] All {} chunks completed", num_chunks);
+    tracing::info!("[transcribe] All {} chunks completed", num_chunks);
     persist_transcript_sidecar(&audio_path, &result)?;
     Ok(result)
 }
@@ -1668,7 +1674,7 @@ pub async fn transcribe_chunks_live(
     let client = match build_whisper_client() {
         Ok(client) => std::sync::Arc::new(client),
         Err(error) => {
-            eprintln!("[transcribe-live] {}", error);
+            tracing::warn!("[transcribe-live] {}", error);
             while let Some(chunk) = receiver.recv().await {
                 if let Some(path) = chunk.mixed_path {
                     let _ = tokio::fs::remove_file(path).await;
@@ -1683,9 +1689,10 @@ pub async fn transcribe_chunks_live(
 
     while let Some(chunk) = receiver.recv().await {
         if let Some(error) = chunk.error {
-            eprintln!(
+            tracing::warn!(
                 "[transcribe-live] Capture failed for chunk {:04}: {}",
-                chunk.index, error
+                chunk.index,
+                error
             );
             capture_failures.push(format!("chunk {:04}: {}", chunk.index, error));
             continue;
@@ -1706,7 +1713,7 @@ pub async fn transcribe_chunks_live(
         let name = format!("chunk_{:04}.mp3", idx);
         tasks.spawn(async move {
             let _permit = s.acquire().await.unwrap();
-            eprintln!("[transcribe-live] Chunk {:04} uploading...", idx);
+            tracing::debug!("[transcribe-live] Chunk {:04} uploading...", idx);
             let bytes = tokio::fs::read(&mixed_path)
                 .await
                 .map_err(|e| format!("Read chunk {}: {}", idx, e))?;
@@ -1736,7 +1743,11 @@ pub async fn transcribe_chunks_live(
                     {
                         Ok(response) => Some(response),
                         Err(error) => {
-                            eprintln!("[transcribe-live] Mic-only chunk {} failed: {}", idx, error);
+                            tracing::warn!(
+                                "[transcribe-live] Mic-only chunk {} failed: {}",
+                                idx,
+                                error
+                            );
                             None
                         }
                     }
@@ -1749,7 +1760,7 @@ pub async fn transcribe_chunks_live(
             let canonical =
                 arbitrate_cross_track_text(&primary, microphone.as_ref(), &glossary_terms);
             persist_live_transcript_part(&part_transcript_path, idx, &canonical)?;
-            eprintln!(
+            tracing::debug!(
                 "[transcribe-live] Chunk {:04} checkpointed ({} chars)",
                 idx,
                 canonical.len()
@@ -1763,25 +1774,25 @@ pub async fn transcribe_chunks_live(
     }
 
     let task_count = tasks.len();
-    eprintln!("[transcribe-live] Collecting {} chunk results", task_count);
+    tracing::debug!("[transcribe-live] Collecting {} chunk results", task_count);
     let mut completed_tasks = 0usize;
     let mut had_failure = false;
     while let Some(result) = tasks.join_next().await {
         match result {
             Ok(Ok(_)) => completed_tasks += 1,
             Ok(Err(e)) => {
-                eprintln!("[transcribe-live] Chunk task failed: {}", e);
+                tracing::warn!("[transcribe-live] Chunk task failed: {}", e);
                 had_failure = true;
             }
             Err(e) => {
-                eprintln!("[transcribe-live] Chunk task panicked: {}", e);
+                tracing::error!("[transcribe-live] Chunk task panicked: {}", e);
                 had_failure = true;
             }
         }
     }
 
     if had_failure || !capture_failures.is_empty() {
-        eprintln!(
+        tracing::warn!(
             "[transcribe-live] Incomplete result; canonical transcript was not committed (capture failures: {})",
             capture_failures.len()
         );
@@ -1794,7 +1805,7 @@ pub async fn transcribe_chunks_live(
     let persisted_parts = match read_live_transcript_parts(&transcript_path) {
         Ok(parts) if parts.len() == completed_tasks && completed_tasks == task_count => parts,
         Ok(parts) => {
-            eprintln!(
+            tracing::warn!(
                 "[transcribe-live] Checkpoint count mismatch: expected {}, found {}",
                 task_count,
                 parts.len()
@@ -1802,7 +1813,7 @@ pub async fn transcribe_chunks_live(
             return;
         }
         Err(error) => {
-            eprintln!("[transcribe-live] Read checkpoints failed: {error}");
+            tracing::warn!("[transcribe-live] Read checkpoints failed: {error}");
             return;
         }
     };
@@ -1815,14 +1826,14 @@ pub async fn transcribe_chunks_live(
     match persist_transcript_file(&transcript_path, &combined) {
         Ok(()) => {
             let _ = std::fs::remove_dir_all(live_transcript_parts_directory(&transcript_path));
-            eprintln!(
+            tracing::info!(
                 "[transcribe-live] Saved transcript: {} chars, {} parts → {}",
                 combined.len(),
                 completed_tasks,
                 transcript_path.display()
             );
         }
-        Err(e) => eprintln!("[transcribe-live] Failed to save transcript: {}", e),
+        Err(e) => tracing::error!("[transcribe-live] Failed to save transcript: {}", e),
     }
 }
 
@@ -1847,9 +1858,10 @@ async fn transcribe_chunk_queued(
         .map_err(|error| format!("Whisper request queue unavailable: {error}"))?;
     let queue_wait_ms = queue_started.elapsed().as_millis();
     if queue_wait_ms > 0 {
-        eprintln!(
+        tracing::debug!(
             "[transcribe] queued Whisper request {}ms for {}",
-            queue_wait_ms, file_name
+            queue_wait_ms,
+            file_name
         );
     }
     transcribe_chunk_with_client(
@@ -1887,7 +1899,7 @@ async fn transcribe_with_retry(
             Ok(text) => return Ok(text),
             Err(e) if attempt < WHISPER_MAX_RETRIES && is_retryable_transcription_error(&e) => {
                 let delay = whisper_retry_backoff(attempt);
-                eprintln!(
+                tracing::warn!(
                     "[transcribe] {} transient failure (attempt {}/{}): {}; retrying in {}s",
                     file_name,
                     attempt + 1,
@@ -2031,7 +2043,7 @@ pub async fn agent_insert_document(
         Ok(true)
     } else {
         let error_text = response.text().await.unwrap_or_default();
-        eprintln!("RAG document insert failed: {}", error_text);
+        tracing::warn!("RAG document insert failed: {}", error_text);
         Ok(false)
     }
 }
@@ -2085,7 +2097,7 @@ pub async fn agent_create_collection(user_id: String) -> Result<bool, String> {
         Ok(true)
     } else {
         let error_text = response.text().await.unwrap_or_default();
-        eprintln!("RAG collection creation failed: {}", error_text);
+        tracing::warn!("RAG collection creation failed: {}", error_text);
         Ok(false)
     }
 }
