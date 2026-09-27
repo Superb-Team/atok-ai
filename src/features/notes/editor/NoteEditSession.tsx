@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { noteAssetService } from "@/services/note-asset.service";
+import { noteAssetService } from "@/features/notes/api/note-asset.service";
 import {
   applyMarkdownAction,
   insertMarkdownBlock,
@@ -7,8 +7,8 @@ import {
   type MarkdownAction,
   type MarkdownBlockCommand,
   type SlashCommandContext,
-} from "@/lib/markdown-editing";
-import type { Note } from "@/types/note.types";
+} from "@/features/notes/editor/markdown-editing";
+import type { Note } from "@/features/notes/types";
 import { NoteEditor } from "./NoteEditor";
 import { useNoteDraft } from "./use-note-draft";
 

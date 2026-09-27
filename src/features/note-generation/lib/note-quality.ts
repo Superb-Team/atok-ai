@@ -1,4 +1,4 @@
-import { isUsefulGroundedTitle } from "./recording-note-metadata.ts";
+import { isUsefulGroundedTitle } from "../../recording/lib/recording-note-metadata.ts";
 
 export type NoteQualityIssueCode =
   | "empty"

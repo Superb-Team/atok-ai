@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   NoteConflictError,
   noteService,
-} from "@/services/note.service";
-import type { Note } from "@/types/note.types";
+} from "@/features/notes/api/note.service";
+import type { Note } from "@/features/notes/types";
 
 export type NoteSaveStatus = "saved" | "unsaved" | "saving" | "error" | "conflict";
 

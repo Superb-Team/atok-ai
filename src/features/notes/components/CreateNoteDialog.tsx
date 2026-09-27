@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { noteService } from "@/services/note.service";
+import { noteService } from "@/features/notes/api/note.service";
 import { authService } from "@/features/auth/api/auth.service";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { noteAssetService } from "@/services/note-asset.service";
+import { noteAssetService } from "@/features/notes/api/note-asset.service";
 import { Paperclip } from "lucide-react";
 
 interface CreateNoteDialogProps {

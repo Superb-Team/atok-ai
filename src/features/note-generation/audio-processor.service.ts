@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import { NoteConflictError, noteService } from "@/services/note.service";
+import { NoteConflictError, noteService } from "@/features/notes/api/note.service";
 import { authService } from "@/features/auth/api/auth.service";
-import type { Note } from "@/types/note.types";
-import { noteAssetService, type RecordingAsset } from "@/services/note-asset.service";
+import type { Note } from "@/features/notes/types";
+import { noteAssetService, type RecordingAsset } from "@/features/notes/api/note-asset.service";
 import {
   composeLongFormNote,
   estimateTokenUpperBound,
@@ -13,15 +13,15 @@ import {
   stripPlaceholderSections,
   sectionSourceFingerprint,
   type ProcessedSection,
-} from "@/services/long-form-processing";
-import { assessGeneratedNote, hasBlockingDefect, shouldUseLosslessFallback } from "@/services/note-quality";
-import { recordingProcessingGuard } from "@/services/recording-processing-guard";
+} from "@/features/note-generation/lib/long-form-processing";
+import { assessGeneratedNote, hasBlockingDefect, shouldUseLosslessFallback } from "@/features/note-generation/lib/note-quality";
+import { recordingProcessingGuard } from "@/features/recording/lib/recording-processing-guard";
 import {
   buildLosslessStructuredFallback,
   isExtractiveFallbackNote,
-} from "@/services/lossless-note-fallback";
-import { stripTranscriptSection } from "@/services/canonical-transcript";
-import { stripMetaCommentary } from "@/services/note-commentary";
+} from "@/features/note-generation/lib/lossless-note-fallback";
+import { stripTranscriptSection } from "@/features/note-generation/lib/canonical-transcript";
+import { stripMetaCommentary } from "@/features/note-generation/lib/note-commentary";
 import {
   CURRENT_AI_PIPELINE_VERSION,
   CURRENT_TRANSCRIPTION_PIPELINE_VERSION,
@@ -34,18 +34,18 @@ import {
   shouldReviewGeneratedNote,
   shouldRefreshTranscript,
   shouldUpgradeExtractiveFallback,
-} from "@/services/processing-review-policy";
+} from "@/features/note-generation/lib/processing-review-policy";
 import {
   deriveRecordingNoteTitle,
   inferRecordingNoteContext,
   replaceDocumentTitle,
   type RecordingNoteContext,
-} from "@/services/recording-note-metadata";
+} from "@/features/recording/lib/recording-note-metadata";
 import {
   parseStructuredGlobalNote,
   renderStructuredGlobalNote,
   STRUCTURED_GLOBAL_NOTE_RESPONSE_FORMAT,
-} from "@/services/structured-global-note";
+} from "@/features/note-generation/lib/structured-global-note";
 
 // ISO-639-1 → human name, used to pin the enhanced note to the recording's language.
 const LANGUAGE_NAMES: Record<string, string> = {

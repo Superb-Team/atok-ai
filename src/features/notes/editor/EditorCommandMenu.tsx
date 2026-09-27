@@ -12,7 +12,7 @@ import {
   Table2,
   X,
 } from "lucide-react";
-import type { MarkdownBlockCommand } from "@/lib/markdown-editing";
+import type { MarkdownBlockCommand } from "@/features/notes/editor/markdown-editing";
 import type { EditorBlockCommand } from "./editor-block-commands";
 
 interface EditorCommandMenuProps {

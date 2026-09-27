@@ -1,14 +1,14 @@
 import { useState } from "react";
-import { audioImportService } from "@/services/audio-import.service";
-import { generateNoteTitle } from "@/services/audio-processor.service";
+import { audioImportService } from "@/features/recording/api/audio-import.service";
+import { generateNoteTitle } from "@/features/note-generation/audio-processor.service";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
-import { recordingService } from "@/services/recording.service";
-import { parseTranscriptionGlossary } from "@/services/transcription-glossary";
+import { recordingService } from "@/features/recording/api/recording.service";
+import { parseTranscriptionGlossary } from "@/features/recording/lib/transcription-glossary";
 
 interface ImportAudioDialogProps {
     open: boolean;

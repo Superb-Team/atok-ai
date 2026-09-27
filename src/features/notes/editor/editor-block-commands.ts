@@ -1,4 +1,4 @@
-import type { MarkdownBlockCommand } from "@/lib/markdown-editing";
+import type { MarkdownBlockCommand } from "@/features/notes/editor/markdown-editing";
 
 export interface EditorBlockCommand {
   id: MarkdownBlockCommand;

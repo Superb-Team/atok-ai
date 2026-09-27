@@ -27,7 +27,7 @@ import {
   type MarkdownAction,
   type MarkdownBlockCommand,
   type SlashCommandContext,
-} from "@/lib/markdown-editing";
+} from "@/features/notes/editor/markdown-editing";
 import type { NoteSaveStatus } from "./use-note-draft";
 import { EditorCommandMenu } from "./EditorCommandMenu";
 import {

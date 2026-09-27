@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { noteService } from "@/services/note.service";
+import { noteService } from "@/features/notes/api/note.service";
 import { authService } from "@/features/auth/api/auth.service";
-import type { Note } from "@/types/note.types";
+import type { Note } from "@/features/notes/types";
 import { FileText, Loader2, Search, Star, X } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { installAsyncListener } from "@/services/recording-processing-guard";
-import { shouldRecoverProcessingJob } from "@/services/processing-review-policy";
-import { recordingProcessingErrorMessage } from "@/services/recording-error-message";
-import { blockingQualityWarnings, requiresCaptureReview } from "@/services/recording-quality-policy";
+import { installAsyncListener } from "@/features/recording/lib/recording-processing-guard";
+import { shouldRecoverProcessingJob } from "@/features/note-generation/lib/processing-review-policy";
+import { recordingProcessingErrorMessage } from "@/features/recording/lib/recording-error-message";
+import { blockingQualityWarnings, requiresCaptureReview } from "@/features/recording/lib/recording-quality-policy";
 
 function captureQualityGuidance(warnings: string[]): string {
   const guidance = new Set<string>();
@@ -225,7 +225,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
     // Manifest-backed recovery: a crash or app restart no longer loses a job
     // after the localStorage handoff has already been consumed.
-    import('@/services/recording.service').then(({ recordingService }) =>
+    import('@/features/recording/api/recording.service').then(({ recordingService }) =>
       recordingService.listProcessingJobs().then((jobs) => {
         jobs
           .filter((job) => shouldRecoverProcessingJob(job))
@@ -256,7 +256,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     context?: { recordedAt: string; timezone: string },
   ) => {
     try {
-      const { processAudioRecording: processAudio } = await import('@/services/audio-processor.service');
+      const { processAudioRecording: processAudio } = await import('@/features/note-generation/audio-processor.service');
       const result = await processAudio(audioPath, noteTitle, language, context);
 
       if (!result.success) {

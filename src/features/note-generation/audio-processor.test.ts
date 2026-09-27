@@ -14,9 +14,9 @@ import {
   shouldOpenAiDraftPreview,
   shouldRefreshTranscript,
   shouldUpgradeExtractiveFallback,
-} from "./processing-review-policy.ts";
-import { stripTranscriptSection } from "./canonical-transcript.ts";
-import { stripMetaCommentary } from "./note-commentary.ts";
+} from "./lib/processing-review-policy.ts";
+import { stripTranscriptSection } from "./lib/canonical-transcript.ts";
+import { stripMetaCommentary } from "./lib/note-commentary.ts";
 
 describe("canonical transcript separation", () => {
   it("removes a model-created Indonesian transcript section from the note", () => {

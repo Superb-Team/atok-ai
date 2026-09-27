@@ -9,7 +9,7 @@ import {
   splitImmutableTranscript,
   stripLeadingDocumentTitle,
   validateFormattedNote,
-} from "./note-format.service.ts";
+} from "./note-format.ts";
 
 test("removes a duplicate document title before formatting", () => {
   const title = "Pengembangan Sistem — 11 Agustus 2026";

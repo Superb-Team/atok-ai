@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Note, CreateNoteRequest, UpdateNoteRequest } from "@/types/note.types";
+import type { Note, CreateNoteRequest, UpdateNoteRequest } from "@/features/notes/types";
 
 export class NoteConflictError extends Error {
   constructor(message = "This note changed after it was opened.") {

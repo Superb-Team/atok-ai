@@ -4,10 +4,10 @@ import {
   blockingQualityWarnings,
   qualityReportRequiresReview,
   type AudioDeviceInfo,
-} from '@/services/recording.service';
-import type { RecordingNoteContext } from '@/services/recording-note-metadata';
-import { recorderErrorMessage, type RecorderAction } from '@/services/recorder-feedback';
-import { parseTranscriptionGlossary } from '@/services/transcription-glossary';
+} from '@/features/recording/api/recording.service';
+import type { RecordingNoteContext } from '@/features/recording/lib/recording-note-metadata';
+import { recorderErrorMessage, type RecorderAction } from '@/features/recording/lib/recorder-feedback';
+import { parseTranscriptionGlossary } from '@/features/recording/lib/transcription-glossary';
 
 declare module 'react' {
   interface CSSProperties {
@@ -81,7 +81,7 @@ const RecordingPopupApp: React.FC = () => {
   useEffect(() => {
     const loadDevices = async () => {
       try {
-        const { recordingService } = await import('@/services/recording.service');
+        const { recordingService } = await import('@/features/recording/api/recording.service');
         const [status, devices] = await Promise.all([
           recordingService.getDeviceStatus(),
           recordingService.listInputDevices(),
@@ -147,13 +147,13 @@ const RecordingPopupApp: React.FC = () => {
           closing = true;
           event.preventDefault();
           try {
-            const { recordingService } = await import('@/services/recording.service');
+            const { recordingService } = await import('@/features/recording/api/recording.service');
             const savedPath = await recordingService.stopRecording();
             const quality = await recordingService.getQualityReport(savedPath).catch((error) => {
               console.warn('Failed to read recording quality report:', error);
               return null;
             });
-            const { generateNoteTitle } = await import('@/services/audio-processor.service');
+            const { generateNoteTitle } = await import('@/features/note-generation/audio-processor.service');
             const noteTitle = generateNoteTitle();
             const context = recordingContextRef.current;
             const timestamp = Date.now();
@@ -260,7 +260,7 @@ const RecordingPopupApp: React.FC = () => {
   const handleRecord = async () => {
     if (isRecording || isFinalizing) return;
     try {
-      const { recordingService } = await import('@/services/recording.service');
+      const { recordingService } = await import('@/features/recording/api/recording.service');
       const glossary = parseTranscriptionGlossary(glossaryInput);
       const started = await recordingService.startRecording(
         selectedMic || undefined,
@@ -300,7 +300,7 @@ const RecordingPopupApp: React.FC = () => {
     if (!isRecording || isFinalizing) return;
     const nextPaused = !isPaused;
     try {
-      const { recordingService } = await import('@/services/recording.service');
+      const { recordingService } = await import('@/features/recording/api/recording.service');
       await recordingService.setPaused(nextPaused);
       setIsPaused(nextPaused);
     } catch (err) {
@@ -316,8 +316,8 @@ const RecordingPopupApp: React.FC = () => {
     setIsCapturing(true);
     const elapsedMs = time * 1000;
     try {
-      const { recordingService } = await import('@/services/recording.service');
-      const { noteAssetService } = await import('@/services/note-asset.service');
+      const { recordingService } = await import('@/features/recording/api/recording.service');
+      const { noteAssetService } = await import('@/features/notes/api/note-asset.service');
       const audioPath = recordingService.getCurrentRecordingPath();
       if (!audioPath) throw new Error('No active recording');
 
@@ -345,20 +345,20 @@ const RecordingPopupApp: React.FC = () => {
     if (isFinalizing) return;
     let savedPath: string | null = null;
     let noteTitle: string | null = null;
-    let quality: import('@/services/recording.service').AudioQualityReport | null = null;
+    let quality: import('@/features/recording/api/recording.service').AudioQualityReport | null = null;
 
     if (isRecording) {
       setIsRecording(false);
       setIsPaused(false);
       setIsFinalizing(true);
       try {
-        const { recordingService } = await import('@/services/recording.service');
+        const { recordingService } = await import('@/features/recording/api/recording.service');
         savedPath = await recordingService.stopRecording();
         quality = await recordingService.getQualityReport(savedPath).catch((error) => {
           console.warn('Failed to read recording quality report:', error);
           return null;
         });
-        const { generateNoteTitle } = await import('@/services/audio-processor.service');
+        const { generateNoteTitle } = await import('@/features/note-generation/audio-processor.service');
         noteTitle = generateNoteTitle();
         setTime(0);
       } catch (err) {

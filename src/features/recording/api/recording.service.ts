@@ -3,8 +3,8 @@ import { appDataDir, join } from '@tauri-apps/api/path';
 import {
   createRecordingNoteContext,
   type RecordingNoteContext,
-} from '@/services/recording-note-metadata';
-import { requiresCaptureReview } from '@/services/recording-quality-policy';
+} from '@/features/recording/lib/recording-note-metadata';
+import { requiresCaptureReview } from '@/features/recording/lib/recording-quality-policy';
 
 export interface DeviceStatus {
   mic_available: boolean;
@@ -37,7 +37,7 @@ export interface AudioQualityReport {
   requiresReview: boolean;
 }
 
-export { blockingQualityWarnings, requiresCaptureReview } from '@/services/recording-quality-policy';
+export { blockingQualityWarnings, requiresCaptureReview } from '@/features/recording/lib/recording-quality-policy';
 
 export function qualityReportRequiresReview(
   report: Pick<AudioQualityReport, 'requiresReview' | 'warnings'> | null | undefined,

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, Component } from "react";
-import { noteService } from "@/services/note.service";
+import { noteService } from "@/features/notes/api/note.service";
 import { authService } from "@/features/auth/api/auth.service";
-import type { Note } from "@/types/note.types";
+import type { Note } from "@/features/notes/types";
 import { ArrowLeft, Star, Trash2, Edit, Paperclip, Sparkles } from "lucide-react";
-import { noteAssetService } from "@/services/note-asset.service";
+import { noteAssetService } from "@/features/notes/api/note-asset.service";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Dialog,
@@ -15,10 +15,10 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
-import { NoteEditSession } from "@/components/note-editor/NoteEditSession";
-import { formatNoteWithAi } from "@/services/note-format.service";
-import { resolveNoteImprovementRoute } from "@/services/recording-job-selection";
-import type { ProcessingJobSummary } from "@/services/recording.service";
+import { NoteEditSession } from "@/features/notes/editor/NoteEditSession";
+import { formatNoteWithAi } from "@/features/notes/lib/note-format";
+import { resolveNoteImprovementRoute } from "@/features/recording/lib/recording-job-selection";
+import type { ProcessingJobSummary } from "@/features/recording/api/recording.service";
 
 class ErrorBoundary extends Component<{ fallback: React.ReactNode; children: React.ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
@@ -198,7 +198,7 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
     setAiDraftError(null);
     setFormatNotice(null);
     try {
-      const { processAudioRecording } = await import("@/services/audio-processor.service");
+      const { processAudioRecording } = await import("@/features/note-generation/audio-processor.service");
       const result = await processAudioRecording(
         job.audioPath,
         job.noteTitle || note.title,
@@ -245,7 +245,7 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
     setAiDraftError(null);
     setFormatNotice(null);
     try {
-      const { processAudioRecording } = await import("@/services/audio-processor.service");
+      const { processAudioRecording } = await import("@/features/note-generation/audio-processor.service");
       const result = await processAudioRecording(
         job.audioPath,
         job.noteTitle || note.title,
@@ -277,7 +277,7 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
   const handleImproveNote = async () => {
     if (!note) return;
     try {
-      const { recordingService } = await import("@/services/recording.service");
+      const { recordingService } = await import("@/features/recording/api/recording.service");
       const route = resolveNoteImprovementRoute(
         await recordingService.listProcessingJobs(),
         note.id,
@@ -313,7 +313,7 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
     setSavingAiDraft(true);
     setAiDraftError(null);
     try {
-      const { commitAudioRecordingDraft } = await import("@/services/audio-processor.service");
+      const { commitAudioRecordingDraft } = await import("@/features/note-generation/audio-processor.service");
       const updated = await commitAudioRecordingDraft({
         audioPath: aiDraft.audioPath,
         noteId: note.id,
