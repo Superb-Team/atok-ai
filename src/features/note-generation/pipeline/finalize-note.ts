@@ -20,6 +20,7 @@ import {
 import type { EnhancedDraft } from "@/features/note-generation/pipeline/enhance-note";
 import { markStage, type ProcessingRun } from "@/features/note-generation/pipeline/processing-run";
 import { reviewNote } from "@/features/note-generation/pipeline/review-note";
+import { logger } from "@/lib/logger";
 
 export interface FinalizedNote {
   title: string;
@@ -80,11 +81,10 @@ export async function finalizeNote(
       content = buildLosslessStructuredFallback(run.noteTitle, markedTranscript, run.lang);
     }
   } else if (qualityIssues.length > 0) {
-    console.warn(JSON.stringify({
-      event: "recording_note_advisory_findings",
+    logger.warn("note_generation.advisory_findings", {
       jobId: run.manifest.jobId,
-      findings: qualityIssues.map((issue) => issue.code),
-    }));
+      findings: qualityIssues.map((issue) => issue.code).join(","),
+    });
   }
 
   // Keep semantic markers in the quality-gate input. Convert them to local

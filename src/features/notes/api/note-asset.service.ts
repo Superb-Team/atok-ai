@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCommand } from "@/lib/ipc";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appDataDir, join } from "@tauri-apps/api/path";
 
@@ -46,14 +46,14 @@ export class NoteAssetService {
   }
 
   static async importAsset(sourcePath: string): Promise<ImportedAsset> {
-    return invoke<ImportedAsset>("import_note_asset", {
+    return invokeCommand<ImportedAsset>("import_note_asset", {
       sourcePath,
       assetsDir: await this.assetsDir(),
     });
   }
 
   static async captureScreenshot(): Promise<ImportedAsset> {
-    return invoke<ImportedAsset>("capture_screenshot", {
+    return invokeCommand<ImportedAsset>("capture_screenshot", {
       assetsDir: await this.assetsDir(),
     });
   }
@@ -63,7 +63,7 @@ export class NoteAssetService {
     savedPath: string,
     elapsedMs: number,
   ): Promise<void> {
-    await invoke("record_screenshot_asset", {
+    await invokeCommand("record_screenshot_asset", {
       audioPath,
       savedPath,
       elapsedMs: Math.round(elapsedMs),
@@ -71,7 +71,7 @@ export class NoteAssetService {
   }
 
   static async takeRecordingAssets(audioPath: string): Promise<RecordingAssets> {
-    return invoke<RecordingAssets>("take_recording_assets", { audioPath });
+    return invokeCommand<RecordingAssets>("take_recording_assets", { audioPath });
   }
 
   static assetMarkdown(asset: ImportedAsset): string {

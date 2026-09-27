@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { openPath, openUrl } from '@tauri-apps/plugin-opener';
+import { errorMessage, logger } from '@/lib/logger';
 
 interface MarkdownRendererProps {
   content: string;
@@ -34,7 +35,7 @@ const MarkdownLink: React.FC<React.AnchorHTMLAttributes<HTMLAnchorElement>> = ({
     if (!href) return;
     event.preventDefault();
     const action = isLocalPath(href) ? openPath(href) : openUrl(href);
-    action.catch((err) => console.error('Failed to open link:', err));
+    action.catch((err) => logger.error("markdown.open_link_failed", { error: errorMessage(err) }));
   };
   return (
     <a href={href} onClick={handleClick} className="cursor-pointer">

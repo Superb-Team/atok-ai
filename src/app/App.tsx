@@ -14,7 +14,7 @@ import AIChatInterface from "@/features/search-ai/components/SearchAIPage";
 import { agentService } from "@/features/search-ai/api/agent.service";
 import { authService } from "@/features/auth/api/auth.service";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCommand } from "@/lib/ipc";
 import {
   CheckSquare,
   Eye,
@@ -27,6 +27,7 @@ import {
   Upload,
 } from "lucide-react";
 import { useState, useEffect } from "react";
+import { errorMessage, logger } from "@/lib/logger";
 import "@/styles/globals.css";
 
 function App() {
@@ -47,7 +48,7 @@ function App() {
       localStorage.setItem('aec_preference_version', '2');
     }
     const persistedAec = localStorage.getItem('aec_enabled') === 'true';
-    invoke('set_aec_enabled', { enabled: persistedAec }).catch(() => {});
+    invokeCommand('set_aec_enabled', { enabled: persistedAec }).catch(() => {});
     return unwatchTheme;
   }, []);
 
@@ -61,7 +62,7 @@ function App() {
         const user = authService.getUser();
         if (user) {
           agentService.ensureCollection(user.id).catch(err => {
-            console.error("Failed to ensure collection:", err);
+            logger.error("app.rag_collection_failed", { error: errorMessage(err) });
           });
         }
       } catch (error) {
@@ -128,10 +129,10 @@ function App() {
         await webview.setFocus();
       });
       webview.once('tauri://error', (e) => {
-        console.error('Failed to create recording popup:', e);
+        logger.error("app.recording_popup_failed", { error: errorMessage(e) });
       });
     } catch (error) {
-      console.error('Failed to create recording popup:', error);
+      logger.error("app.recording_popup_failed", { error: errorMessage(error) });
     }
   };
 

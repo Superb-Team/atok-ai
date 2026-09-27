@@ -18,6 +18,7 @@ import {
   STRUCTURED_GLOBAL_NOTE_RESPONSE_FORMAT,
 } from "@/features/note-generation/lib/structured-global-note";
 import type { RecordingNoteContext } from "@/features/recording/lib/recording-note-metadata";
+import { logger } from "@/lib/logger";
 
 export async function synthesizeGlobalNote(
   sectionNotes: string[],
@@ -54,11 +55,10 @@ export async function synthesizeGlobalNote(
       } catch (error) {
         lastIssues = `invalid_structured_output: ${String(error)}`;
       }
-      console.warn(JSON.stringify({
-        event: "global_note_quality_retry",
+      logger.warn("note_generation.global_quality_retry", {
         attempt,
         issues: lastIssues,
-      }));
+      });
     }
     throw new Error(`Global reduction failed quality checks after retries: ${lastIssues}`);
   };

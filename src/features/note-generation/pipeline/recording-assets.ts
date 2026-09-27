@@ -1,6 +1,7 @@
 import { describeImage } from "@/features/note-generation/api/ai";
 import { mapWithConcurrency } from "@/features/note-generation/lib/concurrency";
 import { noteAssetService, type RecordingAssets } from "@/features/notes/api/note-asset.service";
+import { errorMessage, logger } from "@/lib/logger";
 
 export interface LoadedRecordingAssets {
   taken: RecordingAssets;
@@ -28,7 +29,7 @@ export function loadRecordingAssets(
     });
     return { taken, descriptions, elapsed: Math.round(performance.now() - started) };
   })().catch((assetErr) => {
-    console.error("Failed to load recording assets:", assetErr);
+    logger.error("note_generation.assets_load_failed", { error: errorMessage(assetErr) });
     return null;
   });
 }

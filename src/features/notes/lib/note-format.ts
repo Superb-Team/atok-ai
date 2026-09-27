@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCommand } from "../../../lib/ipc.ts";
 
 import { factualAnchorsIn, linksIn, missingFactualAnchors } from "./factual-anchors.ts";
+import { logger } from "../../../lib/logger.ts";
 
 export interface NoteFormatInput {
   title: string;
@@ -138,13 +139,13 @@ export async function formatNoteWithAi(input: NoteFormatInput): Promise<string> 
   const aiInput = { ...input, content: aiContent };
   let result: ChatCompletionResult;
   try {
-    result = await invoke<ChatCompletionResult>("ai_chat_detailed_strict", {
+    result = await invokeCommand<ChatCompletionResult>("ai_chat_detailed_strict", {
       messages: buildNoteFormatMessages(aiInput),
       temperature: 0.1,
       maxTokens,
     });
   } catch {
-    console.warn("AI formatting request failed");
+    logger.warn("notes.ai_format_failed");
     throw new Error("AI formatting unavailable. The note was not changed.");
   }
   const formatted = result.content?.trim() ?? "";
@@ -157,7 +158,7 @@ export async function formatNoteWithAi(input: NoteFormatInput): Promise<string> 
 
   let repair: ChatCompletionResult;
   try {
-    repair = await invoke<ChatCompletionResult>("ai_chat_detailed_strict", {
+    repair = await invokeCommand<ChatCompletionResult>("ai_chat_detailed_strict", {
       messages: buildNoteFormatRepairMessages(
         aiInput,
         missingFactualAnchors(aiContent, formatted),
@@ -166,7 +167,7 @@ export async function formatNoteWithAi(input: NoteFormatInput): Promise<string> 
       maxTokens,
     });
   } catch {
-    console.warn("AI formatting repair request failed");
+    logger.warn("notes.ai_format_repair_failed");
     throw new Error("AI formatting repair unavailable. The note was not changed.");
   }
   if (repair.is_truncated) {
@@ -175,7 +176,7 @@ export async function formatNoteWithAi(input: NoteFormatInput): Promise<string> 
   const repaired = repair.content?.trim() ?? "";
   const repairError = validateFormattedNote(aiContent, repaired);
   if (repairError) {
-    console.warn("AI formatting rejected after repair; keeping the original note");
+    logger.warn("notes.ai_format_rejected");
     return resolveRepairResult(input.content, aiContent, repaired);
   }
   return split ? `${repaired}\n\n${split.immutableTranscript}` : repaired;

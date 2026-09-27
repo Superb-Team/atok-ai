@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from '@/lib/ipc';
 import { authService } from '@/features/auth/api/auth.service';
 import { BadgeCheck } from 'lucide-react';
 import type { User } from '@/features/auth/types';
 import { getThemePreference, setThemePreference, type ThemePreference } from '@/lib/theme';
+import { errorMessage, logger } from '@/lib/logger';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
   { value: 'light', label: 'Light' },
@@ -92,7 +93,7 @@ const SettingsPage: React.FC = () => {
   useEffect(() => {
     loadUserInfo();
     // Load AEC setting from backend (cross-window safe)
-    invoke<boolean>('get_aec_enabled').then(setAecEnabled).catch(() => {});
+    invokeCommand<boolean>('get_aec_enabled').then(setAecEnabled).catch(() => {});
   }, []);
 
   const toggleAec = async () => {
@@ -102,9 +103,9 @@ const SettingsPage: React.FC = () => {
     localStorage.setItem('aec_enabled', String(next));
     localStorage.setItem('aec_preference_version', '2');
     try {
-      await invoke('set_aec_enabled', { enabled: next });
+      await invokeCommand('set_aec_enabled', { enabled: next });
     } catch (err) {
-      console.error('Failed to set AEC:', err);
+      logger.error("settings.aec_update_failed", { error: errorMessage(err) });
       setAecEnabled(!next);
       localStorage.setItem('aec_enabled', String(!next));
     }
@@ -117,7 +118,7 @@ const SettingsPage: React.FC = () => {
         setUserInfo(user);
       }
     } catch (err) {
-      console.error('Failed to load user info:', err);
+      logger.error("settings.user_load_failed", { error: errorMessage(err) });
     } finally {
       setLoading(false);
     }

@@ -29,6 +29,7 @@ import { synthesizeGlobalNote } from "@/features/note-generation/pipeline/global
 import { markStage, type ProcessingRun } from "@/features/note-generation/pipeline/processing-run";
 import { processSectionReliably } from "@/features/note-generation/pipeline/section-notes";
 import type { ManifestSection } from "@/features/note-generation/types";
+import { errorMessage, logger } from "@/lib/logger";
 
 export interface EnhancedDraft {
   text: string;
@@ -72,12 +73,11 @@ export async function enhanceTranscript(
     }
     return await enhanceInSinglePass(run, source, userContent, budget);
   } catch (enhancementError) {
-    console.warn(JSON.stringify({
-      event: "recording_enhancement_fallback",
+    logger.warn("note_generation.enhancement_fallback", {
       jobId: run.manifest.jobId,
       stage: "enhance",
       reason: "provider_error",
-    }));
+    });
     return {
       text: buildLosslessStructuredFallback(run.noteTitle, markedTranscript, run.lang),
       reviewSource: markedTranscript,
@@ -98,7 +98,7 @@ async function enhanceInSections(
 ): Promise<EnhancedDraft> {
   const { manifest } = run;
   const sections = splitTranscriptByTokenBudget(source.markedTranscript, budget.maxSourceTokens);
-  console.log(`[audio-processor] map-reduce enhance: ${sections.length} sections`);
+  logger.info("note_generation.map_reduce_started", { jobId: manifest.jobId, sections: sections.length });
   manifest.status = "extracting";
   await run.persist();
   let persistQueue = Promise.resolve();
@@ -171,12 +171,11 @@ async function enhanceInSections(
       : `Global synthesis failed: ${String(globalError)}`;
     // Empty, not a placeholder: a placeholder H1 would become the note title.
     globalNote = "";
-    console.warn(JSON.stringify({
-      event: "recording_global_synthesis_fallback",
+    logger.warn("note_generation.global_synthesis_fallback", {
       jobId: manifest.jobId,
       sectionBackedDraft,
-      reason: String(globalError),
-    }));
+      reason: errorMessage(globalError),
+    });
   }
   return {
     text: composeLongFormNote(globalNote, processedSections, run.lang),

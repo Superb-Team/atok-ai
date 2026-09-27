@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCommand } from "@/lib/ipc";
 import {
   FALLBACK_MODEL_LIMITS,
   type ModelLimits,
@@ -18,7 +18,7 @@ export interface ChatCompletionResult {
 }
 
 export function getModelLimits(): Promise<ModelLimits> {
-  return invoke<ModelLimits>("get_ai_model_limits").catch(() => FALLBACK_MODEL_LIMITS);
+  return invokeCommand<ModelLimits>("get_ai_model_limits").catch(() => FALLBACK_MODEL_LIMITS);
 }
 
 export function detailedChat(
@@ -27,7 +27,7 @@ export function detailedChat(
   maxTokens: number,
   responseFormat?: Record<string, unknown>,
 ): Promise<ChatCompletionResult> {
-  return invoke<ChatCompletionResult>("ai_chat_detailed", {
+  return invokeCommand<ChatCompletionResult>("ai_chat_detailed", {
     messages,
     temperature,
     maxTokens,
@@ -36,18 +36,18 @@ export function detailedChat(
 }
 
 export function transcribeAudio(audioPath: string, language: string, forceRefresh: boolean): Promise<string> {
-  return invoke<string>("transcribe_audio", { audioPath, language, forceRefresh });
+  return invokeCommand<string>("transcribe_audio", { audioPath, language, forceRefresh });
 }
 
 export function evaluateTranscriptIntegrity(
   audioPath: string,
   transcript: string,
 ): Promise<TranscriptIntegrityReport> {
-  return invoke<TranscriptIntegrityReport>("evaluate_transcript_integrity", { audioPath, transcript });
+  return invokeCommand<TranscriptIntegrityReport>("evaluate_transcript_integrity", { audioPath, transcript });
 }
 
 export function describeImage(imagePath: string, language: string): Promise<string> {
-  return invoke<string>("describe_image", { imagePath, language });
+  return invokeCommand<string>("describe_image", { imagePath, language });
 }
 
 export function insertRagDocument(
@@ -55,5 +55,5 @@ export function insertRagDocument(
   text: string,
   metadata: Record<string, unknown>,
 ): Promise<boolean> {
-  return invoke<boolean>("agent_insert_document", { userId, text, metadata });
+  return invokeCommand<boolean>("agent_insert_document", { userId, text, metadata });
 }

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCommand } from "@/lib/ipc";
 import type { Note, CreateNoteRequest, UpdateNoteRequest } from "@/features/notes/types";
 
 export class NoteConflictError extends Error {
@@ -11,7 +11,7 @@ export class NoteConflictError extends Error {
 export const noteService = {
   async getNotes(userId: string): Promise<Note[]> {
     try {
-      return await invoke<Note[]>("get_notes", { userId });
+      return await invokeCommand<Note[]>("get_notes", { userId });
     } catch (error) {
       throw toError(error, "Failed to load notes");
     }
@@ -19,7 +19,7 @@ export const noteService = {
 
   async getNote(noteId: number, userId: string): Promise<Note> {
     try {
-      return await invoke<Note>("get_note", { noteId, userId });
+      return await invokeCommand<Note>("get_note", { noteId, userId });
     } catch (error) {
       throw toError(error, "Failed to load note");
     }
@@ -27,7 +27,7 @@ export const noteService = {
 
   async createNote(userId: string, request: CreateNoteRequest): Promise<Note> {
     try {
-      return await invoke<Note>("create_note", { userId, request });
+      return await invokeCommand<Note>("create_note", { userId, request });
     } catch (error) {
       throw toError(error, "Failed to create note");
     }
@@ -39,7 +39,7 @@ export const noteService = {
     request: CreateNoteRequest,
   ): Promise<Note> {
     try {
-      return await invoke<Note>("create_recording_note", { userId, jobId, request });
+      return await invokeCommand<Note>("create_recording_note", { userId, jobId, request });
     } catch (error) {
       throw toError(error, "Failed to create recording note");
     }
@@ -51,7 +51,7 @@ export const noteService = {
     changes: UpdateNoteRequest,
   ): Promise<Note> {
     try {
-      return await invoke<Note>("update_note", {
+      return await invokeCommand<Note>("update_note", {
         userId,
         request: { id: noteId, ...changes },
       });
@@ -65,7 +65,7 @@ export const noteService = {
 
   async deleteNote(noteId: number, userId: string): Promise<{ message: string }> {
     try {
-      return await invoke<{ message: string }>("delete_note", { noteId, userId });
+      return await invokeCommand<{ message: string }>("delete_note", { noteId, userId });
     } catch (error) {
       throw toError(error, "Failed to delete note");
     }
@@ -73,7 +73,7 @@ export const noteService = {
 
   async toggleFavorite(noteId: number, userId: string): Promise<Note> {
     try {
-      return await invoke<Note>("toggle_favorite", { noteId, userId });
+      return await invokeCommand<Note>("toggle_favorite", { noteId, userId });
     } catch (error) {
       throw toError(error, "Failed to update note");
     }

@@ -1,10 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCommand } from "@/lib/ipc";
 import type { AuthResponse, LoginCredentials, RegisterData, User } from "@/features/auth/types";
 
 export const authService = {
   async register(data: RegisterData): Promise<AuthResponse> {
     try {
-      const response = await invoke<AuthResponse>("register", { request: data });
+      const response = await invokeCommand<AuthResponse>("register", { request: data });
       return response;
     } catch (error) {
       throw new Error(error as string);
@@ -13,7 +13,7 @@ export const authService = {
 
   async login(credentials: LoginCredentials): Promise<AuthResponse> {
     try {
-      const response = await invoke<AuthResponse>("login", { request: credentials });
+      const response = await invokeCommand<AuthResponse>("login", { request: credentials });
       return response;
     } catch (error) {
       throw new Error(error as string);
@@ -22,7 +22,7 @@ export const authService = {
 
   async getCurrentUser(token: string): Promise<User> {
     try {
-      const response = await invoke<User>("get_current_user", { token });
+      const response = await invokeCommand<User>("get_current_user", { token });
       return response;
     } catch (error) {
       throw new Error(error as string);

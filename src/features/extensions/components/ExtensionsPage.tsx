@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { errorMessage, logger } from '@/lib/logger';
 
 const ExtensionsPage: React.FC = () => {
   const [connections, setConnections] = useState<McpAuthConnection[]>([]);
@@ -33,7 +34,7 @@ const ExtensionsPage: React.FC = () => {
       const conns = await mcpService.getConnections(user.id);
       setConnections(conns);
     } catch (err) {
-      console.error('Failed to load connections:', err);
+      logger.error("extensions.load_failed", { error: errorMessage(err) });
       setError('Failed to load connections');
     } finally {
       setLoading(false);
@@ -62,7 +63,7 @@ const ExtensionsPage: React.FC = () => {
       setGithubToken('');
       await loadConnections();
     } catch (err: any) {
-      console.error('Failed to connect GitHub:', err);
+      logger.error("extensions.connect_failed", { provider: "github", error: errorMessage(err) });
       setError(err.message || 'Failed to connect GitHub');
     } finally {
       setConnecting(false);
@@ -90,7 +91,7 @@ const ExtensionsPage: React.FC = () => {
       setSuccess(`${provider} disconnected.`);
       await loadConnections();
     } catch (err: any) {
-      console.error(`Failed to disconnect ${provider}:`, err);
+      logger.error("extensions.disconnect_failed", { provider, error: errorMessage(err) });
       setError(err.message || `Failed to disconnect ${provider}`);
     } finally {
       setDisconnecting(false);

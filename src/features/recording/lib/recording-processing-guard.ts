@@ -1,3 +1,4 @@
+import { errorMessage, logger } from "../../../lib/logger.ts";
 export interface RecordingProcessingGuard {
   run<T>(
     audioPath: string,
@@ -59,7 +60,7 @@ export function installAsyncListener<T>(
       }
     })
     .catch((error) => {
-      if (!disposed) console.error("Failed to register recording listener:", error);
+      if (!disposed) logger.error("recording.listener_register_failed", { error: errorMessage(error) });
     });
 
   return () => {

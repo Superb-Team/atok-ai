@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ArrowRight } from "lucide-react";
+import { errorMessage, logger } from "@/lib/logger";
 
 interface LoginPageProps {
   onLoginSuccess: () => void;
@@ -27,7 +28,7 @@ export default function LoginPage({ onLoginSuccess, onSwitchToSignup }: LoginPag
       authService.saveUser(response.user);
       onLoginSuccess();
     } catch (err) {
-      console.error("Login error:", err);
+      logger.warn("auth.login_failed", { error: errorMessage(err) });
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
       setLoading(false);

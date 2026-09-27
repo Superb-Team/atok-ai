@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from '@/lib/ipc';
 import { open } from '@tauri-apps/plugin-dialog';
 import { appDataDir, join } from '@tauri-apps/api/path';
 
@@ -18,12 +18,12 @@ export class AudioImportService {
   static async importAudioFile(sourcePath: string): Promise<string> {
     const appDir = await appDataDir();
     const recordingsDir = await join(appDir, 'recordings');
-    await invoke('ensure_recordings_dir', { path: recordingsDir });
+    await invokeCommand('ensure_recordings_dir', { path: recordingsDir });
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const outputPath = await join(recordingsDir, `imported-${timestamp}.mp3`);
 
-    await invoke('import_audio_file', { sourcePath, outputPath });
+    await invokeCommand('import_audio_file', { sourcePath, outputPath });
     return outputPath;
   }
 }

@@ -8,6 +8,7 @@ import {
 import { markStage, type ProcessingRun } from "@/features/note-generation/pipeline/processing-run";
 import { saveNote } from "@/features/note-generation/pipeline/save-note";
 import type { AudioProcessingResult } from "@/features/note-generation/types";
+import { errorMessage, logger } from "@/lib/logger";
 
 export type TranscriptionOutcome =
   | { kind: "transcribed"; transcript: string; requiresReview: boolean; reviewIssues: string[] }
@@ -87,12 +88,11 @@ export async function transcribeRecording(
     recordProcessingFailure(manifest, transcribeError);
     await run.persistBestEffort();
     const user = authService.getUser();
-    console.error(JSON.stringify({
-      event: "recording_transcription_failed",
+    logger.error("note_generation.transcription_failed", {
       jobId: manifest.jobId,
       reason: "provider_or_capture_error",
-      error: String(transcribeError),
-    }));
+      error: errorMessage(transcribeError),
+    });
     if (!previewOnly && !manifest.failureNoteId) {
       const failureContent = lang === "id"
         ? `# ${noteTitle}\n\n## Pemrosesan rekaman tertunda\n\nRekaman sudah tersimpan, tetapi transkripsinya belum selesai. Audio dan status pemrosesan tetap dipertahankan agar dapat dicoba lagi.`

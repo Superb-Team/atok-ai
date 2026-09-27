@@ -37,6 +37,7 @@ import type {
 } from "@/features/note-generation/types";
 import { recordingProcessingGuard } from "@/features/recording/lib/recording-processing-guard";
 import type { RecordingNoteContext } from "@/features/recording/lib/recording-note-metadata";
+import { errorMessage, logger } from "@/lib/logger";
 
 export type { AudioProcessingOptions, AudioProcessingResult } from "@/features/note-generation/types";
 
@@ -256,12 +257,11 @@ export function commitAudioRecordingDraft(input: AudioDraftCommitInput): Promise
         // The note is already protected by CAS and saved. A manifest sync
         // failure should not make the UI report a failed note update; log it so
         // the next explicit regeneration can repair the sidecar.
-        console.error(JSON.stringify({
-          event: "recording_ai_draft_manifest_sync_failed",
+        logger.error("note_generation.draft_manifest_sync_failed", {
           jobId: manifest.jobId,
           noteId: input.noteId,
-          reason: String(error),
-        }));
+          reason: errorMessage(error),
+        });
       }
 
       if (manifest.transcript?.trim()) {

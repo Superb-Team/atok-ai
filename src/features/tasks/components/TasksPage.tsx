@@ -26,6 +26,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { errorMessage, logger } from '@/lib/logger';
 
 interface Task {
   id: number;
@@ -175,7 +176,7 @@ const TasksPage: React.FC = () => {
         tasks: tasksByStatus[col.id] || []
       })));
     } catch (error) {
-      console.error('Failed to load tasks:', error);
+      logger.error("tasks.load_failed", { error: errorMessage(error) });
     } finally {
       setLoading(false);
     }
@@ -310,7 +311,7 @@ const TasksPage: React.FC = () => {
 
       await taskService.updateTaskPositions(user.id, updates);
     } catch (error) {
-      console.error('Failed to save task positions:', error);
+      logger.error("tasks.save_positions_failed", { error: errorMessage(error) });
     }
   };
 
@@ -344,7 +345,7 @@ const TasksPage: React.FC = () => {
 
       setNewTaskInput(prev => ({ ...prev, [columnId]: '' }));
     } catch (error) {
-      console.error('Failed to create task:', error);
+      logger.error("tasks.create_failed", { error: errorMessage(error) });
     }
   };
 
@@ -361,7 +362,7 @@ const TasksPage: React.FC = () => {
           : col
       ));
     } catch (error) {
-      console.error('Failed to clear tasks:', error);
+      logger.error("tasks.clear_failed", { error: errorMessage(error) });
     }
   };
 
@@ -386,7 +387,7 @@ const TasksPage: React.FC = () => {
         return col;
       }));
     } catch (error) {
-      console.error('Failed to toggle task completion:', error);
+      logger.error("tasks.toggle_failed", { error: errorMessage(error) });
     }
   };
 

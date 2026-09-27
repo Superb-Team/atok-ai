@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ArrowRight } from "lucide-react";
+import { errorMessage, logger } from "@/lib/logger";
 
 interface SignupPageProps {
   onSignupSuccess: () => void;
@@ -37,7 +38,7 @@ export default function SignupPage({ onSignupSuccess, onSwitchToLogin }: SignupP
       authService.saveUser(response.user);
       onSignupSuccess();
     } catch (err) {
-      console.error("Signup error:", err);
+      logger.warn("auth.signup_failed", { error: errorMessage(err) });
       setError(err instanceof Error ? err.message : "Signup failed");
     } finally {
       setLoading(false);

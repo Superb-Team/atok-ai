@@ -8,6 +8,7 @@ import {
 import type { RecordingNoteContext } from '@/features/recording/lib/recording-note-metadata';
 import { recorderErrorMessage, type RecorderAction } from '@/features/recording/lib/recorder-feedback';
 import { parseTranscriptionGlossary } from '@/features/recording/lib/transcription-glossary';
+import { errorMessage, logger } from '@/lib/logger';
 
 declare module 'react' {
   interface CSSProperties {
@@ -63,7 +64,7 @@ const RecordingPopupApp: React.FC = () => {
   };
 
   const showRecorderError = (action: RecorderAction, error: unknown) => {
-    console.error(`Recorder ${action} failed:`, error);
+    logger.error("recording.recorder_action_failed", { action, error: errorMessage(error) });
     showFeedback(recorderErrorMessage(action, error), 'error');
   };
 
@@ -103,7 +104,7 @@ const RecordingPopupApp: React.FC = () => {
         }
         setDevicesLoaded(true);
       } catch (err) {
-        console.error('Failed to load devices:', err);
+        logger.error("recording.devices_load_failed", { error: errorMessage(err) });
         setDevicesLoaded(true);
       }
     };
@@ -121,7 +122,7 @@ const RecordingPopupApp: React.FC = () => {
     try {
       setAppWindow(getCurrentWindow());
     } catch (err) {
-      console.error("Failed to get window reference:", err);
+      logger.error("recording.window_lookup_failed", { error: errorMessage(err) });
     }
   }, []);
 
@@ -150,7 +151,7 @@ const RecordingPopupApp: React.FC = () => {
             const { recordingService } = await import('@/features/recording/api/recording.service');
             const savedPath = await recordingService.stopRecording();
             const quality = await recordingService.getQualityReport(savedPath).catch((error) => {
-              console.warn('Failed to read recording quality report:', error);
+              logger.warn("recording.quality_report_failed", { error: errorMessage(error) });
               return null;
             });
             const { generateNoteTitle } = await import('@/features/note-generation/audio-processor.service');
@@ -172,8 +173,8 @@ const RecordingPopupApp: React.FC = () => {
               qualityRequiresReview,
             }));
             try {
-              const { invoke } = await import('@tauri-apps/api/core');
-              await invoke('notify_recording_started', {
+              const { invokeCommand } = await import('@/lib/ipc');
+              await invokeCommand('notify_recording_started', {
                 noteTitle,
                 audioPath: savedPath,
                 language: selectedLanguageRef.current,
@@ -185,7 +186,7 @@ const RecordingPopupApp: React.FC = () => {
               });
             } catch {}
           } catch (err) {
-            console.error('Failed to finalize recording on close:', err);
+            logger.error("recording.finalize_on_close_failed", { error: errorMessage(err) });
           }
           await appWindow.destroy();
         }
@@ -275,7 +276,7 @@ const RecordingPopupApp: React.FC = () => {
       setIsPaused(false);
       setTime(0);
     } catch (err) {
-      console.error("Failed to start recording:", err);
+      logger.error("recording.start_failed", { error: errorMessage(err) });
       showRecorderError('start', err);
     }
   };
@@ -304,7 +305,7 @@ const RecordingPopupApp: React.FC = () => {
       await recordingService.setPaused(nextPaused);
       setIsPaused(nextPaused);
     } catch (err) {
-      console.error('Failed to change pause state:', err);
+      logger.error("recording.pause_toggle_failed", { error: errorMessage(err) });
       showRecorderError(nextPaused ? 'pause' : 'resume', err);
     }
   };
@@ -355,7 +356,7 @@ const RecordingPopupApp: React.FC = () => {
         const { recordingService } = await import('@/features/recording/api/recording.service');
         savedPath = await recordingService.stopRecording();
         quality = await recordingService.getQualityReport(savedPath).catch((error) => {
-          console.warn('Failed to read recording quality report:', error);
+          logger.warn("recording.quality_report_failed", { error: errorMessage(error) });
           return null;
         });
         const { generateNoteTitle } = await import('@/features/note-generation/audio-processor.service');
@@ -365,7 +366,7 @@ const RecordingPopupApp: React.FC = () => {
         // The backend recorder is already torn down on a failed stop. Stay in the
         // idle state (not LIVE) so the user can't "finish" again and reprocess a
         // corrupt take; surface the error instead.
-        console.error("Failed to stop recording:", err);
+        logger.error("recording.stop_failed", { error: errorMessage(err) });
         showRecorderError('finish', err);
         return;
       } finally {
@@ -391,8 +392,8 @@ const RecordingPopupApp: React.FC = () => {
         qualityRequiresReview,
       }));
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('notify_recording_started', {
+        const { invokeCommand } = await import('@/lib/ipc');
+        await invokeCommand('notify_recording_started', {
           noteTitle,
           audioPath: savedPath,
           language: selectedLanguage,
@@ -417,7 +418,7 @@ const RecordingPopupApp: React.FC = () => {
     try {
       await win.close();
     } catch (err) {
-      console.error("Failed to close window:", err);
+      logger.error("recording.window_close_failed", { error: errorMessage(err) });
     }
     setTimeout(() => {
       win.destroy().catch(() => {});

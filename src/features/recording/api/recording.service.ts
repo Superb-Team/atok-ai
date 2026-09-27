@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from '@/lib/ipc';
 import { appDataDir, join } from '@tauri-apps/api/path';
 import {
   createRecordingNoteContext,
@@ -109,13 +109,13 @@ export class RecordingService {
   }
 
   static async listProcessingJobs(): Promise<ProcessingJobSummary[]> {
-    return invoke<ProcessingJobSummary[]>('list_processing_manifests', {
+    return invokeCommand<ProcessingJobSummary[]>('list_processing_manifests', {
       directory: await this.getRecordingsDir(),
     });
   }
 
   static async saveGlossary(audioPath: string, glossary: string[]): Promise<void> {
-    await invoke('save_recording_glossary', { audioPath, terms: glossary });
+    await invokeCommand('save_recording_glossary', { audioPath, terms: glossary });
   }
 
   /**
@@ -123,18 +123,18 @@ export class RecordingService {
    * Returns structured device info sorted with default first.
    */
   static async listInputDevices(): Promise<AudioDeviceInfo[]> {
-    return await invoke<AudioDeviceInfo[]>('list_audio_input_devices');
+    return await invokeCommand<AudioDeviceInfo[]>('list_audio_input_devices');
   }
 
   /**
    * Get mic + system audio availability status.
    */
   static async getDeviceStatus(): Promise<DeviceStatus> {
-    return await invoke<DeviceStatus>('get_audio_device_status');
+    return await invokeCommand<DeviceStatus>('get_audio_device_status');
   }
 
   static async getQualityReport(audioPath: string): Promise<AudioQualityReport | null> {
-    return await invoke<AudioQualityReport | null>('get_recording_quality_report', { audioPath });
+    return await invokeCommand<AudioQualityReport | null>('get_recording_quality_report', { audioPath });
   }
 
   /**
@@ -149,13 +149,13 @@ export class RecordingService {
     glossary: string[] = [],
   ): Promise<RecordingStartInfo> {
     const recordingsDir = await this.getRecordingsDir();
-    await invoke('ensure_recordings_dir', { path: recordingsDir });
+    await invokeCommand('ensure_recordings_dir', { path: recordingsDir });
 
     const context = createRecordingNoteContext();
     const timestamp = context.recordedAt.replace(/[:.]/g, '-');
     const outputPath = await join(recordingsDir, `recording-${timestamp}.mp3`);
 
-    await invoke('start_desktop_recording', {
+    await invokeCommand('start_desktop_recording', {
       outputPath,
       micDevice: micDevice ?? null,
       language: language ?? 'id',
@@ -174,14 +174,14 @@ export class RecordingService {
   }
 
   static async setPaused(paused: boolean): Promise<void> {
-    await invoke('set_desktop_recording_paused', { paused });
+    await invokeCommand('set_desktop_recording_paused', { paused });
   }
 
   /**
    * Stop the current recording
    */
   static async stopRecording(): Promise<string> {
-    await invoke('stop_desktop_recording');
+    await invokeCommand('stop_desktop_recording');
 
     const savedPath = this.currentRecordingPath;
     this.currentRecordingPath = null;

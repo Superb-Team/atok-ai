@@ -16,6 +16,7 @@ import { authService } from "@/features/auth/api/auth.service";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import { Check, Sparkle, Wrench } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
+import { errorMessage, logger } from "@/lib/logger";
 
 type ChatStatus = "ready" | "submitted" | "streaming" | "error";
 
@@ -69,7 +70,7 @@ export default function AIChatInterface() {
 
     const user = authService.getUser();
     if (!user) {
-      console.error("User not authenticated");
+      logger.warn("search_ai.not_authenticated");
       return;
     }
 
@@ -167,7 +168,7 @@ export default function AIChatInterface() {
 
       setStatus("ready");
     } catch (error) {
-      console.error("Error sending message:", error);
+      logger.error("search_ai.message_failed", { error: errorMessage(error) });
       setStatus("error");
 
       const errorMsg = error instanceof Error ? error.message : "An unknown error occurred";

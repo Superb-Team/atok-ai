@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from '@/lib/ipc';
 
 export interface McpAuthConnection {
   id: number;
@@ -36,15 +36,10 @@ export class McpService {
    * Get all MCP connections for a user
    */
   static async getConnections(userId: string): Promise<McpAuthConnection[]> {
-    try {
-      const connections = await invoke<McpAuthConnection[]>('get_mcp_connections', {
-        userId,
-      });
-      return connections;
-    } catch (error) {
-      console.error('Failed to get MCP connections:', error);
-      throw error;
-    }
+    const connections = await invokeCommand<McpAuthConnection[]>('get_mcp_connections', {
+      userId,
+    });
+    return connections;
   }
 
   /**
@@ -54,16 +49,11 @@ export class McpService {
     userId: string,
     provider: string
   ): Promise<McpAuthConnection | null> {
-    try {
-      const connection = await invoke<McpAuthConnection | null>('get_mcp_connection', {
-        userId,
-        provider,
-      });
-      return connection;
-    } catch (error) {
-      console.error(`Failed to get ${provider} connection:`, error);
-      throw error;
-    }
+    const connection = await invokeCommand<McpAuthConnection | null>('get_mcp_connection', {
+      userId,
+      provider,
+    });
+    return connection;
   }
 
   /**
@@ -73,16 +63,11 @@ export class McpService {
     userId: string,
     request: CreateMcpAuthRequest
   ): Promise<McpAuthConnection> {
-    try {
-      const connection = await invoke<McpAuthConnection>('create_mcp_connection', {
-        userId,
-        request,
-      });
-      return connection;
-    } catch (error) {
-      console.error('Failed to create MCP connection:', error);
-      throw error;
-    }
+    const connection = await invokeCommand<McpAuthConnection>('create_mcp_connection', {
+      userId,
+      request,
+    });
+    return connection;
   }
 
   /**
@@ -93,33 +78,23 @@ export class McpService {
     provider: string,
     request: UpdateMcpAuthRequest
   ): Promise<McpAuthConnection> {
-    try {
-      const connection = await invoke<McpAuthConnection>('update_mcp_connection', {
-        userId,
-        provider,
-        request,
-      });
-      return connection;
-    } catch (error) {
-      console.error(`Failed to update ${provider} connection:`, error);
-      throw error;
-    }
+    const connection = await invokeCommand<McpAuthConnection>('update_mcp_connection', {
+      userId,
+      provider,
+      request,
+    });
+    return connection;
   }
 
   /**
    * Delete an MCP connection
    */
   static async deleteConnection(userId: string, provider: string): Promise<string> {
-    try {
-      const message = await invoke<string>('delete_mcp_connection', {
-        userId,
-        provider,
-      });
-      return message;
-    } catch (error) {
-      console.error(`Failed to delete ${provider} connection:`, error);
-      throw error;
-    }
+    const message = await invokeCommand<string>('delete_mcp_connection', {
+      userId,
+      provider,
+    });
+    return message;
   }
 
   /**
@@ -127,13 +102,12 @@ export class McpService {
    */
   static async testConnection(provider: string, accessToken: string): Promise<boolean> {
     try {
-      const isValid = await invoke<boolean>('test_mcp_connection', {
+      const isValid = await invokeCommand<boolean>('test_mcp_connection', {
         provider,
         accessToken,
       });
       return isValid;
-    } catch (error) {
-      console.error(`Failed to test ${provider} connection:`, error);
+    } catch {
       return false;
     }
   }

@@ -19,12 +19,13 @@ import { NoteEditSession } from "@/features/notes/editor/NoteEditSession";
 import { formatNoteWithAi } from "@/features/notes/lib/note-format";
 import { resolveNoteImprovementRoute } from "@/features/recording/lib/recording-job-selection";
 import type { ProcessingJobSummary } from "@/features/recording/api/recording.service";
+import { errorMessage, logger } from "@/lib/logger";
 
 class ErrorBoundary extends Component<{ fallback: React.ReactNode; children: React.ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
   static getDerivedStateFromError() { return { hasError: true }; }
   componentDidCatch(error: unknown) {
-    console.error("Markdown rendering failed; showing raw note text instead:", error);
+    logger.error("notes.markdown_render_failed", { error: errorMessage(error) });
   }
   render() {
     if (this.state.hasError) return this.props.fallback;
@@ -115,7 +116,7 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
       const fetchedNote = await noteService.getNote(noteId, user.id);
       setNote(fetchedNote);
     } catch (err) {
-      console.error("Failed to load note:", err);
+      logger.error("notes.load_failed", { error: errorMessage(err) });
       setError(err instanceof Error ? err.message : "Failed to load note");
     } finally {
       setLoading(false);
@@ -132,7 +133,7 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
       await noteService.toggleFavorite(note.id, user.id);
       await loadNote();
     } catch (error) {
-      console.error("Failed to toggle favorite:", error);
+      logger.error("notes.favorite_toggle_failed", { error: errorMessage(error) });
     }
   };
 
@@ -298,7 +299,7 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
         return;
       }
     } catch (error) {
-      console.error("Recording source lookup failed", error);
+      logger.error("notes.recording_source_lookup_failed", { error: errorMessage(error) });
       if (note.recorded_at) {
         setAiDraftError("Sumber rekaman gagal dimuat. Catatan asli tetap aman dan tidak diubah.");
         return;
@@ -367,7 +368,7 @@ export default function NoteViewPage({ noteId, onBack }: NoteViewPageProps) {
       await noteService.deleteNote(note.id, user.id);
       onBack();
     } catch (error) {
-      console.error("Failed to delete note:", error);
+      logger.error("notes.delete_failed", { error: errorMessage(error) });
       setError("Failed to delete note");
       setDeleting(false);
     }

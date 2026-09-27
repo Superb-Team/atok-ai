@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from '@/lib/ipc';
 
 export interface AgentMessage {
   role: 'system' | 'user' | 'assistant';
@@ -25,9 +25,8 @@ export const agentService = {
    */
   async ensureCollection(userId: string): Promise<boolean> {
     try {
-      return await invoke<boolean>('agent_ensure_collection', { userId });
-    } catch (error) {
-      console.error('Error ensuring collection:', error);
+      return await invokeCommand<boolean>('agent_ensure_collection', { userId });
+    } catch {
       return false;
     }
   },
@@ -49,7 +48,7 @@ export const agentService = {
 
       messages.push({ role: 'user', content: request.prompt });
 
-      const response = await invoke<string>('ai_chat_stream', { messages });
+      const response = await invokeCommand<string>('ai_chat_stream', { messages });
 
       if (response) {
         yield { type: 'content', content: response };

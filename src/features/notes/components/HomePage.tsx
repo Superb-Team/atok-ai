@@ -8,6 +8,7 @@ import { installAsyncListener } from "@/features/recording/lib/recording-process
 import { shouldRecoverProcessingJob } from "@/features/note-generation/lib/processing-review-policy";
 import { recordingProcessingErrorMessage } from "@/features/recording/lib/recording-error-message";
 import { blockingQualityWarnings, requiresCaptureReview } from "@/features/recording/lib/recording-quality-policy";
+import { errorMessage as describeError, logger } from "@/lib/logger";
 
 function captureQualityGuidance(warnings: string[]): string {
   const guidance = new Set<string>();
@@ -278,7 +279,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
 
       await loadNotes();
     } catch (err) {
-      console.error("Recording processing failed:", err);
+      logger.error("notes.recording_processing_failed", { error: describeError(err) });
       const errorMessage = recordingProcessingErrorMessage(err);
       setAlertMessage(`Recording processing failed:\n${errorMessage}`);
 
@@ -300,7 +301,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
       await noteService.toggleFavorite(noteId, user.id);
       await loadNotes();
     } catch (err) {
-      console.error("Failed to toggle favorite:", err);
+      logger.error("notes.favorite_toggle_failed", { error: describeError(err) });
     } finally {
       setPendingFavorites((prev) => {
         const next = new Set(prev);

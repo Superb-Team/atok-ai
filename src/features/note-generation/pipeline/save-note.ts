@@ -5,6 +5,7 @@ import { markProcessingFinished } from "@/features/note-generation/lib/manifest-
 import { shouldPublishRecordingToRag } from "@/features/note-generation/lib/processing-review-policy";
 import type { RecordingNoteContext } from "@/features/recording/lib/recording-note-metadata";
 import { markStage, type ProcessingRun } from "@/features/note-generation/pipeline/processing-run";
+import { logger } from "@/lib/logger";
 
 export async function saveNote(
   title: string,
@@ -72,21 +73,19 @@ export async function saveGeneratedNote(run: ProcessingRun, note: GeneratedNote)
     } catch (error) {
       if (!(error instanceof NoteConflictError)) throw error;
       noteWasManuallyEdited = true;
-      console.warn(JSON.stringify({
-        event: "recording_note_manual_edit_preserved",
+      logger.warn("note_generation.manual_edit_preserved", {
         jobId: manifest.jobId,
         noteId: manifest.savedNoteId,
-      }));
+      });
     }
   } else {
     // Older manifests do not contain the version that was originally saved.
     // Updating them blindly could erase a user's later manual edits.
     noteWasManuallyEdited = true;
-    console.warn(JSON.stringify({
-      event: "recording_note_legacy_version_unknown",
+    logger.warn("note_generation.legacy_version_unknown", {
       jobId: manifest.jobId,
       noteId: manifest.savedNoteId,
-    }));
+    });
   }
 
   if (shouldPublishRecordingToRag({
@@ -119,11 +118,10 @@ export async function saveGeneratedNote(run: ProcessingRun, note: GeneratedNote)
     timings: run.timings,
   });
   await run.persist();
-  console.log(JSON.stringify({
-    event: "recording_processing_completed",
+  logger.info("note_generation.completed", {
     jobId: manifest.jobId,
     status: manifest.status,
     enhancementMode: manifest.enhancementMode,
-    timingsMs: run.timings,
-  }));
+    timingsMs: JSON.stringify(run.timings),
+  });
 }

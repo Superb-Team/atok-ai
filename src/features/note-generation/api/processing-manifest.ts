@@ -1,9 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCommand } from "@/lib/ipc";
 import type { ProcessingManifest } from "@/features/note-generation/types";
+import { errorMessage, logger } from "@/lib/logger";
 
 // A read failure must not look like "no manifest" — that drops savedNoteId and duplicates the note.
 export async function loadProcessingManifest(audioPath: string): Promise<ProcessingManifest | null> {
-  const manifest = await invoke<ProcessingManifest | null>("load_processing_manifest", { audioPath });
+  const manifest = await invokeCommand<ProcessingManifest | null>("load_processing_manifest", { audioPath });
   if (!manifest || manifest.schemaVersion !== 1 || manifest.audioPath !== audioPath) return null;
   // Legacy v1 manifests predate compare-and-swap generations.
   manifest.generation ??= 0;
@@ -12,7 +13,7 @@ export async function loadProcessingManifest(audioPath: string): Promise<Process
 
 export async function saveProcessingManifest(manifest: ProcessingManifest): Promise<void> {
   manifest.updatedAt = new Date().toISOString();
-  const saved = await invoke<ProcessingManifest>("save_processing_manifest", {
+  const saved = await invokeCommand<ProcessingManifest>("save_processing_manifest", {
     audioPath: manifest.audioPath,
     manifest,
   });
@@ -21,15 +22,14 @@ export async function saveProcessingManifest(manifest: ProcessingManifest): Prom
 }
 
 export function claimProcessingJob(audioPath: string, runId: string): Promise<boolean> {
-  return invoke<boolean>("claim_processing_job", { audioPath, runId });
+  return invokeCommand<boolean>("claim_processing_job", { audioPath, runId });
 }
 
 // A leaked claim blocks every later run and reports as "already processing" — never swallow it.
 export async function releaseProcessingJob(audioPath: string, runId: string): Promise<void> {
-  await invoke("release_processing_job", { audioPath, runId }).catch((error) => {
-    console.error(JSON.stringify({
-      event: "recording_claim_release_failed",
-      reason: String(error),
-    }));
+  await invokeCommand("release_processing_job", { audioPath, runId }).catch((error) => {
+    logger.error("note_generation.claim_release_failed", {
+      reason: errorMessage(error),
+    });
   });
 }
