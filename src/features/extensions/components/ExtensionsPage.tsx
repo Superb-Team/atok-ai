@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { mcpService, McpAuthConnection } from '@/services/mcp.service';
-import { authService } from '@/services/auth.service';
+import { mcpService, McpAuthConnection } from '@/features/extensions/api/mcp.service';
+import { authService } from '@/features/auth/api/auth.service';
 import { Github, Plug, Trash2, CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';

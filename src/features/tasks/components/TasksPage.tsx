@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { CheckCircle2, Circle, Clock, GripVertical } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
-import { taskService } from '@/services/task.service';
-import { authService } from '@/services/auth.service';
-import type { Task as DBTask, TaskPositionUpdate } from '@/types/task.types';
+import { taskService } from '@/features/tasks/api/task.service';
+import { authService } from '@/features/auth/api/auth.service';
+import type { Task as DBTask, TaskPositionUpdate } from '@/features/tasks/types';
 import {
   DndContext,
   DragOverlay,

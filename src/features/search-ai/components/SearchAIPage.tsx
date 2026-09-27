@@ -11,8 +11,8 @@ import {
   PromptInputTextarea,
   PromptInputToolbar,
 } from "@/components/ui/shadcn-io/ai/prompt-input";
-import { agentService, type AgentMessage } from "@/services/agent.service";
-import { authService } from "@/services/auth.service";
+import { agentService, type AgentMessage } from "@/features/search-ai/api/agent.service";
+import { authService } from "@/features/auth/api/auth.service";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import { Check, Sparkle, Wrench } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";

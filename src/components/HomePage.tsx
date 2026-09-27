@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { noteService } from "@/services/note.service";
-import { authService } from "@/services/auth.service";
+import { authService } from "@/features/auth/api/auth.service";
 import type { Note } from "@/types/note.types";
 import { FileText, Loader2, Search, Star, X } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";

@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { authService } from '@/services/auth.service';
+import { authService } from '@/features/auth/api/auth.service';
 import { BadgeCheck } from 'lucide-react';
-import type { User } from '@/types/auth.types';
+import type { User } from '@/features/auth/types';
 import { getThemePreference, setThemePreference, type ThemePreference } from '@/lib/theme';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [

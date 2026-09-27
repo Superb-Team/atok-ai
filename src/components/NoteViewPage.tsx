@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, Component } from "react";
 import { noteService } from "@/services/note.service";
-import { authService } from "@/services/auth.service";
+import { authService } from "@/features/auth/api/auth.service";
 import type { Note } from "@/types/note.types";
 import { ArrowLeft, Star, Trash2, Edit, Paperclip, Sparkles } from "lucide-react";
 import { noteAssetService } from "@/services/note-asset.service";

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { NoteConflictError, noteService } from "@/services/note.service";
-import { authService } from "@/services/auth.service";
+import { authService } from "@/features/auth/api/auth.service";
 import type { Note } from "@/types/note.types";
 import { noteAssetService, type RecordingAsset } from "@/services/note-asset.service";
 import {

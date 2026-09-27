@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Task, CreateTaskRequest, TaskPositionUpdate } from "@/types/task.types";
+import type { Task, CreateTaskRequest, TaskPositionUpdate } from "@/features/tasks/types";
 
 export const taskService = {
   async getTasks(userId: string): Promise<Task[]> {

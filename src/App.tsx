@@ -1,18 +1,18 @@
-import ExtensionsPage from "@/components/ExtensionsPage";
-import TasksPage from "@/components/TasksPage";
+import ExtensionsPage from "@/features/extensions/components/ExtensionsPage";
+import TasksPage from "@/features/tasks/components/TasksPage";
 import HomePage from "@/components/HomePage";
 import NoteViewPage from "@/components/NoteViewPage";
-import SettingsPage from "@/components/SettingsPage";
+import SettingsPage from "@/features/settings/components/SettingsPage";
 import CreateNoteDialog from "@/components/CreateNoteDialog";
 import ImportAudioDialog from "@/components/ImportAudioDialog";
-import LoginPage from "@/components/auth/LoginPage";
-import SignUpPage from "@/components/auth/SignUpPage";
+import LoginPage from "@/features/auth/components/LoginPage";
+import SignUpPage from "@/features/auth/components/SignUpPage";
 import FloatingActionMenu from "@/components/ui/floating-action-menu";
 import { AppSidebar, type SidebarItem } from "@/components/ui/sidebar";
 import { applyTheme, watchSystemTheme } from "@/lib/theme";
-import AIChatInterface from "@/searchAI/page";
-import { agentService } from "@/services/agent.service";
-import { authService } from "@/services/auth.service";
+import AIChatInterface from "@/features/search-ai/components/SearchAIPage";
+import { agentService } from "@/features/search-ai/api/agent.service";
+import { authService } from "@/features/auth/api/auth.service";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import {

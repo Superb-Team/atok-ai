@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AuthResponse, LoginCredentials, RegisterData, User } from "@/types/auth.types";
+import type { AuthResponse, LoginCredentials, RegisterData, User } from "@/features/auth/types";
 
 export const authService = {
   async register(data: RegisterData): Promise<AuthResponse> {
