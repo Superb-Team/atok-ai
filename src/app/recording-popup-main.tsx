@@ -1,7 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import RecordingPopupApp from '@/features/recording/components/RecordingPopupApp'
-import './App.css'
+import '@/styles/globals.css'
 
 ReactDOM.createRoot(document.getElementById('recording-popup-root')!).render(
   <React.StrictMode>

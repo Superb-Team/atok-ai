@@ -27,7 +27,7 @@ import {
   Upload,
 } from "lucide-react";
 import { useState, useEffect } from "react";
-import "./App.css";
+import "@/styles/globals.css";
 
 function App() {
   const [currentPage, setCurrentPage] = useState("home");
