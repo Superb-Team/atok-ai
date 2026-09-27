@@ -12,6 +12,8 @@ mod auth;
 mod config;
 mod database;
 mod durable_io;
+mod http_log;
+mod logging;
 mod mcp_auth;
 mod models;
 mod note_assets;
@@ -221,13 +223,83 @@ async fn get_audio_device_status() -> Result<DeviceStatus, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let command_handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        auth::register,
+        auth::login,
+        auth::forgot_password,
+        auth::reset_password,
+        auth::get_current_user,
+        notes::get_notes,
+        notes::get_note,
+        notes::create_note,
+        notes::create_recording_note,
+        notes::update_note,
+        notes::delete_note,
+        notes::toggle_favorite,
+        tasks::get_tasks,
+        tasks::create_task,
+        tasks::update_task,
+        tasks::delete_task,
+        tasks::toggle_task_completion,
+        tasks::update_task_positions,
+        tasks::clear_column_tasks,
+        mcp_auth::get_mcp_connections,
+        mcp_auth::get_mcp_connection,
+        mcp_auth::create_mcp_connection,
+        mcp_auth::update_mcp_connection,
+        mcp_auth::delete_mcp_connection,
+        mcp_auth::test_mcp_connection,
+        agent::transcribe_audio,
+        agent::ensure_recordings_dir,
+        agent::ai_chat,
+        agent::ai_chat_detailed,
+        agent::ai_chat_detailed_strict,
+        agent::get_ai_model_limits,
+        agent::ai_chat_stream,
+        agent::agent_insert_document,
+        agent::agent_check_collection,
+        agent::agent_create_collection,
+        agent::agent_ensure_collection,
+        audio_import::import_audio_file,
+        agent::describe_image,
+        note_assets::import_note_asset,
+        note_assets::capture_screenshot,
+        note_assets::record_screenshot_asset,
+        note_assets::take_recording_assets,
+        processing_jobs::save_processing_manifest,
+        processing_jobs::load_processing_manifest,
+        processing_jobs::list_processing_manifests,
+        transcript_integrity::evaluate_transcript_integrity,
+        transcript_integrity::accept_transcript_revision,
+        transcription_glossary::save_recording_glossary,
+        processing_jobs::claim_processing_job,
+        processing_jobs::release_processing_job,
+        start_desktop_recording,
+        stop_desktop_recording,
+        set_desktop_recording_paused,
+        get_aec_enabled,
+        set_aec_enabled,
+        notify_recording_started,
+        list_audio_input_devices,
+        get_audio_device_status,
+        get_recording_quality_report,
+    ];
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_log::Builder::new().skip_logger().build())
         .setup(|app| {
+            match app.path().app_log_dir() {
+                Ok(dir) => {
+                    if let Err(error) = logging::init(&dir) {
+                        eprintln!("File logging disabled: {error}");
+                    }
+                }
+                Err(error) => eprintln!("File logging disabled, no log directory: {error}"),
+            }
             match config::load_environment(app)? {
-                Some(path) => println!("Loaded environment from {}", path.display()),
-                None => println!("WARNING: no environment file found"),
+                Some(path) => tracing::info!(path = %path.display(), "config.environment_loaded"),
+                None => tracing::warn!("config.environment_missing"),
             }
             // If DB is unreachable, commands return clear errors rather than failing setup.
             let db = tauri::async_runtime::block_on(database::init_database());
@@ -250,67 +322,10 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            auth::register,
-            auth::login,
-            auth::forgot_password,
-            auth::reset_password,
-            auth::get_current_user,
-            notes::get_notes,
-            notes::get_note,
-            notes::create_note,
-            notes::create_recording_note,
-            notes::update_note,
-            notes::delete_note,
-            notes::toggle_favorite,
-            tasks::get_tasks,
-            tasks::create_task,
-            tasks::update_task,
-            tasks::delete_task,
-            tasks::toggle_task_completion,
-            tasks::update_task_positions,
-            tasks::clear_column_tasks,
-            mcp_auth::get_mcp_connections,
-            mcp_auth::get_mcp_connection,
-            mcp_auth::create_mcp_connection,
-            mcp_auth::update_mcp_connection,
-            mcp_auth::delete_mcp_connection,
-            mcp_auth::test_mcp_connection,
-            agent::transcribe_audio,
-            agent::ensure_recordings_dir,
-            agent::ai_chat,
-            agent::ai_chat_detailed,
-            agent::ai_chat_detailed_strict,
-            agent::get_ai_model_limits,
-            agent::ai_chat_stream,
-            agent::agent_insert_document,
-            agent::agent_check_collection,
-            agent::agent_create_collection,
-            agent::agent_ensure_collection,
-            audio_import::import_audio_file,
-            agent::describe_image,
-            note_assets::import_note_asset,
-            note_assets::capture_screenshot,
-            note_assets::record_screenshot_asset,
-            note_assets::take_recording_assets,
-            processing_jobs::save_processing_manifest,
-            processing_jobs::load_processing_manifest,
-            processing_jobs::list_processing_manifests,
-            transcript_integrity::evaluate_transcript_integrity,
-            transcript_integrity::accept_transcript_revision,
-            transcription_glossary::save_recording_glossary,
-            processing_jobs::claim_processing_job,
-            processing_jobs::release_processing_job,
-            start_desktop_recording,
-            stop_desktop_recording,
-            set_desktop_recording_paused,
-            get_aec_enabled,
-            set_aec_enabled,
-            notify_recording_started,
-            list_audio_input_devices,
-            get_audio_device_status,
-            get_recording_quality_report,
-        ])
+        .invoke_handler(move |invoke| {
+            logging::log_command_received(&invoke);
+            command_handler(invoke)
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

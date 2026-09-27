@@ -235,13 +235,15 @@ pub async fn test_mcp_connection(
     match provider.as_str() {
         "github" => {
             let client = reqwest::Client::new();
-            let response = client
-                .get("https://api.github.com/user")
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("User-Agent", "atok-ai")
-                .send()
-                .await
-                .map_err(|e| format!("Failed to test GitHub connection: {}", e))?;
+            let response = crate::http_log::send(
+                "mcp_github_test",
+                client
+                    .get("https://api.github.com/user")
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .header("User-Agent", "atok-ai"),
+            )
+            .await
+            .map_err(|e| format!("Failed to test GitHub connection: {}", e))?;
 
             Ok(response.status().is_success())
         }

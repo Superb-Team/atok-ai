@@ -194,11 +194,13 @@ pub async fn get_ai_model_limits() -> Result<ModelLimits, String> {
             .unwrap_or_else(|| "https://api.deepinfra.com/v1/models".to_string())
     });
 
-    let fetched = build_provider_client(Duration::from_secs(15))?
-        .get(models_url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .send()
-        .await;
+    let fetched = crate::http_log::send(
+        "ai_model_limits",
+        build_provider_client(Duration::from_secs(15))?
+            .get(models_url)
+            .header("Authorization", format!("Bearer {}", api_key)),
+    )
+    .await;
     let limits = match fetched {
         Ok(response) if response.status().is_success() => match response.json().await {
             Ok(data) => parse_model_limits(&data, &model).unwrap_or_else(|error| {
@@ -265,13 +267,15 @@ async fn post_chat_with_retry(
     let mut last_error = String::new();
 
     for attempt in 1..=MAX_ATTEMPTS {
-        match client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(body)
-            .send()
-            .await
+        match crate::http_log::send(
+            "ai_chat",
+            client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(body),
+        )
+        .await
         {
             Ok(response) if !is_retryable_status(response.status()) => return Ok(response),
             Ok(response) => {
@@ -604,14 +608,16 @@ pub async fn describe_image(image_path: String, language: String) -> Result<Stri
     });
 
     let client = build_provider_client(chat_request_deadline())?;
-    let response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Vision request failed: {}", e))?;
+    let response = crate::http_log::send(
+        "ai_describe_image",
+        client
+            .post(format!("{}/chat/completions", base_url))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body),
+    )
+    .await
+    .map_err(|e| format!("Vision request failed: {}", e))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -667,14 +673,16 @@ pub async fn ai_chat_stream(
         "stream": true,
     });
 
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Chat stream request failed: {}", e))?;
+    let response = crate::http_log::send(
+        "ai_chat_stream",
+        client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body),
+    )
+    .await
+    .map_err(|e| format!("Chat stream request failed: {}", e))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1959,13 +1967,15 @@ async fn transcribe_chunk_with_client(
 
     let url = whisper_model_url();
 
-    let response = client
-        .post(url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("Transcription request failed: {}", e))?;
+    let response = crate::http_log::send(
+        "whisper_transcribe",
+        client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .multipart(form),
+    )
+    .await
+    .map_err(|e| format!("Transcription request failed: {}", e))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -2006,14 +2016,16 @@ pub async fn agent_insert_document(
         "metadata": metadata.unwrap_or_default(),
     });
 
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("X-API-Key", &api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("RAG insert request failed: {}", e))?;
+    let response = crate::http_log::send(
+        "rag_insert_document",
+        client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-API-Key", &api_key)
+            .json(&body),
+    )
+    .await
+    .map_err(|e| format!("RAG insert request failed: {}", e))?;
 
     if response.status().is_success() {
         Ok(true)
@@ -2031,12 +2043,12 @@ pub async fn agent_check_collection(user_id: String) -> Result<bool, String> {
     let client = Client::new();
     let url = format!("{}/opensearch/collection/check/{}", base_url, user_id);
 
-    let response = client
-        .get(&url)
-        .header("X-API-Key", &api_key)
-        .send()
-        .await
-        .map_err(|e| format!("Collection check failed: {}", e))?;
+    let response = crate::http_log::send(
+        "rag_check_collection",
+        client.get(&url).header("X-API-Key", &api_key),
+    )
+    .await
+    .map_err(|e| format!("Collection check failed: {}", e))?;
 
     if response.status().is_success() {
         let data: serde_json::Value = response
@@ -2058,14 +2070,16 @@ pub async fn agent_create_collection(user_id: String) -> Result<bool, String> {
 
     let body = serde_json::json!({ "user_id": user_id });
 
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("X-API-Key", &api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Collection create failed: {}", e))?;
+    let response = crate::http_log::send(
+        "rag_create_collection",
+        client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-API-Key", &api_key)
+            .json(&body),
+    )
+    .await
+    .map_err(|e| format!("Collection create failed: {}", e))?;
 
     if response.status().is_success() {
         Ok(true)
