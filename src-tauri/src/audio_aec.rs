@@ -78,11 +78,11 @@ impl AudioAec {
 
         match Self::try_init(config) {
             Ok(aec) => {
-                eprintln!("[AEC] Initialized successfully");
+                tracing::info!("[AEC] Initialized successfully");
                 aec
             }
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "[AEC] Init failed: {}. Recording will proceed without echo cancellation.",
                     e
                 );
@@ -103,7 +103,7 @@ impl AudioAec {
         match self.try_process_chunk(sys_pcm, mic_pcm) {
             Ok(result) => result,
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "[AEC] Processing error: {}. Passing mic through unchanged.",
                     e
                 );

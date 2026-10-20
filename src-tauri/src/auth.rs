@@ -18,7 +18,9 @@ struct Claims {
 
 fn get_jwt_secret() -> String {
     std::env::var("JWT_SECRET").unwrap_or_else(|_| {
-        eprintln!("WARNING: JWT_SECRET not set in .env! Using fallback dev key. THIS IS INSECURE.");
+        tracing::warn!(
+            "WARNING: JWT_SECRET not set in .env! Using fallback dev key. THIS IS INSECURE."
+        );
         "atok-ai-super-secret-jwt-key-development-2025".to_string()
     })
 }

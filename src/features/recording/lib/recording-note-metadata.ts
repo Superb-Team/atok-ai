@@ -1,0 +1,141 @@
+import { getDocumentHeading, replaceDocumentHeading } from "../../note-generation/lib/note-markdown.ts";
+
+export interface RecordingNoteContext {
+  recordedAt: string;
+  timezone: string;
+}
+
+const GENERIC_TITLE_PATTERN =
+  /^(?:recording|voice recording|meeting|meeting notes?|recording notes?|progress meeting|catatan rekaman|catatan|catatan rapat|rapat|rekaman)(?:\s*[-–—:]\s*.*)?$/iu;
+const PLACEHOLDER_PATTERN =
+  /\[(?:tanggal|date|main topic|topic|judul|title)\]|\{(?:tanggal|date|main topic|topic|judul|title)\}|<(?:tanggal|date|main topic|topic|judul|title)>/iu;
+const CONVERSATIONAL_TITLE_PATTERN =
+  /^(?:berapa|kenapa|mengapa|gimana|bagaimana|siapa|kapan|di mana|dimana|apakah|kok|nah|jadi|terus|lalu|tadi)\b/iu;
+const ORDINAL_LABEL_PATTERN =
+  /^(?:pertanyaan|bagian|poin|topik|sesi|bab|part|section|question|point|topic|chapter)\s+(?:\d+|pertama|kedua|ketiga|keempat|kelima|keenam|one|two|three|four|five|first|second|third)\b/iu;
+const INCOMPLETE_TITLE_END_PATTERN =
+  /\b(?:dan|atau|dengan|untuk|tentang|terkait|mengenai|mencakup|meliputi|berdasarkan|melalui|serta|and|or|with|for|about|including|based on|through)\s*$/iu;
+const TITLE_STOP_WORDS = new Set([
+  "yang", "dan", "atau", "dari", "untuk", "pada", "dengan", "dalam", "ini", "itu",
+  "the", "and", "for", "from", "with", "this", "that", "meeting", "rapat", "catatan",
+  "recording", "rekaman", "progress", "progres",
+]);
+
+export function createRecordingNoteContext(now = new Date()): RecordingNoteContext {
+  return {
+    recordedAt: now.toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  };
+}
+
+export function inferRecordingNoteContext(audioPath: string): RecordingNoteContext | undefined {
+  const fileName = audioPath.split(/[/\\]/).pop() ?? "";
+  const match = fileName.match(
+    /^recording-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.mp3$/u,
+  );
+  if (!match) return undefined;
+
+  const recordedAt = `${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}Z`;
+  return Number.isNaN(Date.parse(recordedAt))
+    ? undefined
+    : { recordedAt, timezone: "UTC" };
+}
+
+export function formatRecordedDate(
+  recordedAt: string,
+  timezone: string,
+  language: string,
+): string {
+  const locale = language === "id" ? "id-ID" : language || "en-US";
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      timeZone: timezone,
+    }).format(new Date(recordedAt));
+  } catch {
+    return new Intl.DateTimeFormat(locale, {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    }).format(new Date(recordedAt));
+  }
+}
+
+export function isUsefulGroundedTitle(value: string, transcript: string): boolean {
+  const title = cleanTitleCandidate(value);
+  if (title.length < 6 || title.length > 90) return false;
+  if (PLACEHOLDER_PATTERN.test(title) || GENERIC_TITLE_PATTERN.test(title)) return false;
+  if (
+    CONVERSATIONAL_TITLE_PATTERN.test(title)
+    || ORDINAL_LABEL_PATTERN.test(title)
+    || INCOMPLETE_TITLE_END_PATTERN.test(title)
+    || /[.?!]\s*$/u.test(title)
+  ) {
+    return false;
+  }
+
+  const transcriptWords = new Set(wordsIn(transcript));
+  const distinctiveTitleWords = wordsIn(title).filter(
+    (word) => word.length >= 4 && !TITLE_STOP_WORDS.has(word),
+  );
+  if (distinctiveTitleWords.length < 2) return false;
+  const groundedWords = distinctiveTitleWords.filter((word) => transcriptWords.has(word));
+  return groundedWords.length >= 2 &&
+    groundedWords.length * 2 >= distinctiveTitleWords.length;
+}
+
+export function deriveRecordingNoteTitle(
+  enhancedText: string,
+  transcript: string,
+  fallbackTitle: string,
+  context: RecordingNoteContext,
+  language: string,
+): string {
+  // Never scrape a body line: a section sub-heading is not the recording's topic.
+  const heading = readDocumentTitle(enhancedText);
+  const rawTopic = [heading, cleanTitleCandidate(fallbackTitle)]
+    .map(cleanTitleCandidate)
+    .find((candidate) => isUsefulGroundedTitle(candidate, transcript))
+    ?? (language === "id" ? "Catatan Rekaman" : "Recording Notes");
+  const date = formatRecordedDate(context.recordedAt, context.timezone, language);
+  const topic = rawTopic
+    .replace(new RegExp(`\\s*[-–—:]\\s*${escapeRegExp(date)}\\s*$`, "iu"), "")
+    .trim();
+
+  return `${capTitle(topic)} — ${date}`;
+}
+
+export function readDocumentTitle(markdown: string): string {
+  return getDocumentHeading(markdown)?.title ?? "";
+}
+
+export function replaceDocumentTitle(markdown: string, title: string): string {
+  return replaceDocumentHeading(markdown, title);
+}
+
+function wordsIn(value: string): string[] {
+  return (value.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
+}
+
+function cleanTitleCandidate(value: string): string {
+  return value
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[-*•]\s+/, "")
+    .replace(/\*\*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function capTitle(value: string): string {
+  if (value.length <= 90) return value;
+  const truncated = value.slice(0, 90);
+  const lastSpace = truncated.lastIndexOf(" ");
+  return (lastSpace > 40 ? truncated.slice(0, lastSpace) : truncated).trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

@@ -42,7 +42,7 @@ pub(crate) fn record(
     let session = RecordingSession::create(mp3_path)?;
     let session_path = session.path().to_path_buf();
 
-    eprintln!(
+    tracing::info!(
         "[recorder] macOS chunked capture: session={}, mic={}Hz/{}ch",
         session_path.display(),
         mic_sr,
