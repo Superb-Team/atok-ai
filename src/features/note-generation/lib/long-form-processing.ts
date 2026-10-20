@@ -1,3 +1,5 @@
+import { normalizeDiscussionHeadings } from "./note-markdown.ts";
+
 const ASSET_MARKER_PATTERN = /\[\[ATOK_ASSET_\d+\]\]/g;
 const LEXICAL_UNIT_PATTERN = /\[\[ATOK_ASSET_\d+\]\]|[^\S\r\n]+|[\r\n]+|[^\s]+/gu;
 
@@ -199,11 +201,7 @@ export function packByTokenBudget(values: string[], maxTokens: number): string[]
 }
 
 function normalizeTopicHeadings(markdown: string): string {
-  return markdown
-    .replace(/^#{1,6}\s+(?:Section|Part|Bagian)\s+\d+\s*$/gimu, "")
-    .replace(/^#{1,6}\s+(.+)$/gm, "### $1")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return normalizeDiscussionHeadings(markdown);
 }
 
 export function composeLongFormNote(

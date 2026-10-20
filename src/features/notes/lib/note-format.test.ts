@@ -192,3 +192,9 @@ test("repair prompt explicitly protects the anchors omitted by the first attempt
   assert.match(messages[0].content, /500/);
   assert.match(messages[1].content, /Rp 500 juta/);
 });
+
+test('numbered transcript evidence remains outside AI formatting', () => {
+  const transcript = '## 5. Complete Transcript\n\n7. Original words stay exactly as captured.';
+  const split = splitImmutableTranscript('## 1. Summary\n\nMeeting details.\n\n' + transcript);
+  assert.equal(split?.immutableTranscript, transcript);
+});

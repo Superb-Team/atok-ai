@@ -1,6 +1,6 @@
 import type { ProcessingFailureKind } from "@/features/note-generation/lib/processing-review-policy";
 
-export type ProcessingStatus = "transcribing" | "extracting" | "synthesizing" | "saving" | "complete" | "partial" | "failed";
+export type ProcessingStatus = "importing" | "transcribing" | "extracting" | "synthesizing" | "saving" | "complete" | "partial" | "failed";
 
 export interface ManifestSection {
   id: string;
@@ -16,6 +16,11 @@ export interface ProcessingManifest {
   schemaVersion: 1;
   generation: number;
   jobId: string;
+  ownerUserId?: string;
+  source?: "import" | "recording";
+  importSourcePath?: string;
+  importGlossary?: string[];
+  importPrepared?: boolean;
   audioPath: string;
   noteTitle: string;
   language: string;
@@ -65,6 +70,8 @@ export interface AudioProcessingResult {
 }
 
 export interface AudioProcessingOptions {
+  /** Background recovery must not rerun a job another worker already finished. */
+  resumeOnly?: boolean;
   /** Re-run AI enhancement even when the manifest already reached the current version. */
   forceAiUpgrade?: boolean;
   /** Generate and validate content without saving the note or mutating the manifest. */

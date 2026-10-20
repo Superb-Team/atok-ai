@@ -4,6 +4,7 @@ import HomePage from "@/features/notes/components/HomePage";
 import NoteViewPage from "@/features/notes/components/NoteViewPage";
 import SettingsPage from "@/features/settings/components/SettingsPage";
 import CreateNoteDialog from "@/features/notes/components/CreateNoteDialog";
+import { ImportProcessingProvider } from "@/features/recording/components/ImportProcessingProvider";
 import ImportAudioDialog from "@/features/recording/components/ImportAudioDialog";
 import LoginPage from "@/features/auth/components/LoginPage";
 import SignUpPage from "@/features/auth/components/SignUpPage";
@@ -217,6 +218,7 @@ function App() {
   const user = authService.getUser();
 
   return (
+    <ImportProcessingProvider key={user?.id} userId={user?.id ?? ""}>
     <div className="flex h-screen w-full overflow-hidden bg-background">
       <AppSidebar
         items={links}
@@ -272,6 +274,7 @@ function App() {
 
       <ImportAudioDialog open={importAudioOpen} onOpenChange={setImportAudioOpen} />
     </div>
+    </ImportProcessingProvider>
   );
 }
 

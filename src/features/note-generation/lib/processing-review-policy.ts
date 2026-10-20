@@ -1,5 +1,5 @@
 // Versioned so an explicit user regeneration can distinguish older AI drafts.
-export const CURRENT_AI_PIPELINE_VERSION = 15;
+export const CURRENT_AI_PIPELINE_VERSION = 16;
 // Bump when transcript normalization, track arbitration, or chunk stitching
 // changes. Old manifests must re-read the canonical sidecar instead of feeding
 // a previously hallucinated transcript back into note generation.
@@ -42,7 +42,7 @@ export const MAX_PROCESSING_ATTEMPTS = 4;
 
 export type ProcessingFailureKind = "retryable" | "terminal";
 
-const IN_FLIGHT_STATUSES = ["transcribing", "extracting", "synthesizing", "saving"];
+const IN_FLIGHT_STATUSES = ["importing", "transcribing", "extracting", "synthesizing", "saving"];
 
 // Mirrors is_retryable_transcription_error in src-tauri/src/agent.rs, widened to
 // the transport and provider failures the whole pipeline can surface.

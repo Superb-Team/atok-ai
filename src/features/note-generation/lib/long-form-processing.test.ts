@@ -163,3 +163,14 @@ test("placeholder action-item sections are omitted instead of published", () => 
     "# Rapat\n\n## Ringkasan\nIsi.\n\n## Pembahasan\nDetail.",
   );
 });
+
+test('composer preserves deeper topic hierarchy and fenced Markdown examples', () => {
+  const sections: ProcessedSection[] = [{
+    id: 'section-0001', index: 0, markers: [], isDegraded: false,
+    markdown: '# Part 1\n\n## CRM\n### Integration\n#### Scope 2\n\n```markdown\n## Literal heading\n7. Literal list\n```',
+  }];
+  const note = composeLongFormNote('# Meeting\n\n## Summary\nVerified discussion.', sections);
+  assert.match(note, /^### CRM\n#### Integration\n##### Scope 2/m);
+  assert.ok(note.includes('```markdown\n## Literal heading\n7. Literal list\n```'));
+  assert.doesNotMatch(note, /^# Part 1$/m);
+});

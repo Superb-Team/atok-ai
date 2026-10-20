@@ -1,4 +1,4 @@
-const TRANSCRIPT_HEADING = /^(#{1,6})\s+(?:Transcript Lengkap|Complete Transcript)\s*$/iu;
+const TRANSCRIPT_HEADING = /^(#{1,6})\s+(?:\d+(?:\.\d+)*\.[ \t]+)?(?:Transcript Lengkap|Complete Transcript)\s*$/iu;
 
 export function stripTranscriptSection(markdown: string): string {
   const kept: string[] = [];

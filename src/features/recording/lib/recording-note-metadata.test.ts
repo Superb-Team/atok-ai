@@ -7,6 +7,7 @@ import {
   inferRecordingNoteContext,
   isUsefulGroundedTitle,
   replaceDocumentTitle,
+  readDocumentTitle,
 } from "./recording-note-metadata.ts";
 
 const transcript = "Rapat membahas progres Sales Engine dan Content Engine bersama Dendy dan Bintang.";
@@ -130,4 +131,28 @@ test("rejects an ordinal section label as a grounded title", () => {
 
   assert.equal(isUsefulGroundedTitle("Pertanyaan Pertama: Pendekatan Masuk ke Proyek", interview), false);
   assert.equal(isUsefulGroundedTitle("Bagian 2 - Strategi Deployment", interview), false);
+});
+
+
+test("document titles ignore quoted, nested and code-fenced H1 examples", () => {
+  const code = "## Discussion\n\n```markdown\n# Sales Engine and Content Engine\n```\n\n> # Quoted title\n\n- # Nested title";
+  assert.equal(readDocumentTitle(code), "");
+  assert.equal(replaceDocumentTitle(code, "Actual title"), "# Actual title\n\n" + code);
+  assert.equal(deriveRecordingNoteTitle(code, transcript, "Recording - 22:04:33", context, "id"),
+    "Catatan Rekaman — 20 Juli 2026");
+});
+
+test("document title replacement changes only the real H1 and preserves code bytes", () => {
+  const code = "```markdown\n# Original code title\n```\n\n";
+  const source = code + "# **Sales Engine** and Content Engine ###\n\nBody.";
+  assert.equal(readDocumentTitle(source), "Sales Engine and Content Engine");
+  assert.equal(replaceDocumentTitle(source, "Actual title"), code + "# Actual title\n\nBody.");
+});
+
+test("document title replacement supports setext H1 and preserves leading indented code", () => {
+  assert.equal(readDocumentTitle("Sales Engine and Content Engine\n=============================="), "Sales Engine and Content Engine");
+  assert.equal(replaceDocumentTitle("Sales Engine and Content Engine\n==============================\n\nBody", "Actual title"),
+    "# Actual title\n\nBody");
+  const code = "    # Literal code title\n    9. Literal numbered code\n";
+  assert.equal(replaceDocumentTitle(code, "Actual title"), "# Actual title\n\n" + code);
 });

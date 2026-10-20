@@ -130,9 +130,9 @@ RULES:
 - Decisions and Action Items: max 15 items each, one line per item, ONLY things explicitly stated in the transcript. If you notice you are producing a repeating pattern of similar lines, STOP that section immediately
 - If the transcript explicitly explains rationale, trade-offs, constraints, risks, or why an option was preferred, capture it once under "${labels.considerations}". Never invent hidden reasoning, motives, or causal links.
 - Never append meta commentary, disclaimers, or notes about transcript quality or what you excluded — silently skip noise
-- The first line must be a concise H1 describing the actual main topic. Never use generic titles or placeholders such as [Main Topic], [Tanggal], or [Date].
+- The first line must be a concise H1 describing the meeting's main objective across its 2-3 dominant themes, considering the entire source including its final topics. Never use generic titles or placeholders such as [Main Topic], [Tanggal], or [Date].
 - Use the exact H2 headings "${labels.summary}", "${labels.keyPoints}", "${labels.details}", "${labels.considerations}", "${labels.decisions}", and "${labels.actions}" where they have real content.
-- Under "${labels.details}", group the discussion beneath descriptive H3 sub-headings based on actual topics, projects, or people. Never use numbered labels such as "Section 1" or "Part 1".
+- Under "${labels.details}", group the discussion beneath descriptive H3 sub-headings based on actual topics, projects, or people. Use H4 for genuine subtopics within an H3 topic. Leave heading numbering to the application. Never use numbered labels such as "Section 1" or "Part 1".
 - Omit sections with no real content. Never write empty sections or text saying that no items were found.${screenshotRules}
 
 Do not create a "Transcript Lengkap" or "Complete Transcript" section. The canonical transcript is stored separately by the recorder.

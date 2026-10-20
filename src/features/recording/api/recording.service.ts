@@ -71,10 +71,15 @@ export interface AudioSourceArtifact {
 export interface ProcessingJobSummary {
   schemaVersion: number;
   jobId: string;
+  ownerUserId?: string;
+  source?: "import" | "recording";
+  importSourcePath?: string;
+  importGlossary?: string[];
+  importPrepared?: boolean;
   audioPath: string;
   noteTitle: string;
   language: string;
-  status: 'transcribing' | 'extracting' | 'synthesizing' | 'saving' | 'complete' | 'partial' | 'failed';
+  status: 'importing' | 'transcribing' | 'extracting' | 'synthesizing' | 'saving' | 'complete' | 'partial' | 'failed';
   updatedAt: string;
   recordedAt?: string;
   timezone?: string;

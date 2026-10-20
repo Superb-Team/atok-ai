@@ -307,23 +307,33 @@ pub async fn list_processing_manifests(directory: String) -> Result<Vec<Value>, 
         let mut manifests = Vec::new();
         let entries = std::fs::read_dir(&dir)
             .map_err(|error| format!("Read processing manifest directory: {}", error))?;
+        let mut paths = std::collections::BTreeSet::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            let is_manifest = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.ends_with(".processing.json"))
-                .unwrap_or(false);
-            if is_manifest {
-                match load_serialized(&path) {
-                    Ok(Some(manifest)) => manifests.push(manifest),
-                    Ok(None) => {}
-                    Err(error) => tracing::warn!(
-                        "[processing] Skipping invalid manifest '{}': {}",
-                        path.display(),
-                        error
-                    ),
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.ends_with(".processing.json") {
+                paths.insert(path);
+            } else if let Some(primary_name) = name.strip_suffix(".backup") {
+                if primary_name.ends_with(".processing.json") {
+                    // Current durable backups have one extra leading dot; legacy backups do not.
+                    let primary_name = primary_name.strip_prefix('.').unwrap_or(primary_name);
+                    paths.insert(dir.join(primary_name));
                 }
+            }
+        }
+        // Discover backup-only jobs before loading: a crash can occur after the
+        // previous primary was moved aside but before its replacement was published.
+        for path in paths {
+            match load_serialized(&path) {
+                Ok(Some(manifest)) => manifests.push(manifest),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    "[processing] Skipping invalid manifest '{}': {}",
+                    path.display(),
+                    error
+                ),
             }
         }
         manifests.sort_by(|a, b| {
@@ -354,6 +364,29 @@ mod tests {
             "status": status,
             "updatedAt": "2026-07-15T00:00:00Z"
         })
+    }
+
+    #[test]
+    fn import_intent_roundtrips_before_audio_exists() {
+        let dir = temp_dir("import-intent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("imported.mp3");
+        let path = manifest_path(&audio);
+        let mut expected = manifest(&audio, "importing");
+        expected["ownerUserId"] = serde_json::json!("alice");
+        expected["source"] = serde_json::json!("import");
+        expected["importPrepared"] = serde_json::json!(false);
+        expected["importSourcePath"] = serde_json::json!("/original/meeting.wav");
+        expected["importGlossary"] = serde_json::json!(["Siti"]);
+
+        assert!(claim(&audio, "enqueue").unwrap());
+        let saved = save_serialized_with_generation(&path, &expected).unwrap();
+        assert!(release_claim(&audio, "enqueue").unwrap());
+        assert!(!audio.exists());
+        assert_eq!(load_serialized(&path).unwrap(), Some(saved));
+        assert!(claim(&audio, "resume").unwrap());
+        assert!(release_claim(&audio, "resume").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -586,5 +619,56 @@ mod tests {
         second_handle.unlock().unwrap();
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+    #[tokio::test]
+    async fn listing_recovers_backup_only_current_and_legacy_import_intents() {
+        for current_backup in [true, false] {
+            let dir = temp_dir("backup-only-intent");
+            std::fs::create_dir_all(&dir).unwrap();
+            let audio = dir.join("pending-import.mp3");
+            let path = manifest_path(&audio);
+            let expected = manifest(&audio, "importing");
+            save_atomic(&path, &expected).unwrap();
+            let backup = if current_backup {
+                crate::durable_io::backup_path(&path)
+            } else {
+                path.with_extension("json.backup")
+            };
+            std::fs::rename(&path, &backup).unwrap();
+            assert!(!audio.exists());
+            let listed = list_processing_manifests(dir.to_string_lossy().into_owned())
+                .await
+                .unwrap();
+            assert_eq!(listed, vec![expected]);
+            assert!(path.is_file());
+            assert!(!backup.exists());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_deduplicates_primary_and_backup_and_keeps_latest_primary() {
+        let dir = temp_dir("list-dedupe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("take.mp3");
+        let path = manifest_path(&audio);
+        let expected = manifest(&audio, "transcribing");
+        save_atomic(&path, &expected).unwrap();
+        let old = manifest(&audio, "importing");
+        std::fs::write(
+            crate::durable_io::backup_path(&path),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            path.with_extension("json.backup"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        let listed = list_processing_manifests(dir.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![expected]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

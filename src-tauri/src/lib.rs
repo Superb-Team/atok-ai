@@ -13,6 +13,8 @@ mod config;
 mod database;
 mod durable_io;
 mod http_log;
+#[cfg(target_os = "linux")]
+mod linux_graphics;
 mod logging;
 mod mcp_auth;
 mod models;
@@ -223,6 +225,9 @@ async fn get_audio_device_status() -> Result<DeviceStatus, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    let graphics_startup = linux_graphics::configure();
+
     let command_handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         auth::register,
         auth::login,
@@ -261,6 +266,7 @@ pub fn run() {
         agent::agent_create_collection,
         agent::agent_ensure_collection,
         audio_import::import_audio_file,
+        audio_import::resume_audio_import,
         agent::describe_image,
         note_assets::import_note_asset,
         note_assets::capture_screenshot,
@@ -288,7 +294,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_log::Builder::new().skip_logger().build())
-        .setup(|app| {
+        .setup(move |app| {
             match app.path().app_log_dir() {
                 Ok(dir) => {
                     if let Err(error) = logging::init(&dir) {
@@ -298,6 +304,13 @@ pub fn run() {
                 }
                 Err(error) => eprintln!("File logging disabled, no log directory: {error}"),
             }
+            #[cfg(target_os = "linux")]
+            tracing::info!(
+                nvidia_driver_loaded = graphics_startup.nvidia_driver_loaded,
+                explicit_sync_workaround = graphics_startup.explicit_sync_workaround,
+                explicit_sync_override = graphics_startup.explicit_sync_override,
+                "graphics.startup_configured"
+            );
             match config::load_environment(app)? {
                 Some(path) => tracing::info!(path = %path.display(), "config.environment_loaded"),
                 None => tracing::warn!("config.environment_missing"),

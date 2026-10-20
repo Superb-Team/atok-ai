@@ -50,7 +50,7 @@ function repeatedTokenRuns(value: string): RepeatedTokenRun[] {
 function actionSectionLines(markdown: string): string[] | null {
   const lines = markdown.split("\n");
   const start = lines.findIndex((line) =>
-    /^##\s+(?:Action Items|Tindak Lanjut)\s*$/iu.test(line.trim()));
+    /^##\s+(?:\d+(?:\.\d+)*\.[ \t]+)?(?:Action Items|Tindak Lanjut)\s*$/iu.test(line.trim()));
   if (start < 0) return null;
   let end = start + 1;
   while (end < lines.length && !/^##\s+/u.test(lines[end].trim())) end += 1;

@@ -5,6 +5,7 @@ import {
   beginProcessingAttempt,
   createProcessingManifest,
   markProcessingFinished,
+  pauseProcessingForAccount,
   planRerun,
   recordProcessingFailure,
 } from "./manifest-state.ts";
@@ -68,6 +69,25 @@ describe("planRerun", () => {
 });
 
 describe("attempt accounting", () => {
+  it("pauses on account change without losing checkpoints or exhausting the final attempt", () => {
+    const m = manifest({ attempt: 4, transcript: "cached transcript", sections: [cachedSection], error: "logged out", failureKind: "terminal" });
+    pauseProcessingForAccount(m);
+    assert.equal(m.attempt, 3);
+    assert.equal(m.status, "transcribing");
+    assert.equal(m.transcript, "cached transcript");
+    assert.deepEqual(m.sections, [cachedSection]);
+    assert.equal(m.error, undefined);
+    assert.equal(m.failureKind, undefined);
+    pauseProcessingForAccount(m, false);
+    assert.equal(m.attempt, 3);
+  });
+
+  it("resumes unprepared imports at conversion rather than transcription", () => {
+    const m = manifest({ source: "import" as const, importPrepared: false, attempt: 1 });
+    pauseProcessingForAccount(m);
+    assert.equal(m.status, "importing");
+    assert.equal(m.attempt, 0);
+  });
   it("counts attempts and resets the budget on a user retry", () => {
     const m = manifest({ attempt: 3, failureKind: "retryable" });
     beginProcessingAttempt(m, false);

@@ -1,3 +1,4 @@
+import { normalizeNoteMarkdown } from "../../note-generation/lib/note-markdown.ts";
 import { invokeCommand } from "../../../lib/ipc.ts";
 
 import { factualAnchorsIn, linksIn, missingFactualAnchors } from "./factual-anchors.ts";
@@ -37,7 +38,7 @@ export function stripLeadingDocumentTitle(content: string, title: string): strin
  * editable and keep the transcript block byte-for-byte outside the AI call.
  */
 export function splitImmutableTranscript(content: string): ImmutableTranscriptSplit | null {
-  const match = /^(?:#{1,6})\s+(?:Transcript Lengkap|Complete Transcript)\s*$/imu.exec(content);
+  const match = /^(?:#{1,6})\s+(?:\d+(?:\.\d+)*\.[ \t]+)?(?:Transcript Lengkap|Complete Transcript)\s*$/imu.exec(content);
   if (match?.index === undefined) return null;
 
   const editablePrefix = content.slice(0, match.index).trimEnd();
@@ -153,7 +154,8 @@ export async function formatNoteWithAi(input: NoteFormatInput): Promise<string> 
     ? "AI formatting was truncated; the note was not changed"
     : validateFormattedNote(aiContent, formatted);
   if (!firstError) {
-    return split ? `${formatted}\n\n${split.immutableTranscript}` : formatted;
+    const normalized = normalizeNoteMarkdown(formatted, { numberHeadings: true });
+    return split ? `${normalized}\n\n${split.immutableTranscript}` : normalized;
   }
 
   let repair: ChatCompletionResult;
@@ -179,5 +181,6 @@ export async function formatNoteWithAi(input: NoteFormatInput): Promise<string> 
     logger.warn("notes.ai_format_rejected");
     return resolveRepairResult(input.content, aiContent, repaired);
   }
-  return split ? `${repaired}\n\n${split.immutableTranscript}` : repaired;
+  const normalized = normalizeNoteMarkdown(repaired, { numberHeadings: true });
+  return split ? `${normalized}\n\n${split.immutableTranscript}` : normalized;
 }

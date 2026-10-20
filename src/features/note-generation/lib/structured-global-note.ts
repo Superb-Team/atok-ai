@@ -99,10 +99,12 @@ const TITLE_TOPIC_STOP_WORDS = new Set([
 ]);
 
 function titleTopicWords(value: string): Set<string> {
+  const acronyms = new Set((value.match(/\b[A-Z]{2,}\b/gu) ?? []).map(word => word.toLowerCase()));
   return new Set(
     normalizeEvidence(value)
       .match(/[\p{L}\p{N}_-]+/gu)
-      ?.filter((word) => word.length >= 4 && !TITLE_TOPIC_STOP_WORDS.has(word)) ?? [],
+      ?.filter((word) => (word.length >= 4 || acronyms.has(word))
+        && !TITLE_TOPIC_STOP_WORDS.has(word)) ?? [],
   );
 }
 
@@ -242,6 +244,69 @@ function parseTitleEvidence(value: unknown, title: string, source: string): stri
   }
   return evidence;
 }
+
+export function parseStructuredRecordingTitle(raw: string, source: string): string {
+  const value: unknown = JSON.parse(raw);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Recording title must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  expectExactKeys(record, "recording title", ["title", "title_evidence"]);
+  const title = expectPlainString(record.title, "title", LIMITS.title, 8);
+  if (/[*_`[\]#>|]/u.test(title) || !isUsefulGroundedTitle(title, source)) {
+    throw new Error("Recording title is generic or insufficiently grounded");
+  }
+  const sourceWords = new Set(normalizeEvidence(source).match(/[\p{L}\p{N}_-]+/gu) ?? []);
+  const descriptors = new Set(["pengembangan", "rencana", "implementasi", "development", "planning", "implementation", "eksplorasi", "exploration", "koordinasi", "coordination"]);
+  const topicWords = [...titleTopicWords(title)].filter(word => !descriptors.has(word));
+  const acronyms = title.match(/\b[A-Z]{2,}\b/gu) ?? [];
+  if ([...topicWords, ...acronyms.map(word => word.toLowerCase())]
+    .some(word => !sourceWords.has(word))) {
+    throw new Error("Recording title includes a topic absent from the source");
+  }
+  parseTitleEvidence(record.title_evidence, title, source);
+  return title;
+}
+
+// Rebuild lexical evidence from the original source when the model selected
+// semantically related quotes that omit its own title words. The strict title
+// validator still rejects unsupported words and invented project names.
+export function recoverRecordingTitleEvidence(raw: string, source: string): string {
+  const record = JSON.parse(raw) as Record<string, unknown>;
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    throw new Error("Recording title must be an object");
+  }
+  expectExactKeys(record, "recording title", ["title", "title_evidence"]);
+  const title = expectPlainString(record.title, "title", LIMITS.title, 8);
+  const spans: string[] = [];
+  for (const word of titleTopicWords(title)) {
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = new RegExp(`(?<![\\p{L}\\p{N}_-])${escaped}(?![\\p{L}\\p{N}_-])`, "iu").exec(source);
+    if (!match) continue;
+    const span = source.slice(match.index, match.index + 120).split(/[\r\n]/u)[0].trim();
+    if (span.length >= 8 && !spans.includes(span)) spans.push(span);
+    if (spans.length === 3) break;
+  }
+  return parseStructuredRecordingTitle(JSON.stringify({ title, title_evidence: spans }), source);
+}
+
+export const RECORDING_TITLE_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: "recording_title",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        title: { type: "string", minLength: 8, maxLength: 90 },
+        title_evidence: { type: "array", minItems: 2, maxItems: 3,
+          items: { type: "string", minLength: 8, maxLength: 280 } },
+      },
+      required: ["title", "title_evidence"],
+    },
+  },
+} as const;
 
 export function parseStructuredGlobalNote(
   raw: string,

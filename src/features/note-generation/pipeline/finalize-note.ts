@@ -1,4 +1,5 @@
 import { applyAssetMarkers, type TranscriptWithAssets } from "@/features/note-generation/lib/asset-markers";
+import { normalizeNoteMarkdown } from "@/features/note-generation/lib/note-markdown";
 import { stripTranscriptSection } from "@/features/note-generation/lib/canonical-transcript";
 import { stripPlaceholderSections } from "@/features/note-generation/lib/long-form-processing";
 import {
@@ -19,6 +20,7 @@ import {
 } from "@/features/recording/lib/recording-note-metadata";
 import type { EnhancedDraft } from "@/features/note-generation/pipeline/enhance-note";
 import { markStage, type ProcessingRun } from "@/features/note-generation/pipeline/processing-run";
+import { recoverRecordingTitle } from "@/features/note-generation/pipeline/recover-title";
 import { reviewNote } from "@/features/note-generation/pipeline/review-note";
 import { logger } from "@/lib/logger";
 
@@ -69,6 +71,10 @@ export async function finalizeNote(
     content = buildLosslessStructuredFallback(run.noteTitle, markedTranscript, run.lang);
   }
 
+  if (!usedStructuredFallback) {
+    content = await recoverRecordingTitle(content, markedTranscript, run.langName);
+  }
+
   const qualityIssues = assessGeneratedNote(markedTranscript, content, {
     isTruncated: false,
     requireUsefulTitle: true,
@@ -105,7 +111,7 @@ export async function finalizeNote(
     run.lang,
   );
   content = stripTranscriptSection(content);
-  content = replaceDocumentTitle(content, title);
+  content = normalizeNoteMarkdown(replaceDocumentTitle(content, title), { numberHeadings: true });
 
   return { title, content, qualityIssues, processingDegraded, usedStructuredFallback, processingError };
 }

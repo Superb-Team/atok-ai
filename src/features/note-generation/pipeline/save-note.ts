@@ -2,6 +2,7 @@ import { authService } from "@/features/auth/api/auth.service";
 import { NoteConflictError, noteService } from "@/features/notes/api/note.service";
 import { insertRagDocument } from "@/features/note-generation/api/ai";
 import { markProcessingFinished } from "@/features/note-generation/lib/manifest-state";
+import { isPendingRecordingNote } from "@/features/note-generation/lib/pending-recording-note";
 import { shouldPublishRecordingToRag } from "@/features/note-generation/lib/processing-review-policy";
 import type { RecordingNoteContext } from "@/features/recording/lib/recording-note-metadata";
 import { markStage, type ProcessingRun } from "@/features/note-generation/pipeline/processing-run";
@@ -48,20 +49,30 @@ export async function saveGeneratedNote(run: ProcessingRun, note: GeneratedNote)
   const { manifest } = run;
   const tSave = performance.now();
   const user = authService.getUser();
-  if (!user) throw new Error("User not authenticated");
+  if (!user || (manifest.ownerUserId && manifest.ownerUserId !== user.id)) {
+    throw new Error("The recording account changed. Sign in to the original account to resume.");
+  }
 
   const tags = ["voice-recording", "transcription", ...(note.needsReview ? ["needs-review"] : [])];
   manifest.status = "saving";
   await run.persist();
   let noteWasManuallyEdited = false;
+  let noteNeedsUpdate = Boolean(manifest.savedNoteId);
   if (!manifest.savedNoteId) {
     const savedNote = await saveNote(note.title, note.content, tags, user.id, manifest.jobId, run.context);
     manifest.savedNoteId = savedNote.id;
     manifest.savedNoteUpdatedAt = savedNote.updated_at;
+    // The idempotent create can return a placeholder committed before a crash
+    // lost its manifest checkpoint. Replace only its unchanged template.
+    if (savedNote.title !== note.title || savedNote.content !== note.content) {
+      noteNeedsUpdate = isPendingRecordingNote(savedNote, run.noteTitle, run.lang);
+      noteWasManuallyEdited = !noteNeedsUpdate;
+    }
     // Persist the note id before optional indexing so a crash cannot create a
     // duplicate note when this job resumes.
     await run.persist();
-  } else if (manifest.savedNoteUpdatedAt) {
+  }
+  if (noteNeedsUpdate && manifest.savedNoteUpdatedAt) {
     try {
       const savedNote = await noteService.updateNote(manifest.savedNoteId, user.id, {
         title: note.title,
@@ -78,7 +89,7 @@ export async function saveGeneratedNote(run: ProcessingRun, note: GeneratedNote)
         noteId: manifest.savedNoteId,
       });
     }
-  } else {
+  } else if (noteNeedsUpdate) {
     // Older manifests do not contain the version that was originally saved.
     // Updating them blindly could erase a user's later manual edits.
     noteWasManuallyEdited = true;
@@ -110,6 +121,7 @@ export async function saveGeneratedNote(run: ProcessingRun, note: GeneratedNote)
   }
   markStage(run, "save+rag", tSave);
   markStage(run, "total", run.startedAt);
+  if (!noteWasManuallyEdited) manifest.failureNoteId = undefined;
   markProcessingFinished(manifest, {
     usedStructuredFallback: note.usedStructuredFallback,
     processingDegraded: note.processingDegraded,

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { audioImportService } from "@/features/recording/api/audio-import.service";
 import { generateNoteTitle } from "@/features/note-generation/audio-processor.service";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -7,7 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
-import { recordingService } from "@/features/recording/api/recording.service";
+import { authService } from "@/features/auth/api/auth.service";
+import { parseImportRecordingContext, toLocalDateTimeInput } from "@/features/recording/lib/import-recording-context";
+import { errorMessage } from "@/lib/logger";
 import { parseTranscriptionGlossary } from "@/features/recording/lib/transcription-glossary";
 
 interface ImportAudioDialogProps {
@@ -33,10 +35,17 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
     const [title, setTitle] = useState("");
     const [language, setLanguage] = useState("id");
     const [glossaryInput, setGlossaryInput] = useState("");
+    const [recordedAt, setRecordedAt] = useState(() => toLocalDateTimeInput());
+    const [queuedPath, setQueuedPath] = useState("");
+    const submitting = useRef(false);
+    const pickerActive = useRef(false);
+    const [picking, setPicking] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
 
     const reset = () => {
+        setQueuedPath("");
+        setRecordedAt(toLocalDateTimeInput());
         setFilePath("");
         setFileName("");
         setTitle("");
@@ -46,24 +55,32 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
     };
 
     const handlePickFile = async () => {
+        if (pickerActive.current || submitting.current) return;
+        pickerActive.current = true;
+        setPicking(true);
         setError("");
         try {
             const picked = await audioImportService.pickAudioFile();
             if (!picked) return;
 
             const name = picked.split(/[/\\]/).pop() ?? picked;
+            setQueuedPath("");
             setFilePath(picked);
             setFileName(name);
             if (!title.trim()) {
                 setTitle(name.replace(/\.[^.]+$/, ""));
             }
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to open file picker");
+            setError(errorMessage(err));
+        } finally {
+            pickerActive.current = false;
+            setPicking(false);
         }
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (submitting.current || pickerActive.current) return;
         setError("");
 
         if (!filePath) {
@@ -71,47 +88,45 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
             return;
         }
 
+        submitting.current = true;
         setLoading(true);
         try {
-            const audioPath = await audioImportService.importAudioFile(filePath);
-            await recordingService.saveGlossary(
-                audioPath,
-                parseTranscriptionGlossary(glossaryInput),
-            );
-            const noteTitle = title.trim() || generateNoteTitle();
-
-            localStorage.setItem(
-                "audio_to_process",
-                JSON.stringify({ audioPath, noteTitle, language, timestamp: Date.now() }),
-            );
-
+            const user = authService.getUser();
+            if (!user) throw new Error("Sign in before importing audio.");
+            const glossary = parseTranscriptionGlossary(glossaryInput);
+            const context = parseImportRecordingContext(recordedAt, Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+            const audioPath = queuedPath || await audioImportService.allocateImportPath();
+            setQueuedPath(audioPath);
+            await audioImportService.queueImportedAudio(filePath, audioPath, title.trim() || generateNoteTitle(), language,
+                glossary, context, user.id);
             reset();
             onOpenChange(false);
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to import audio file");
+            setError(errorMessage(err));
         } finally {
+            submitting.current = false;
             setLoading(false);
         }
     };
 
     return (
-        <Dialog open={open} onOpenChange={(next) => { if (!loading) { onOpenChange(next); if (!next) reset(); } }}>
-            <DialogContent className="sm:max-w-lg overflow-hidden">
+        <Dialog open={open} onOpenChange={(next) => { if (!loading && !picking) { onOpenChange(next); if (!next) reset(); } }}>
+            <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
                 <DialogHeader>
                     <DialogTitle>Import an audio recording</DialogTitle>
                 </DialogHeader>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
                     {error && (
-                        <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-600 dark:text-red-400 text-sm">
+                        <div role="alert" className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-600 dark:text-red-400 text-sm">
                             {error}
                         </div>
                     )}
 
                     <div className="space-y-2">
-                        <Label>Audio file</Label>
+                        <Label htmlFor="import-file">Audio file</Label>
                         <div className="flex gap-2">
-                            <Button type="button" variant="outline" onClick={handlePickFile} disabled={loading}>
+                            <Button id="import-file" type="button" variant="outline" onClick={handlePickFile} disabled={loading || picking}>
                                 Choose File
                             </Button>
                             <span className="flex items-center text-sm text-neutral-500 dark:text-neutral-400 truncate">
@@ -119,7 +134,7 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
                             </span>
                         </div>
                         <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                            Supports mp3, wav, m4a, flac, aac.
+                            Supports mp3, wav, m4a, flac, aac. Keep the source file available until background import finishes.
                         </p>
                     </div>
 
@@ -132,6 +147,16 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
                             placeholder="Enter note title"
                             disabled={loading}
                         />
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label htmlFor="import-recorded-at">Recording date and time</Label>
+                        <Input id="import-recorded-at" type="datetime-local" value={recordedAt}
+                            onChange={event => setRecordedAt(event.target.value)} disabled={loading} required
+                            aria-describedby="import-date-help" />
+                        <p id="import-date-help" className="text-xs text-muted-foreground">
+                            Set the original meeting time in your timezone ({Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"}).
+                        </p>
                     </div>
 
                     <div className="space-y-2">
@@ -179,13 +204,13 @@ export default function ImportAudioDialog({ open, onOpenChange }: ImportAudioDia
                         <Button
                             type="button"
                             variant="outline"
-                            onClick={() => onOpenChange(false)}
-                            disabled={loading}
+                            onClick={() => { reset(); onOpenChange(false); }}
+                            disabled={loading || picking}
                         >
                             Cancel
                         </Button>
-                        <Button type="submit" disabled={loading || !filePath}>
-                            {loading ? "Importing…" : "Import and transcribe"}
+                        <Button type="submit" disabled={loading || picking || !filePath}>
+                            {loading ? "Queueing…" : "Import and transcribe"}
                         </Button>
                     </div>
                 </form>

@@ -1,10 +1,12 @@
+import { getDocumentHeading, replaceDocumentHeading } from "../../note-generation/lib/note-markdown.ts";
+
 export interface RecordingNoteContext {
   recordedAt: string;
   timezone: string;
 }
 
 const GENERIC_TITLE_PATTERN =
-  /^(?:recording|voice recording|meeting|meeting notes?|progress meeting|catatan|catatan rapat|rapat|rekaman)(?:\s*[-–—:]\s*.*)?$/iu;
+  /^(?:recording|voice recording|meeting|meeting notes?|recording notes?|progress meeting|catatan rekaman|catatan|catatan rapat|rapat|rekaman)(?:\s*[-–—:]\s*.*)?$/iu;
 const PLACEHOLDER_PATTERN =
   /\[(?:tanggal|date|main topic|topic|judul|title)\]|\{(?:tanggal|date|main topic|topic|judul|title)\}|<(?:tanggal|date|main topic|topic|judul|title)>/iu;
 const CONVERSATIONAL_TITLE_PATTERN =
@@ -93,7 +95,7 @@ export function deriveRecordingNoteTitle(
   language: string,
 ): string {
   // Never scrape a body line: a section sub-heading is not the recording's topic.
-  const heading = enhancedText.match(/^#\s+(.+)$/m)?.[1] ?? "";
+  const heading = readDocumentTitle(enhancedText);
   const rawTopic = [heading, cleanTitleCandidate(fallbackTitle)]
     .map(cleanTitleCandidate)
     .find((candidate) => isUsefulGroundedTitle(candidate, transcript))
@@ -106,11 +108,12 @@ export function deriveRecordingNoteTitle(
   return `${capTitle(topic)} — ${date}`;
 }
 
+export function readDocumentTitle(markdown: string): string {
+  return getDocumentHeading(markdown)?.title ?? "";
+}
+
 export function replaceDocumentTitle(markdown: string, title: string): string {
-  if (/^#\s+.+$/m.test(markdown)) {
-    return markdown.replace(/^#\s+.+$/m, `# ${title}`);
-  }
-  return `# ${title}\n\n${markdown.trim()}`;
+  return replaceDocumentHeading(markdown, title);
 }
 
 function wordsIn(value: string): string[] {

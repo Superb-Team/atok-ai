@@ -15,6 +15,7 @@ import {
   createProcessingManifest,
   markDraftAccepted,
   planRerun,
+  pauseProcessingForAccount,
   recordProcessingFailure,
   resolveRecordingContext,
   type RerunPlan,
@@ -22,6 +23,7 @@ import {
 import {
   shouldOpenAiDraftPreview,
   shouldRefreshTranscript,
+  shouldRecoverProcessingJob,
 } from "@/features/note-generation/lib/processing-review-policy";
 import { LANGUAGE_NAMES } from "@/features/note-generation/lib/prompts";
 import { enhanceTranscript } from "@/features/note-generation/pipeline/enhance-note";
@@ -74,6 +76,7 @@ async function processAudioRecordingOnce(
   const startedAt = performance.now();
   const previewOnly = options.previewOnly === true;
   let manifest: ProcessingManifest | null = null;
+  let attemptStarted = false;
   const persist = async () => {
     if (manifest && !previewOnly) await saveProcessingManifest(manifest);
   };
@@ -86,9 +89,18 @@ async function processAudioRecordingOnce(
     const lang = language ?? "id";
     const langName = LANGUAGE_NAMES[lang] || "the same language as the transcript";
     const existing = await loadProcessingManifest(audioPath);
+    const user = authService.getUser();
+    if (!user) throw new Error("User not authenticated");
+    if (existing?.ownerUserId && existing.ownerUserId !== user.id) {
+      throw new Error("This recording belongs to another account.");
+    }
+    if (options.resumeOnly && existing && !shouldRecoverProcessingJob(existing)) {
+      return { noteTitle, enhancedText: "", success: true, outcome: "already_processing" };
+    }
     const resolvedContext = resolveRecordingContext(context, existing, audioPath);
     const activeManifest = existing ?? createProcessingManifest(audioPath, noteTitle, lang, resolvedContext);
     manifest = activeManifest;
+    activeManifest.ownerUserId ??= user.id;
     let rerun: RerunPlan = { repairWithStructuredFallback: false, changed: false };
     if (!existing) {
       await persist();
@@ -111,6 +123,7 @@ async function processAudioRecordingOnce(
     };
 
     beginProcessingAttempt(run.manifest, options.retryFromUser === true);
+    attemptStarted = true;
     await persist();
 
     const refreshTranscript = shouldRefreshTranscript(
@@ -159,7 +172,11 @@ async function processAudioRecordingOnce(
     return { noteTitle: note.title, enhancedText: note.content, success: true, outcome: "note_created" };
   } catch (error) {
     if (manifest) {
-      recordProcessingFailure(manifest, error);
+      if (manifest.ownerUserId && authService.getUser()?.id !== manifest.ownerUserId) {
+        pauseProcessingForAccount(manifest, attemptStarted);
+      } else {
+        recordProcessingFailure(manifest, error);
+      }
       await persistBestEffort();
     }
     return {

@@ -117,6 +117,14 @@ export function clearTranscriptState(manifest: ProcessingManifest): void {
   manifest.sections = [];
 }
 
+export function pauseProcessingForAccount(manifest: ProcessingManifest, attemptStarted = true): void {
+  if (attemptStarted) manifest.attempt = Math.max(0, (manifest.attempt ?? 1) - 1);
+  manifest.status = manifest.source === "import" && manifest.importPrepared === false ? "importing" : "transcribing";
+  manifest.error = undefined;
+  manifest.failureKind = undefined;
+  manifest.nextAttemptAt = undefined;
+}
+
 export function recordProcessingFailure(manifest: ProcessingManifest, error: unknown): void {
   const attempt = manifest.attempt ?? 1;
   manifest.status = "failed";

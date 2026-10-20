@@ -1,6 +1,7 @@
 import { authService } from "@/features/auth/api/auth.service";
 import { evaluateTranscriptIntegrity, transcribeAudio } from "@/features/note-generation/api/ai";
-import { recordProcessingFailure } from "@/features/note-generation/lib/manifest-state";
+import { pauseProcessingForAccount, recordProcessingFailure } from "@/features/note-generation/lib/manifest-state";
+import { pendingRecordingContent } from "@/features/note-generation/lib/pending-recording-note";
 import {
   CURRENT_AI_PIPELINE_VERSION,
   CURRENT_TRANSCRIPTION_PIPELINE_VERSION,
@@ -85,7 +86,11 @@ export async function transcribeRecording(
     markStage(run, "transcribe", tTranscribe);
     return { kind: "transcribed", transcript, requiresReview: integrity.requiresReview, reviewIssues };
   } catch (transcribeError) {
-    recordProcessingFailure(manifest, transcribeError);
+    if (manifest.ownerUserId && authService.getUser()?.id !== manifest.ownerUserId) {
+      pauseProcessingForAccount(manifest);
+    } else {
+      recordProcessingFailure(manifest, transcribeError);
+    }
     await run.persistBestEffort();
     const user = authService.getUser();
     logger.error("note_generation.transcription_failed", {
@@ -93,17 +98,18 @@ export async function transcribeRecording(
       reason: "provider_or_capture_error",
       error: errorMessage(transcribeError),
     });
-    if (!previewOnly && !manifest.failureNoteId) {
-      const failureContent = lang === "id"
-        ? `# ${noteTitle}\n\n## Pemrosesan rekaman tertunda\n\nRekaman sudah tersimpan, tetapi transkripsinya belum selesai. Audio dan status pemrosesan tetap dipertahankan agar dapat dicoba lagi.`
-        : `# ${noteTitle}\n\n## Recording processing pending\n\nThe recording was saved, but transcription did not finish. The audio and processing state were retained so it can be retried.`;
+    if (manifest.source !== "import" && !previewOnly && !manifest.savedNoteId && !manifest.failureNoteId && user && (!manifest.ownerUserId || manifest.ownerUserId === user.id)) {
       const failureNote = await saveNote(
         noteTitle,
-        failureContent,
+        pendingRecordingContent(noteTitle, lang),
         ["voice-recording", "transcription", "needs-review"],
-        user?.id,
+        user.id,
+        manifest.jobId,
+        run.context,
       );
       manifest.failureNoteId = failureNote.id;
+      manifest.savedNoteId = failureNote.id;
+      manifest.savedNoteUpdatedAt = failureNote.updated_at;
       await run.persistBestEffort();
     }
     return {

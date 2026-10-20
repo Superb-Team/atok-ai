@@ -51,7 +51,7 @@ tracing-appender = "0.2"
 tracing-log = "0.2"
 ringbuf = "0.4"
 webrtc-audio-processing = { version = "~0.5", features = ["bundled"], optional = true }
-symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "wav", "flac"] }
+symphonia = { version = "0.5", features = ["mp3", "aac", "alac", "isomp4", "wav", "flac"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

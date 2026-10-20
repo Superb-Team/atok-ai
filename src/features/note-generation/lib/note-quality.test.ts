@@ -168,3 +168,9 @@ test("keeps source-grounded repeated speech instead of treating it as a model lo
     false,
   );
 });
+
+test('numbered action headings retain the same quality checks', () => {
+  const note = '# Sistem Login\n\n## 4. Tindak Lanjut\n\nThis is prose rather than an action list.';
+  assert.ok(assessGeneratedNote(source, note, { isTruncated: false })
+    .some(issue => issue.code === 'malformed_action_items'));
+});

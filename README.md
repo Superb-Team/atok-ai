@@ -1,5 +1,66 @@
 # Atok.ai
 
+## Desktop startup on Linux
+
+Run `pnpm tauri dev` for development. Linux startup checks for the loaded NVIDIA
+kernel driver and a Wayland display before initializing Tauri/GTK. On that
+combination it sets `__NV_DISABLE_EXPLICIT_SYNC=1` inside the app process to
+avoid the WebKitGTK Wayland `Error 71` crash, while keeping GPU rendering.
+This also runs in packaged desktop builds. Other drivers and explicitly selected
+X11 backends retain their existing graphics settings.
+
+The app preserves an existing `__NV_DISABLE_EXPLICIT_SYNC` environment variable,
+including `0` to opt out. It logs the detection and whether it applied the
+workaround as `graphics.startup_configured`. NVIDIA detection uses
+`/sys/module/nvidia` or `/proc/driver/nvidia/version`; if neither is visible,
+the app retains the default behavior. A loaded NVIDIA driver can also be detected
+on hybrid GPU laptops, even when a different GPU renders the app.
+
+For other graphics failures, the upstream troubleshooting options remain
+available through the launch environment:
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=1 pnpm tauri dev
+# Last resort: disables accelerated compositing.
+WEBKIT_DISABLE_COMPOSITING_MODE=1 pnpm tauri dev
+```
+
+Graphics variables must be set before launch, rather than in the project `.env`,
+which loads after GTK initialization. These workarounds do not guarantee support
+for every driver or hardware combination. See
+[Tauri's Linux graphics guidance](https://v2.tauri.app/develop/debug/linux-graphics/).
+
+## Importing meeting audio
+
+Imports support MP3, WAV, M4A (AAC or ALAC), FLAC and AAC. Choose the original
+meeting date/time in your local timezone; the note retains that date rather
+than the conversion date. Language and optional names/terms follow the same
+transcription and note-generation pipeline as a live recording. Imported files
+do not include screen captures or separate microphone/system audio tracks.
+
+The app saves an account-owned queue entry before converting audio. Processing
+continues across page navigation and resumes after restarting and signing in to
+the same account. Keep the source file available until conversion finishes.
+Failed or exhausted jobs appear with a **Retry** action; provider/network errors
+also have a bounded automatic retry policy. Import failures retain their queue
+entry without creating a placeholder note. Converted audio and transcript
+checkpoints are retained for later processing.
+
+Conversion streams decoded packets into an MP3 encoder rather than retaining
+the whole recording as PCM. Existing MP3 input is decoded for validation before
+copying. Corrupt or unsupported packets fail the import rather than silently
+producing a partial recording. Mismatches with a declared frame count are
+rejected; streams without a declared duration cannot reliably identify every
+possible truncation.
+
+Output is staged beside its destination and published without replacing an
+existing file. This requires hard-link support in the app-data filesystem
+(normal Linux/macOS filesystems and NTFS support it; FAT/exFAT do not). Ordinary
+failures clean up staging files and preserve the source. A forced process kill
+can leave a `.atok-import-*.tmp` staging file; a completed output is validated
+and reused when the queue resumes. Tests currently cover Linux; cross-platform
+desktop behavior and real-provider transcription need runtime verification.
+
 ## Frontend structure
 
 ```

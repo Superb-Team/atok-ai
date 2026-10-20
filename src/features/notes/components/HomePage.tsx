@@ -1,3 +1,4 @@
+import { useImportProcessing } from "@/features/recording/components/ImportProcessingProvider";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { noteService } from "@/features/notes/api/note.service";
 import { authService } from "@/features/auth/api/auth.service";
@@ -39,7 +40,9 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [processingNotes, setProcessingNotes] = useState<Set<string>>(new Set());
+  const [recordingProcessingNotes, setProcessingNotes] = useState<Set<string>>(new Set());
+  const imported = useImportProcessing();
+  const processingNotes = new Set([...recordingProcessingNotes, ...imported.titles]);
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [recordingNotice, setRecordingNotice] = useState<string | null>(null);
   const [recordingQualityNotice, setRecordingQualityNotice] = useState<string | null>(null);
@@ -105,9 +108,9 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     }
   }, []);
 
-  useEffect(() => {
-    loadNotes();
+  useEffect(() => { void loadNotes(); }, [loadNotes, imported.revision]);
 
+  useEffect(() => {
     let storageInterval: NodeJS.Timeout | undefined;
 
     // Shared between the event fast path and the localStorage poll so the same
@@ -229,7 +232,7 @@ export default function HomePage({ onNoteClick }: HomePageProps) {
     import('@/features/recording/api/recording.service').then(({ recordingService }) =>
       recordingService.listProcessingJobs().then((jobs) => {
         jobs
-          .filter((job) => shouldRecoverProcessingJob(job))
+          .filter((job) => job.source !== "import" && (!job.ownerUserId || job.ownerUserId === authService.getUser()?.id) && shouldRecoverProcessingJob(job))
           .forEach((job) => {
             const timestamp = Date.parse(job.updatedAt) || Date.now();
             enqueueRecovery(() => startProcessing(
