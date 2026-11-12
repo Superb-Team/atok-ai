@@ -1,5 +1,7 @@
 import { cn } from "@/lib/utils";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { useState } from "react";
 
 export interface SidebarItem {
   key: string;
@@ -18,9 +20,11 @@ interface AppSidebarProps {
 function SidebarButton({
   item,
   active,
+  collapsed,
 }: {
   item: SidebarItem;
   active: boolean;
+  collapsed: boolean;
 }) {
   const Icon = item.icon;
   return (
@@ -32,10 +36,12 @@ function SidebarButton({
       // ring only ever appears for keyboard navigation.
       onMouseDown={(e) => e.preventDefault()}
       aria-current={active ? "page" : undefined}
+      title={collapsed ? item.label : undefined}
       className={cn(
         "group relative flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors duration-150",
         "outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
         "active:scale-[0.985]",
+        collapsed && "justify-center gap-0 px-0",
         active
           ? "bg-sidebar-foreground font-semibold text-sidebar"
           : "font-medium text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -57,44 +63,84 @@ function SidebarButton({
         )}
         strokeWidth={active ? 2 : 1.75}
       />
-      {item.label}
+      <span className={cn("min-w-0 truncate", collapsed && "sr-only")}>{item.label}</span>
     </button>
   );
 }
 
 export function AppSidebar({ items, bottomItems, activeKey, footer }: AppSidebarProps) {
+  const [collapsed, setCollapsed] = useState(false);
+  const CollapseIcon = collapsed ? ChevronRight : ChevronLeft;
+
   return (
     <nav
-      aria-label="Main"
-      className="flex h-full w-[232px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar"
+      aria-label="Main navigation"
+      className={cn(
+        "flex h-full shrink-0 flex-col border-r border-sidebar-border bg-sidebar transition-[width] duration-200 ease-out",
+        collapsed ? "w-[72px]" : "w-[232px]"
+      )}
     >
-      <div className="flex items-center gap-2.5 px-4 pb-5 pt-5">
+      <div
+        className={cn(
+          "flex items-center pb-5 pt-5",
+          collapsed ? "justify-between gap-0 px-2" : "gap-2.5 px-4"
+        )}
+      >
         <img
           src="/logo-atok.png"
           alt=""
           className="h-7 w-7 shrink-0 rounded-md object-contain"
         />
-        <div className="min-w-0 leading-none">
-          <p className="font-display text-[15px] font-semibold tracking-tight text-sidebar-foreground">
-            Atok.ai
-          </p>
-          <p className="mt-1 text-[10px] tracking-wide text-sidebar-foreground/40">Personal workspace</p>
-        </div>
+        {!collapsed && (
+          <div className="min-w-0 leading-none">
+            <p className="font-display text-[15px] font-semibold tracking-tight text-sidebar-foreground">
+              Atok.ai
+            </p>
+            <p className="mt-1 text-[10px] tracking-wide text-sidebar-foreground/40">
+              Personal workspace
+            </p>
+          </div>
+        )}
+        <button
+          type="button"
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!collapsed}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={() => setCollapsed((current) => !current)}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/50 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+        >
+          <CollapseIcon aria-hidden className="h-4 w-4" />
+        </button>
       </div>
 
-      <div className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2.5">
+      <div
+        className={cn(
+          "flex flex-1 flex-col gap-0.5 overflow-y-auto",
+          collapsed ? "px-2" : "px-2.5"
+        )}
+      >
         {items.map((item) => (
-          <SidebarButton key={item.key} item={item} active={item.key === activeKey} />
+          <SidebarButton
+            key={item.key}
+            item={item}
+            active={item.key === activeKey}
+            collapsed={collapsed}
+          />
         ))}
       </div>
 
-      <div className="flex flex-col gap-0.5 px-2.5 pb-3">
+      <div className={cn("flex flex-col gap-0.5 pb-3", collapsed ? "px-2" : "px-2.5")}>
         {bottomItems.map((item) => (
-          <SidebarButton key={item.key} item={item} active={item.key === activeKey} />
+          <SidebarButton
+            key={item.key}
+            item={item}
+            active={item.key === activeKey}
+            collapsed={collapsed}
+          />
         ))}
       </div>
 
-      {footer && (
+      {footer && !collapsed && (
         <div className="border-t border-sidebar-border px-3 py-3">{footer}</div>
       )}
     </nav>
