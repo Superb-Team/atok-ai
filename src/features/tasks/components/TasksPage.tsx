@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { taskService } from '@/features/tasks/api/task.service';
 import { authService } from '@/features/auth/api/auth.service';
 import type { Task as DBTask, TaskPositionUpdate } from '@/features/tasks/types';
+import { buildTaskPositionUpdates, moveTaskAndBuildPositionUpdates } from '@/features/tasks/hooks/task-position-updates';
 import {
   DndContext,
   DragOverlay,
@@ -19,7 +20,6 @@ import {
   useDroppable,
 } from '@dnd-kit/core';
 import {
-  arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
@@ -276,38 +276,27 @@ const TasksPage: React.FC = () => {
 
     const activeIndex = activeColumn.tasks.findIndex(task => task.id === activeId);
     const overIndex = activeColumn.tasks.findIndex(task => task.id === overId);
+    let updates = buildTaskPositionUpdates(columns);
 
     if (activeIndex !== overIndex && activeIndex !== -1 && overIndex !== -1) {
-      setColumns(prev => prev.map(col => {
-        if (col.id === activeColumn.id) {
-          return {
-            ...col,
-            tasks: arrayMove(col.tasks, activeIndex, overIndex)
-          };
-        }
-        return col;
-      }));
+      const reordered = moveTaskAndBuildPositionUpdates(
+        columns,
+        activeColumn.id,
+        activeIndex,
+        overIndex,
+      );
+      setColumns(reordered.columns);
+      updates = reordered.updates;
     }
 
-    await saveTaskPositions();
+    await saveTaskPositions(updates);
     setActiveId(null);
   };
 
-  const saveTaskPositions = async () => {
+  const saveTaskPositions = async (updates: TaskPositionUpdate[]) => {
     try {
       const user = authService.getUser();
       if (!user) return;
-
-      const updates: TaskPositionUpdate[] = [];
-      columns.forEach(col => {
-        col.tasks.forEach((task, index) => {
-          updates.push({
-            id: task.id,
-            position: index,
-            status: col.id
-          });
-        });
-      });
 
       await taskService.updateTaskPositions(user.id, updates);
     } catch (error) {
